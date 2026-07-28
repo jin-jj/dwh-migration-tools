@@ -24,6 +24,8 @@ import static com.google.edwmigration.dumper.application.dumper.connector.snowfl
 
 import com.google.auto.service.AutoService;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Predicate;
+import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
 import com.google.edwmigration.dumper.application.dumper.annotations.RespectsArgumentAssessment;
@@ -46,6 +48,7 @@ import com.google.edwmigration.dumper.application.dumper.task.TaskCategory;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.SnowflakeMetadataDumpFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 
@@ -330,51 +333,30 @@ public class SnowflakeMetadataConnector extends AbstractSnowflakeConnector
     }
     ImmutableList<String> databases = arguments.getDatabases();
     List<String> schemata = arguments.getSchemata();
-
-    if (databases.isEmpty() && schemata.isEmpty()) {
-      AssessmentQuery query = SnowflakePlanner.SHOW_EXTERNAL_TABLES;
-      Task<?> task = convertAssessmentQuery(query, arguments, TaskOptions.DEFAULT);
-      out.add(task);
-      return;
-    }
+    Predicate<String> schemaPredicate = createSchemaPredicate(schemata);
 
     TaskOptions taskOptions = TaskOptions.DEFAULT;
 
-    if (!databases.isEmpty() && schemata.isEmpty()) {
-      for (String item : databases) {
-        String quotedName = identifierNameQuoted(item);
-        AssessmentQuery query = planner.externalTablesInDatabase(quotedName);
-        Task<?> task =
-            new JdbcSelectTask(
-                    query.zipEntryName, query.formatString, TaskCategory.REQUIRED, taskOptions)
-                .withHeaderTransformer(query.transformer());
-        out.add(task);
-        // Next tasks will append to the same file.
-        taskOptions = taskOptions.withWriteMode(WriteMode.APPEND_EXISTING);
+    if (databases.isEmpty()) {
+      AssessmentQuery query = SnowflakePlanner.SHOW_EXTERNAL_TABLES;
+      Task<?> task = convertAssessmentQuery(query, arguments, taskOptions);
+      if (!schemata.isEmpty() && task instanceof AbstractJdbcTask) {
+        ((AbstractJdbcTask<?>) task).withSchemaFilter("schema_name", schemaPredicate);
       }
-    } else if (databases.isEmpty() && !schemata.isEmpty()) {
-      for (String schema : schemata) {
-        String quotedName = identifierNameQuoted(schema);
-        AssessmentQuery query = planner.externalTablesInSchema(quotedName);
-        Task<?> task =
-            new JdbcSelectTask(
-                    query.zipEntryName, query.formatString, TaskCategory.REQUIRED, taskOptions)
-                .withHeaderTransformer(query.transformer());
-        out.add(task);
-        taskOptions = taskOptions.withWriteMode(WriteMode.APPEND_EXISTING);
-      }
+      out.add(task);
     } else {
-      for (String db : databases) {
-        for (String schema : schemata) {
-          String quotedName = identifierNameQuoted(db) + "." + identifierNameQuoted(schema);
-          AssessmentQuery query = planner.externalTablesInSchema(quotedName);
-          Task<?> task =
-              new JdbcSelectTask(
-                      query.zipEntryName, query.formatString, TaskCategory.REQUIRED, taskOptions)
-                  .withHeaderTransformer(query.transformer());
-          out.add(task);
-          taskOptions = taskOptions.withWriteMode(WriteMode.APPEND_EXISTING);
+      for (String database : databases) {
+        String quotedName = identifierNameQuoted(database);
+        AssessmentQuery query = planner.externalTablesInDatabase(quotedName);
+        AbstractJdbcTask<?> task =
+            new JdbcSelectTask(
+                query.zipEntryName, query.formatString, TaskCategory.REQUIRED, taskOptions)
+                .withHeaderTransformer(query.transformer());
+        if (!schemata.isEmpty()) {
+          task.withSchemaFilter("schema_name", schemaPredicate);
         }
+        out.add(task);
+        taskOptions = taskOptions.withWriteMode(WriteMode.APPEND_EXISTING);
       }
     }
   }
@@ -482,28 +464,37 @@ public class SnowflakeMetadataConnector extends AbstractSnowflakeConnector
   }
 
   @VisibleForTesting
-  public static String identifierNameStringLiteral(@Nonnull String databaseName) {
-    if (databaseName.startsWith("\"") && databaseName.endsWith("\"")) {
-      // This is a quoted identifier, it should be matched case-sensitively
-      databaseName = databaseName.substring(1, databaseName.length() - 1);
-    } else {
-      // Unquoted identifiers are stored uppercase, single quotes need to be escaped.
-      databaseName = databaseName.toUpperCase();
-    }
-    databaseName = databaseName.replace("'", "''");
-    return String.format("'%s'", databaseName);
+  public static String identifierNameStringLiteral(@Nonnull String identifierName) {
+    String rawIdentifierString = identifierNameStringRaw(identifierName);
+    String escapedIdentifierSqlLiteral = rawIdentifierString.replace("'", "''");
+    return String.format("'%s'", escapedIdentifierSqlLiteral);
   }
 
   @VisibleForTesting
-  public static String identifierNameQuoted(@Nonnull String databaseName) {
-    if (databaseName.startsWith("\"") && databaseName.endsWith("\"")) {
+  public static String identifierNameQuoted(@Nonnull String identifierName) {
+    String rawIdentifierString = identifierNameStringRaw(identifierName);
+    String escapedIdentifierName = rawIdentifierString.replace("\"", "\"\"");
+    return String.format("\"%s\"", escapedIdentifierName);
+  }
+
+  @Nonnull
+  public static Predicate<String> createSchemaPredicate(@Nonnull List<String> schemata) {
+    if (schemata.isEmpty()) {
+      return Predicates.alwaysTrue();
+    }
+    Set<String> set = schemata.stream().map(SnowflakeMetadataConnector::identifierNameStringRaw)
+        .collect(Collectors.toSet());
+    return input -> input != null && (set.contains(input));
+  }
+
+  private static String identifierNameStringRaw(@Nonnull String identifierName) {
+    if (identifierName.startsWith("\"") && identifierName.endsWith("\"")) {
       // This is a quoted identifier, it should be matched case-sensitively
-      databaseName = databaseName.substring(1, databaseName.length() - 1);
+      identifierName = identifierName.substring(1, identifierName.length() - 1);
     } else {
       // Unquoted identifiers are stored uppercase, single quotes need to be escaped.
-      databaseName = databaseName.toUpperCase();
+      identifierName = identifierName.toUpperCase();
     }
-    databaseName = databaseName.replace("\"", "\"\"");
-    return String.format("\"%s\"", databaseName);
+    return identifierName;
   }
 }

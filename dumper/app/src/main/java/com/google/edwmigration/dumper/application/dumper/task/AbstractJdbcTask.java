@@ -18,6 +18,7 @@ package com.google.edwmigration.dumper.application.dumper.task;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
+import com.google.common.base.Predicate;
 import com.google.common.base.Stopwatch;
 import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.MetadataDumperUsageException;
@@ -63,6 +64,8 @@ public abstract class AbstractJdbcTask<T> extends AbstractTask<T> {
 
   @CheckForNull private Class<? extends Enum<?>> headerClass;
   @CheckForNull private ResultSetTransformer<String[]> headerTransformer;
+  @CheckForNull private String schemaColumnName;
+  @CheckForNull private Predicate<String> schemaPredicate;
 
   public AbstractJdbcTask(@Nonnull String targetPath) {
     super(targetPath);
@@ -87,6 +90,14 @@ public abstract class AbstractJdbcTask<T> extends AbstractTask<T> {
   public AbstractJdbcTask<T> withHeaderTransformer(
       @Nonnull ResultSetTransformer<String[]> headerTransformer) {
     this.headerTransformer = headerTransformer;
+    return this;
+  }
+
+  @Nonnull
+  public AbstractJdbcTask<T> withSchemaFilter(
+      @Nonnull String schemaColumnName, @Nonnull Predicate<String> schemaPredicate) {
+    this.schemaColumnName = schemaColumnName;
+    this.schemaPredicate = schemaPredicate;
     return this;
   }
 
@@ -154,7 +165,17 @@ public abstract class AbstractJdbcTask<T> extends AbstractTask<T> {
     try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
         CSVPrinter printer = format.print(writer)) {
       int columnCount = resultSet.getMetaData().getColumnCount();
+      int schemaColumnIndex = -1;
+      if (schemaColumnName != null && schemaPredicate != null) {
+        schemaColumnIndex = findColumnIndex(resultSet, schemaColumnName);
+      }
       while (resultSet.next()) {
+        if (schemaColumnIndex > 0 && schemaPredicate != null) {
+          String schemaValue = resultSet.getString(schemaColumnIndex);
+          if (schemaValue != null && !schemaPredicate.apply(schemaValue)) {
+            continue;
+          }
+        }
         monitor.count();
         for (int i = 1; i <= columnCount; i++) {
           Object resultItem = resultSet.getObject(i);
@@ -174,6 +195,24 @@ public abstract class AbstractJdbcTask<T> extends AbstractTask<T> {
         }
         printer.println();
       }
+    }
+  }
+
+  private static int findColumnIndex(ResultSet resultSet, String columnName) {
+    try {
+      return resultSet.findColumn(columnName);
+    } catch (SQLException e) {
+      try {
+        int count = resultSet.getMetaData().getColumnCount();
+        for (int i = 1; i <= count; i++) {
+          if (columnName.equalsIgnoreCase(resultSet.getMetaData().getColumnLabel(i))
+              || columnName.equalsIgnoreCase(resultSet.getMetaData().getColumnName(i))) {
+            return i;
+          }
+        }
+      } catch (SQLException ignored) {
+      }
+      return -1;
     }
   }
 
