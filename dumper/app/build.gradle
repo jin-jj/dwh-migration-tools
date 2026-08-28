@@ -110,6 +110,7 @@ dependencies {
     implementation libs.aws.java.sdk.redshift
     implementation libs.aws.java.sdk.redshiftserverless
     implementation libs.aws.java.sdk.cloudwatch
+    implementation libs.databricks.sdk
     implementation(libs.oozie.client) {
         exclude group: 'javax.jms', module: 'jms'
         exclude group: 'junit', module: 'junit'
