@@ -91,6 +91,13 @@ public class DatabricksConnector extends AbstractConnector
     out.add(new DatabricksViewsTask(catalogPredicate, schemaPredicate));
     out.add(new DatabricksTableConstraintsTask(catalogPredicate, schemaPredicate));
     out.add(new DatabricksFunctionsTask(catalogPredicate, schemaPredicate));
+
+    if (arguments.getWarehouse() != null && catalogPredicate.test("hive_metastore")) {
+      out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
+      out.add(new DatabricksHiveMetastoreTablesTask(schemaPredicate));
+      out.add(new DatabricksHiveMetastoreColumnsTask(schemaPredicate));
+      out.add(new DatabricksHiveMetastoreViewsTask(schemaPredicate));
+    }
   }
 
   @Nonnull
