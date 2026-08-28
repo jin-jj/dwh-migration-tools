@@ -15,5 +15,33 @@ driver's manual for details.
 To get started using the Dumper, read
 [the documentation](https://cloud.google.com/bigquery/docs/generate-metadata).
 
+## Supported Connectors
+
+### Databricks Connector
+
+The Databricks connector extracts metadata from Databricks Unity Catalog and legacy Hive Metastore (`hive_metastore`).
+
+#### Prerequisites
+- Workspace URL (e.g. `https://<workspace-host>`).
+- Personal Access Token (PAT) or OAuth token. Can be provided via `--password <token>`, standard Databricks environment variables (`DATABRICKS_HOST`, `DATABRICKS_TOKEN`), or `~/.databrickscfg`.
+- (Optional) SQL Warehouse ID via `--warehouse <id>` to extract legacy `hive_metastore` metadata.
+
+#### Examples
+
+Dump Unity Catalog metadata:
+```bash
+./bin/dwh-dumper --connector databricks --url https://<workspace-host> --password <token>
+```
+
+Dump specific catalogs and schemas:
+```bash
+./bin/dwh-dumper --connector databricks --url https://<workspace-host> --database catalog1,catalog2 --schema schema1,schema2
+```
+
+Dump both Unity Catalog and legacy Hive Metastore:
+```bash
+./bin/dwh-dumper --connector databricks --url https://<workspace-host> --warehouse <warehouse-id>
+```
 
 [BQMS]: https://cloud.google.com/bigquery/docs/migration-intro
+
