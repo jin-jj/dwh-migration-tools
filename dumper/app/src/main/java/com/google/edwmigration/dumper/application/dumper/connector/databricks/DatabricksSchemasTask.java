@@ -50,7 +50,7 @@ class DatabricksSchemasTask extends AbstractDatabricksTask implements SchemataFo
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing schemas to " + getTargetPath())) {
-      List<String> catalogs = getMatchingCatalogs(databricksHandle);
+      List<String> catalogs = fetchMatchingCatalogs(databricksHandle);
       for (String catalogName : catalogs) {
         try {
           for (SchemaInfo schemaInfo : databricksHandle.getClient().schemas().list(catalogName)) {

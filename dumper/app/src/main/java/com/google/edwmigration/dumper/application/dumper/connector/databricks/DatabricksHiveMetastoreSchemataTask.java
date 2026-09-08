@@ -25,7 +25,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
@@ -59,23 +58,28 @@ class DatabricksHiveMetastoreSchemataTask extends AbstractTask<Void> implements 
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore schemas to " + getTargetPath())) {
-      List<List<String>> rows =
-          DatabricksSqlHelper.executeQuery(databricksHandle, "SHOW SCHEMAS IN hive_metastore");
-      for (List<String> row : rows) {
-        if (!row.isEmpty()) {
-          String schemaName = row.get(0);
-          if (schemaName != null && schemaPredicate.test(schemaName)) {
-            monitor.count();
-            printer.printRecord(
-                "hive_metastore",
-                schemaName,
-                /* comment= */ null,
-                /* owner= */ null,
-                /* createdAt= */ null,
-                /* updatedAt= */ null);
-          }
-        }
-      }
+      DatabricksSqlHelper.executeQuery(
+          databricksHandle,
+          "SHOW SCHEMAS IN hive_metastore",
+          row -> {
+            if (!row.isEmpty()) {
+              String schemaName = row.get(0);
+              if (schemaName != null && schemaPredicate.test(schemaName)) {
+                monitor.count();
+                try {
+                  printer.printRecord(
+                      "hive_metastore",
+                      schemaName,
+                      /* comment= */ null,
+                      /* owner= */ null,
+                      /* createdAt= */ null,
+                      /* updatedAt= */ null);
+                } catch (Exception e) {
+                  throw new RuntimeException(e);
+                }
+              }
+            }
+          });
     }
     return null;
   }

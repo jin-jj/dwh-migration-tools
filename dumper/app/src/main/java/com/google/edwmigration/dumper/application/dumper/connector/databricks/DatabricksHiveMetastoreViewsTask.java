@@ -29,7 +29,6 @@ import java.util.List;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
-import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,18 +69,22 @@ class DatabricksHiveMetastoreViewsTask extends AbstractTask<Void> implements Vie
         if (schemaName == null || !schemaPredicate.test(schemaName)) {
           continue;
         }
-        List<List<String>> tableRows =
+        List<List<String>> viewRows =
             DatabricksSqlHelper.executeQuery(
-                databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
-        for (List<String> tableRow : tableRows) {
-          if (tableRow.size() < 2) {
+                databricksHandle,
+                "SHOW VIEWS IN hive_metastore." + DatabricksSqlHelper.escapeIdentifier(schemaName));
+        for (List<String> viewRow : viewRows) {
+          if (viewRow.size() < 2) {
             continue;
           }
-          String tableName = tableRow.get(1);
+          String viewName = viewRow.get(1);
           List<List<String>> createTableRows =
               DatabricksSqlHelper.executeQuery(
                   databricksHandle,
-                  "SHOW CREATE TABLE hive_metastore.`" + schemaName + "`.`" + tableName + "`");
+                  "SHOW CREATE TABLE hive_metastore."
+                      + DatabricksSqlHelper.escapeIdentifier(schemaName)
+                      + "."
+                      + DatabricksSqlHelper.escapeIdentifier(viewName));
           StringBuilder ddlBuilder = new StringBuilder();
           for (List<String> ddlRow : createTableRows) {
             if (!ddlRow.isEmpty() && ddlRow.get(0) != null) {
@@ -89,9 +92,9 @@ class DatabricksHiveMetastoreViewsTask extends AbstractTask<Void> implements Vie
             }
           }
           String ddl = ddlBuilder.toString().trim();
-          if (StringUtils.containsIgnoreCase(ddl, "VIEW")) {
+          if (!ddl.isEmpty()) {
             monitor.count();
-            printer.printRecord("hive_metastore", schemaName, tableName, ddl);
+            printer.printRecord("hive_metastore", schemaName, viewName, ddl);
           }
         }
       }

@@ -53,7 +53,7 @@ abstract class AbstractDatabricksTask extends AbstractTask<Void> {
     this(targetPath, catalogPredicate, schema -> true);
   }
 
-  protected List<String> getMatchingCatalogs(DatabricksHandle handle) {
+  protected List<String> fetchMatchingCatalogs(DatabricksHandle handle) {
     List<String> catalogs = new ArrayList<>();
     try {
       for (CatalogInfo catalogInfo :
@@ -69,7 +69,7 @@ abstract class AbstractDatabricksTask extends AbstractTask<Void> {
     return catalogs;
   }
 
-  protected List<String> getMatchingSchemas(DatabricksHandle handle, String catalogName) {
+  protected List<String> fetchMatchingSchemas(DatabricksHandle handle, String catalogName) {
     List<String> schemas = new ArrayList<>();
     try {
       for (SchemaInfo schemaInfo : handle.getClient().schemas().list(catalogName)) {

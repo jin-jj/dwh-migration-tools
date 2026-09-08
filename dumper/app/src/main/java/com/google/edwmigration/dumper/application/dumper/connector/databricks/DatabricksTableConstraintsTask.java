@@ -57,13 +57,33 @@ class DatabricksTableConstraintsTask extends AbstractDatabricksTask
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing table constraints to " + getTargetPath())) {
-      List<String> catalogs = getMatchingCatalogs(databricksHandle);
+      List<String> catalogs = fetchMatchingCatalogs(databricksHandle);
       for (String catalogName : catalogs) {
-        List<String> schemas = getMatchingSchemas(databricksHandle, catalogName);
+        List<String> schemas = fetchMatchingSchemas(databricksHandle, catalogName);
         for (String schemaName : schemas) {
           try {
-            for (TableInfo tableInfo :
+            for (TableInfo summary :
                 databricksHandle.getClient().tables().list(catalogName, schemaName)) {
+              TableInfo tableInfo = summary;
+              try {
+                String fullName = summary.getFullName();
+                if (fullName == null && summary.getName() != null) {
+                  fullName = catalogName + "." + schemaName + "." + summary.getName();
+                }
+                if (fullName != null) {
+                  TableInfo detailed = databricksHandle.getClient().tables().get(fullName);
+                  if (detailed != null) {
+                    tableInfo = detailed;
+                  }
+                }
+              } catch (Exception e) {
+                logger.debug(
+                    "Failed to get detailed table info for '{}.{}.{}': {}",
+                    catalogName,
+                    schemaName,
+                    summary.getName(),
+                    e.getMessage());
+              }
               Collection<TableConstraint> constraints = tableInfo.getTableConstraints();
               if (constraints != null) {
                 for (TableConstraint constraint : constraints) {

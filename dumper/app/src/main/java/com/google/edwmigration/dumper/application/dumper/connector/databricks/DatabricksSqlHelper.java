@@ -22,8 +22,8 @@ import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
+import java.util.function.Consumer;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,11 +38,26 @@ final class DatabricksSqlHelper {
 
   private DatabricksSqlHelper() {}
 
+  /** Escapes a Databricks SQL identifier using backticks, escaping existing backticks. */
+  @Nonnull
+  public static String escapeIdentifier(@Nonnull String identifier) {
+    return "`" + identifier.replace("`", "``") + "`";
+  }
+
   @Nonnull
   public static List<List<String>> executeQuery(
       @Nonnull DatabricksHandle handle, @Nonnull String sql) {
+    List<List<String>> rows = new ArrayList<>();
+    executeQuery(handle, sql, rows::add);
+    return rows;
+  }
+
+  public static void executeQuery(
+      @Nonnull DatabricksHandle handle,
+      @Nonnull String sql,
+      @Nonnull Consumer<List<String>> rowConsumer) {
     if (!handle.hasWarehouseId()) {
-      return Collections.emptyList();
+      return;
     }
     String warehouseId = handle.getWarehouseId();
     ExecuteStatementRequest request =
@@ -61,10 +76,17 @@ final class DatabricksSqlHelper {
         Thread.sleep(POLL_INTERVAL_MILLIS);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
+        cancelStatementQuietly(handle, statementId);
         throw new RuntimeException("Interrupted while waiting for SQL statement execution", e);
       }
       response = handle.getClient().statementExecution().getStatement(statementId);
       state = response.getStatus() != null ? response.getStatus().getState() : null;
+    }
+
+    if (state == StatementState.PENDING || state == StatementState.RUNNING) {
+      cancelStatementQuietly(handle, statementId);
+      logger.warn("Databricks SQL query timed out after {} ms. Query: {}", MAX_WAIT_MILLIS, sql);
+      return;
     }
 
     if (state != StatementState.SUCCEEDED && state != StatementState.CLOSED) {
@@ -73,13 +95,12 @@ final class DatabricksSqlHelper {
               ? response.getStatus().getError().getMessage()
               : "Unknown error";
       logger.warn("Databricks SQL query failed with state {}: {}. Query: {}", state, errMsg, sql);
-      return Collections.emptyList();
+      return;
     }
 
-    List<List<String>> rows = new ArrayList<>();
     if (response.getResult() != null && response.getResult().getDataArray() != null) {
       for (Collection<String> row : response.getResult().getDataArray()) {
-        rows.add(new ArrayList<>(row));
+        rowConsumer.accept(new ArrayList<>(row));
       }
       Long nextChunk = response.getResult().getNextChunkIndex();
       while (nextChunk != null) {
@@ -90,7 +111,7 @@ final class DatabricksSqlHelper {
                 .getStatementResultChunkN(statementId, nextChunk);
         if (chunk != null && chunk.getDataArray() != null) {
           for (Collection<String> row : chunk.getDataArray()) {
-            rows.add(new ArrayList<>(row));
+            rowConsumer.accept(new ArrayList<>(row));
           }
           nextChunk = chunk.getNextChunkIndex();
         } else {
@@ -98,6 +119,13 @@ final class DatabricksSqlHelper {
         }
       }
     }
-    return rows;
+  }
+
+  private static void cancelStatementQuietly(DatabricksHandle handle, String statementId) {
+    try {
+      handle.getClient().statementExecution().cancelExecution(statementId);
+    } catch (Exception e) {
+      logger.debug("Failed to cancel statement '{}': {}", statementId, e.getMessage());
+    }
   }
 }

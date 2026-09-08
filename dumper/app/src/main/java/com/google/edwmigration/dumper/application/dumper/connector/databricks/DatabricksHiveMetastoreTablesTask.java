@@ -25,7 +25,9 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TablesFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
@@ -69,20 +71,46 @@ class DatabricksHiveMetastoreTablesTask extends AbstractTask<Void> implements Ta
         if (schemaName == null || !schemaPredicate.test(schemaName)) {
           continue;
         }
+        Set<String> viewNames = new HashSet<>();
+        try {
+          List<List<String>> viewRows =
+              DatabricksSqlHelper.executeQuery(
+                  databricksHandle,
+                  "SHOW VIEWS IN hive_metastore."
+                      + DatabricksSqlHelper.escapeIdentifier(schemaName));
+          for (List<String> viewRow : viewRows) {
+            if (viewRow.size() >= 2 && viewRow.get(1) != null) {
+              viewNames.add(viewRow.get(1));
+            }
+          }
+        } catch (Exception e) {
+          logger.debug("Failed to list views for schema '{}': {}", schemaName, e.getMessage());
+        }
+
         List<List<String>> tableRows =
             DatabricksSqlHelper.executeQuery(
-                databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
+                databricksHandle,
+                "SHOW TABLES IN hive_metastore."
+                    + DatabricksSqlHelper.escapeIdentifier(schemaName));
         for (List<String> tableRow : tableRows) {
           if (tableRow.size() >= 2) {
             String tableName = tableRow.get(1);
             boolean isTemp = tableRow.size() > 2 && "true".equalsIgnoreCase(tableRow.get(2));
+            String tableType;
+            if (viewNames.contains(tableName)) {
+              tableType = "VIEW";
+            } else if (isTemp) {
+              tableType = "TEMPORARY";
+            } else {
+              tableType = "MANAGED";
+            }
             monitor.count();
             printer.printRecord(
                 "hive_metastore",
                 schemaName,
                 tableName,
-                isTemp ? "TEMPORARY" : "MANAGED",
-                "DELTA",
+                tableType,
+                /* dataSourceFormat= */ null,
                 /* storageLocation= */ null,
                 /* comment= */ null,
                 /* owner= */ null,

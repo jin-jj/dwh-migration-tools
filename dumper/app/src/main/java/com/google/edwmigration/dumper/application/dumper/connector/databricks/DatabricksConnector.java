@@ -36,6 +36,8 @@ import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDu
 import java.util.List;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Connector for dumping metadata from Databricks Unity Catalog and Hive Metastore. */
 @AutoService({Connector.class, MetadataConnector.class})
@@ -63,6 +65,8 @@ import javax.annotation.Nonnull;
     description = "The list of schemas to dump, separated by commas.")
 public class DatabricksConnector extends AbstractConnector
     implements MetadataConnector, DatabricksMetadataDumpFormat {
+
+  private static final Logger logger = LoggerFactory.getLogger(DatabricksConnector.class);
 
   public static final String CONNECTOR_NAME = "databricks";
 
@@ -92,11 +96,21 @@ public class DatabricksConnector extends AbstractConnector
     out.add(new DatabricksTableConstraintsTask(catalogPredicate, schemaPredicate));
     out.add(new DatabricksFunctionsTask(catalogPredicate, schemaPredicate));
 
-    if (arguments.getWarehouse() != null && catalogPredicate.test("hive_metastore")) {
-      out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
-      out.add(new DatabricksHiveMetastoreTablesTask(schemaPredicate));
-      out.add(new DatabricksHiveMetastoreColumnsTask(schemaPredicate));
-      out.add(new DatabricksHiveMetastoreViewsTask(schemaPredicate));
+    boolean includesHiveMetastore =
+        catalogPredicate.test("hive_metastore")
+            || arguments.getDatabases().stream()
+                .anyMatch(d -> d.equalsIgnoreCase("hive_metastore"));
+    if (includesHiveMetastore) {
+      if (arguments.getWarehouse() != null) {
+        out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
+        out.add(new DatabricksHiveMetastoreTablesTask(schemaPredicate));
+        out.add(new DatabricksHiveMetastoreColumnsTask(schemaPredicate));
+        out.add(new DatabricksHiveMetastoreViewsTask(schemaPredicate));
+      } else if (!arguments.getDatabases().isEmpty()) {
+        logger.warn(
+            "Catalog 'hive_metastore' was requested in --database, but --warehouse was not specified. "
+                + "Legacy Hive Metastore metadata extraction will be skipped.");
+      }
     }
   }
 

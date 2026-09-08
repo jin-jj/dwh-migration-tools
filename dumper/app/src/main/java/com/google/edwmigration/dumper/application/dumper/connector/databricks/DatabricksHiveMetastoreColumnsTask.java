@@ -72,7 +72,9 @@ class DatabricksHiveMetastoreColumnsTask extends AbstractTask<Void> implements C
         }
         List<List<String>> tableRows =
             DatabricksSqlHelper.executeQuery(
-                databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
+                databricksHandle,
+                "SHOW TABLES IN hive_metastore."
+                    + DatabricksSqlHelper.escapeIdentifier(schemaName));
         for (List<String> tableRow : tableRows) {
           if (tableRow.size() < 2) {
             continue;
@@ -81,15 +83,32 @@ class DatabricksHiveMetastoreColumnsTask extends AbstractTask<Void> implements C
           List<List<String>> describeRows =
               DatabricksSqlHelper.executeQuery(
                   databricksHandle,
-                  "DESCRIBE TABLE hive_metastore.`" + schemaName + "`.`" + tableName + "`");
+                  "DESCRIBE TABLE hive_metastore."
+                      + DatabricksSqlHelper.escapeIdentifier(schemaName)
+                      + "."
+                      + DatabricksSqlHelper.escapeIdentifier(tableName));
           int ordinal = 1;
+          boolean inPartitionSection = false;
+          int partitionIndex = 1;
           for (List<String> colRow : describeRows) {
             if (colRow.size() >= 2) {
               String colName = colRow.get(0);
               String dataType = colRow.get(1);
               String comment = colRow.size() > 2 ? colRow.get(2) : null;
-              // Spark DESCRIBE TABLE includes partitioning and metadata headers starting with #
-              if (StringUtils.isBlank(colName) || colName.startsWith("#")) {
+              if (StringUtils.isBlank(colName)) {
+                continue;
+              }
+              if (colName.trim().equalsIgnoreCase("# Partition Information")
+                  || colName.trim().equalsIgnoreCase("# Partitioning")) {
+                inPartitionSection = true;
+                continue;
+              }
+              if (colName.trim().equalsIgnoreCase("# col_name")) {
+                continue;
+              }
+              if (colName.startsWith("#")) {
+                // Any other section header (e.g. # Detailed Table Information) marks the end of
+                // columns
                 break;
               }
               monitor.count();
@@ -98,11 +117,11 @@ class DatabricksHiveMetastoreColumnsTask extends AbstractTask<Void> implements C
                   schemaName,
                   tableName,
                   ordinal++,
-                  colName,
+                  colName.trim(),
                   dataType,
                   /* isNullable= */ true,
                   comment,
-                  /* partitionIndex= */ null);
+                  inPartitionSection ? partitionIndex++ : null);
             }
           }
         }

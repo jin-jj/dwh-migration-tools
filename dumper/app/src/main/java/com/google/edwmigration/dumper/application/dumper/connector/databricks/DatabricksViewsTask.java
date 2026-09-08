@@ -50,9 +50,9 @@ class DatabricksViewsTask extends AbstractDatabricksTask implements ViewsFormat 
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing views to " + getTargetPath())) {
-      List<String> catalogs = getMatchingCatalogs(databricksHandle);
+      List<String> catalogs = fetchMatchingCatalogs(databricksHandle);
       for (String catalogName : catalogs) {
-        List<String> schemas = getMatchingSchemas(databricksHandle, catalogName);
+        List<String> schemas = fetchMatchingSchemas(databricksHandle, catalogName);
         for (String schemaName : schemas) {
           try {
             for (TableInfo tableInfo :

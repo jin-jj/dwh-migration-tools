@@ -50,9 +50,9 @@ class DatabricksTablesTask extends AbstractDatabricksTask implements TablesForma
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing tables to " + getTargetPath())) {
-      List<String> catalogs = getMatchingCatalogs(databricksHandle);
+      List<String> catalogs = fetchMatchingCatalogs(databricksHandle);
       for (String catalogName : catalogs) {
-        List<String> schemas = getMatchingSchemas(databricksHandle, catalogName);
+        List<String> schemas = fetchMatchingSchemas(databricksHandle, catalogName);
         for (String schemaName : schemas) {
           try {
             for (TableInfo tableInfo :

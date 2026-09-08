@@ -270,13 +270,17 @@ public class DatabricksTasksTest {
     TableConstraint tc1 = new TableConstraint().setPrimaryKeyConstraint(pk);
     TableConstraint tc2 = new TableConstraint().setForeignKeyConstraint(fk);
 
-    TableInfo table =
+    TableInfo tableSummary =
+        new TableInfo().setCatalogName("my_catalog").setSchemaName("my_schema").setName("orders");
+    TableInfo tableDetail =
         new TableInfo()
             .setCatalogName("my_catalog")
             .setSchemaName("my_schema")
             .setName("orders")
             .setTableConstraints(Arrays.asList(tc1, tc2));
-    when(tablesAPI.list("my_catalog", "my_schema")).thenReturn(Collections.singletonList(table));
+    when(tablesAPI.list("my_catalog", "my_schema"))
+        .thenReturn(Collections.singletonList(tableSummary));
+    when(tablesAPI.get("my_catalog.my_schema.orders")).thenReturn(tableDetail);
 
     DatabricksTableConstraintsTask task = new DatabricksTableConstraintsTask(c -> true, s -> true);
     MemoryByteSink sink = new MemoryByteSink();
@@ -362,12 +366,25 @@ public class DatabricksTasksTest {
             .setResult(
                 new ResultData()
                     .setDataArray(
+                        Arrays.asList(
+                            Arrays.asList("sales_db", "transactions", "false"),
+                            Arrays.asList("sales_db", "v_active_orders", "false"),
+                            Arrays.asList("sales_db", "temp_orders", "true"))));
+    StatementResponse respViews =
+        new StatementResponse()
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setResult(
+                new ResultData()
+                    .setDataArray(
                         Collections.singletonList(
-                            Arrays.asList("sales_db", "transactions", "false"))));
+                            Arrays.asList("sales_db", "v_active_orders", "false"))));
 
     when(statementExecutionAPI.executeStatement(
             argThat(r -> r != null && r.getStatement().contains("SCHEMAS"))))
         .thenReturn(respSchemas);
+    when(statementExecutionAPI.executeStatement(
+            argThat(r -> r != null && r.getStatement().contains("VIEWS"))))
+        .thenReturn(respViews);
     when(statementExecutionAPI.executeStatement(
             argThat(r -> r != null && r.getStatement().contains("TABLES"))))
         .thenReturn(respTables);
@@ -377,10 +394,121 @@ public class DatabricksTasksTest {
     task.doRun(context, sink, handle);
 
     List<String> lines = readLines(sink);
-    assertEquals(2, lines.size());
+    assertEquals(4, lines.size());
     assertEquals(
         "TableCatalog,TableSchema,TableName,TableType,DataSourceFormat,StorageLocation,Comment,Owner,CreatedAt,UpdatedAt",
         lines.get(0));
-    assertEquals("hive_metastore,sales_db,transactions,MANAGED,DELTA,,,,,", lines.get(1));
+    assertEquals("hive_metastore,sales_db,transactions,MANAGED,,,,,,", lines.get(1));
+    assertEquals("hive_metastore,sales_db,v_active_orders,VIEW,,,,,,", lines.get(2));
+    assertEquals("hive_metastore,sales_db,temp_orders,TEMPORARY,,,,,,", lines.get(3));
+  }
+
+  @Test
+  public void hiveMetastoreViewsTask_writesExpectedCsv() throws Exception {
+    StatementResponse respSchemas =
+        new StatementResponse()
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setResult(
+                new ResultData()
+                    .setDataArray(
+                        Collections.singletonList(Collections.singletonList("sales_db"))));
+    StatementResponse respViews =
+        new StatementResponse()
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setResult(
+                new ResultData()
+                    .setDataArray(
+                        Collections.singletonList(
+                            Arrays.asList("sales_db", "v_active_orders", "false"))));
+    StatementResponse respCreateTable =
+        new StatementResponse()
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setResult(
+                new ResultData()
+                    .setDataArray(
+                        Collections.singletonList(
+                            Collections.singletonList(
+                                "CREATE VIEW v_active_orders AS SELECT * FROM orders WHERE status = 'ACTIVE'"))));
+
+    when(statementExecutionAPI.executeStatement(
+            argThat(r -> r != null && r.getStatement().contains("SCHEMAS"))))
+        .thenReturn(respSchemas);
+    when(statementExecutionAPI.executeStatement(
+            argThat(r -> r != null && r.getStatement().contains("SHOW VIEWS"))))
+        .thenReturn(respViews);
+    when(statementExecutionAPI.executeStatement(
+            argThat(r -> r != null && r.getStatement().contains("SHOW CREATE TABLE"))))
+        .thenReturn(respCreateTable);
+
+    DatabricksHiveMetastoreViewsTask task = new DatabricksHiveMetastoreViewsTask(s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals("TableCatalog,TableSchema,TableName,ViewDefinition", lines.get(0));
+    assertEquals(
+        "hive_metastore,sales_db,v_active_orders,CREATE VIEW v_active_orders AS SELECT * FROM orders WHERE status = 'ACTIVE'",
+        lines.get(1));
+  }
+
+  @Test
+  public void hiveMetastoreColumnsTask_writesExpectedCsv() throws Exception {
+    StatementResponse respSchemas =
+        new StatementResponse()
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setResult(
+                new ResultData()
+                    .setDataArray(
+                        Collections.singletonList(Collections.singletonList("sales_db"))));
+    StatementResponse respTables =
+        new StatementResponse()
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setResult(
+                new ResultData()
+                    .setDataArray(
+                        Collections.singletonList(
+                            Arrays.asList("sales_db", "transactions", "false"))));
+    StatementResponse respDescribe =
+        new StatementResponse()
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setResult(
+                new ResultData()
+                    .setDataArray(
+                        Arrays.asList(
+                            Arrays.asList("order_id", "bigint", "primary id"),
+                            Arrays.asList("amount", "decimal(10,2)", null),
+                            Arrays.asList("", "", ""),
+                            Arrays.asList("# Partition Information", "", ""),
+                            Arrays.asList("# col_name", "data_type", "comment"),
+                            Arrays.asList("dt", "date", "partition date"),
+                            Arrays.asList("# Detailed Table Information", "", ""),
+                            Arrays.asList("Database", "sales_db", ""))));
+
+    when(statementExecutionAPI.executeStatement(
+            argThat(r -> r != null && r.getStatement().contains("SCHEMAS"))))
+        .thenReturn(respSchemas);
+    when(statementExecutionAPI.executeStatement(
+            argThat(r -> r != null && r.getStatement().contains("TABLES"))))
+        .thenReturn(respTables);
+    when(statementExecutionAPI.executeStatement(
+            argThat(r -> r != null && r.getStatement().contains("DESCRIBE TABLE"))))
+        .thenReturn(respDescribe);
+
+    DatabricksHiveMetastoreColumnsTask task = new DatabricksHiveMetastoreColumnsTask(s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(4, lines.size());
+    assertEquals(
+        "TableCatalog,TableSchema,TableName,OrdinalPosition,ColumnName,DataType,IsNullable,Comment,PartitionIndex",
+        lines.get(0));
+    assertEquals(
+        "hive_metastore,sales_db,transactions,1,order_id,bigint,true,primary id,", lines.get(1));
+    assertEquals(
+        "hive_metastore,sales_db,transactions,2,amount,\"decimal(10,2)\",true,,", lines.get(2));
+    assertEquals(
+        "hive_metastore,sales_db,transactions,3,dt,date,true,partition date,1", lines.get(3));
   }
 }
