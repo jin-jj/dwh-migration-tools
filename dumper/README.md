@@ -38,4 +38,9 @@ Dump specific catalogs and schemas:
 ./bin/dwh-dumper --connector databricks --url https://<workspace-host> --warehouse <warehouse-id> --database catalog1,catalog2 --schema schema1,schema2
 ```
 
+Dump all Unity Catalog metadata, skipping legacy Hive Metastore:
+```bash
+./bin/dwh-dumper --connector databricks --url https://<workspace-host> --warehouse <warehouse-id> --skip-hive-metastore
+```
+
 [BQMS]: https://cloud.google.com/bigquery/docs/migration-intro

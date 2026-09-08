@@ -161,8 +161,47 @@ public class DatabricksConnectorTest {
   }
 
   @Test
-  public void getPropertyConstants_returnsEmpty() {
+  public void addTasksTo_withSkipHiveMetastoreFlag_addsOnlyUcTasks() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector",
+            "databricks",
+            "--url",
+            "https://dbc-test.cloud.databricks.com",
+            "--warehouse",
+            "warehouse123",
+            "--skip-hive-metastore");
+    List<Task<?>> tasks = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+
+    assertEquals(9, tasks.size());
+    assertTrue(tasks.get(2) instanceof DatabricksSqlCatalogsTask);
+    assertFalse(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
+  }
+
+  @Test
+  public void addTasksTo_withSkipHiveMetastoreProperty_addsOnlyUcTasks() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector",
+            "databricks",
+            "--url",
+            "https://dbc-test.cloud.databricks.com",
+            "--warehouse",
+            "warehouse123",
+            "-Ddatabricks.skip-hive-metastore=true");
+    List<Task<?>> tasks = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+
+    assertEquals(9, tasks.size());
+    assertFalse(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
+  }
+
+  @Test
+  public void getPropertyConstants_returnsSkipHiveMetastore() {
     assertNotNull(connector.getPropertyConstants());
-    assertEquals(ImmutableList.of(), ImmutableList.copyOf(connector.getPropertyConstants()));
+    assertEquals(
+        ImmutableList.of(DatabricksConnector.DatabricksConnectorProperty.SKIP_HIVE_METASTORE),
+        ImmutableList.copyOf(connector.getPropertyConstants()));
   }
 }

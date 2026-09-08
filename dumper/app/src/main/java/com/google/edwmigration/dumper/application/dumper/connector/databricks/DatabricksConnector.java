@@ -20,12 +20,12 @@ import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksConfig;
 import com.google.auto.service.AutoService;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
 import com.google.edwmigration.dumper.application.dumper.annotations.RespectsInput;
 import com.google.edwmigration.dumper.application.dumper.connector.AbstractConnector;
 import com.google.edwmigration.dumper.application.dumper.connector.Connector;
 import com.google.edwmigration.dumper.application.dumper.connector.ConnectorProperty;
+import com.google.edwmigration.dumper.application.dumper.connector.ConnectorPropertyWithDefault;
 import com.google.edwmigration.dumper.application.dumper.connector.MetadataConnector;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import com.google.edwmigration.dumper.application.dumper.task.DumpMetadataTask;
@@ -64,12 +64,51 @@ import org.slf4j.LoggerFactory;
     order = 500,
     arg = ConnectorArguments.OPT_SCHEMA,
     description = "The list of schemas to dump, separated by commas.")
+@RespectsInput(
+    order = 600,
+    arg = ConnectorArguments.OPT_SKIP_HIVE_METASTORE,
+    description = "Whether to skip dumping legacy Databricks Hive Metastore metadata.")
 public class DatabricksConnector extends AbstractConnector
     implements MetadataConnector, DatabricksMetadataDumpFormat {
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksConnector.class);
 
   public static final String CONNECTOR_NAME = "databricks";
+
+  public enum DatabricksConnectorProperty implements ConnectorPropertyWithDefault {
+    SKIP_HIVE_METASTORE(
+        "databricks.skip-hive-metastore",
+        "Whether to skip dumping legacy Databricks Hive Metastore metadata.",
+        "false");
+
+    private final String name;
+    private final String description;
+    private final String defaultValue;
+
+    DatabricksConnectorProperty(String name, String description, String defaultValue) {
+      this.name = name;
+      this.description = description;
+      this.defaultValue = defaultValue;
+    }
+
+    @Nonnull
+    @Override
+    public String getName() {
+      return name;
+    }
+
+    @Nonnull
+    @Override
+    public String getDescription() {
+      return description;
+    }
+
+    @Nonnull
+    @Override
+    public String getDefaultValue() {
+      return defaultValue;
+    }
+  }
 
   public DatabricksConnector() {
     super(CONNECTOR_NAME);
@@ -101,6 +140,15 @@ public class DatabricksConnector extends AbstractConnector
                   !name.equalsIgnoreCase(AbstractDatabricksSqlTask.SAMPLES)
                       && !name.equalsIgnoreCase(AbstractDatabricksSqlTask.SYSTEM));
     }
+    boolean skipHive =
+        arguments.isSkipHiveMetastore()
+            || Boolean.parseBoolean(
+                arguments.getDefinitionOrDefault(DatabricksConnectorProperty.SKIP_HIVE_METASTORE));
+    if (skipHive) {
+      catalogPredicate =
+          catalogPredicate.and(
+              name -> !name.equalsIgnoreCase(AbstractDatabricksSqlTask.HIVE_METASTORE));
+    }
     Predicate<String> schemaPredicate = arguments.getSchemaPredicate();
 
     out.add(new DatabricksSqlCatalogsTask(catalogPredicate));
@@ -112,9 +160,10 @@ public class DatabricksConnector extends AbstractConnector
     out.add(new DatabricksSqlFunctionsTask(catalogPredicate, schemaPredicate));
 
     boolean includesHiveMetastore =
-        catalogPredicate.test("hive_metastore")
-            || arguments.getDatabases().stream()
-                .anyMatch(d -> d.equalsIgnoreCase("hive_metastore"));
+        !skipHive
+            && (catalogPredicate.test(AbstractDatabricksSqlTask.HIVE_METASTORE)
+                || arguments.getDatabases().stream()
+                    .anyMatch(d -> d.equalsIgnoreCase(AbstractDatabricksSqlTask.HIVE_METASTORE)));
     if (includesHiveMetastore) {
       if (arguments.getWarehouse() != null) {
         out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
@@ -141,7 +190,7 @@ public class DatabricksConnector extends AbstractConnector
 
   @Nonnull
   @Override
-  public Iterable<ConnectorProperty> getPropertyConstants() {
-    return ImmutableList.of();
+  public Class<? extends Enum<? extends ConnectorProperty>> getConnectorProperties() {
+    return DatabricksConnectorProperty.class;
   }
 }
