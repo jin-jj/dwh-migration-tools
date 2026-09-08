@@ -76,6 +76,10 @@ public class DatabricksConnector extends AbstractConnector
   public static final String CONNECTOR_NAME = "databricks";
 
   public enum DatabricksConnectorProperty implements ConnectorPropertyWithDefault {
+    STRATEGY(
+        "databricks.metadata.strategy",
+        "Strategy for extracting Databricks metadata: system-then-catalog (default), catalog-only, or system-only.",
+        "system-then-catalog"),
     SKIP_HIVE_METASTORE(
         "databricks.skip-hive-metastore",
         "Whether to skip dumping legacy Databricks Hive Metastore metadata.",
@@ -110,12 +114,19 @@ public class DatabricksConnector extends AbstractConnector
     }
   }
 
+  private final DatabricksInput inputSource;
+
   public DatabricksConnector() {
-    super(CONNECTOR_NAME);
+    this(CONNECTOR_NAME, DatabricksInput.SYSTEM_THEN_CATALOG);
   }
 
   protected DatabricksConnector(@Nonnull String name) {
+    this(name, DatabricksInput.SYSTEM_THEN_CATALOG);
+  }
+
+  public DatabricksConnector(@Nonnull String name, @Nonnull DatabricksInput inputSource) {
     super(name);
+    this.inputSource = Preconditions.checkNotNull(inputSource, "DatabricksInput cannot be null.");
   }
 
   @Override
@@ -151,13 +162,40 @@ public class DatabricksConnector extends AbstractConnector
     }
     Predicate<String> schemaPredicate = arguments.getSchemaPredicate();
 
-    out.add(new DatabricksSqlCatalogsTask(catalogPredicate));
-    out.add(new DatabricksSqlSchemataTask(catalogPredicate, schemaPredicate));
-    out.add(new DatabricksSqlTablesTask(catalogPredicate, schemaPredicate));
-    out.add(new DatabricksSqlColumnsTask(catalogPredicate, schemaPredicate));
-    out.add(new DatabricksSqlViewsTask(catalogPredicate, schemaPredicate));
-    out.add(new DatabricksSqlTableConstraintsTask(catalogPredicate, schemaPredicate));
-    out.add(new DatabricksSqlFunctionsTask(catalogPredicate, schemaPredicate));
+    DatabricksInput strategy = inputSource;
+    String strategyDef = arguments.getDefinition(DatabricksConnectorProperty.STRATEGY);
+    if (strategyDef != null) {
+      strategy = DatabricksInput.fromString(strategyDef);
+    }
+
+    out.addAll(
+        strategy.tasks(
+            new DatabricksSystemSqlCatalogsTask(catalogPredicate),
+            new DatabricksSqlCatalogsTask(catalogPredicate)));
+    out.addAll(
+        strategy.tasks(
+            new DatabricksSystemSqlSchemataTask(catalogPredicate, schemaPredicate),
+            new DatabricksSqlSchemataTask(catalogPredicate, schemaPredicate)));
+    out.addAll(
+        strategy.tasks(
+            new DatabricksSystemSqlTablesTask(catalogPredicate, schemaPredicate),
+            new DatabricksSqlTablesTask(catalogPredicate, schemaPredicate)));
+    out.addAll(
+        strategy.tasks(
+            new DatabricksSystemSqlColumnsTask(catalogPredicate, schemaPredicate),
+            new DatabricksSqlColumnsTask(catalogPredicate, schemaPredicate)));
+    out.addAll(
+        strategy.tasks(
+            new DatabricksSystemSqlViewsTask(catalogPredicate, schemaPredicate),
+            new DatabricksSqlViewsTask(catalogPredicate, schemaPredicate)));
+    out.addAll(
+        strategy.tasks(
+            new DatabricksSystemSqlTableConstraintsTask(catalogPredicate, schemaPredicate),
+            new DatabricksSqlTableConstraintsTask(catalogPredicate, schemaPredicate)));
+    out.addAll(
+        strategy.tasks(
+            new DatabricksSystemSqlFunctionsTask(catalogPredicate, schemaPredicate),
+            new DatabricksSqlFunctionsTask(catalogPredicate, schemaPredicate)));
 
     boolean includesHiveMetastore =
         !skipHive

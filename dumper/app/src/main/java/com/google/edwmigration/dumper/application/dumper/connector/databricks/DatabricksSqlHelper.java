@@ -20,6 +20,7 @@ import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -57,6 +58,26 @@ final class DatabricksSqlHelper {
       @Nonnull DatabricksHandle handle,
       @Nonnull String sql,
       @Nonnull Consumer<List<String>> rowConsumer) {
+    try {
+      executeQueryOrThrow(handle, sql, rowConsumer);
+    } catch (Exception e) {
+      logger.warn("Databricks SQL query execution failed: {}. Query: {}", e.getMessage(), sql);
+    }
+  }
+
+  @Nonnull
+  public static List<List<String>> executeQueryOrThrow(
+      @Nonnull DatabricksHandle handle, @Nonnull String sql) throws SQLException {
+    List<List<String>> rows = new ArrayList<>();
+    executeQueryOrThrow(handle, sql, rows::add);
+    return rows;
+  }
+
+  public static void executeQueryOrThrow(
+      @Nonnull DatabricksHandle handle,
+      @Nonnull String sql,
+      @Nonnull Consumer<List<String>> rowConsumer)
+      throws SQLException {
     if (!handle.hasWarehouseId()) {
       return;
     }
@@ -89,13 +110,12 @@ final class DatabricksSqlHelper {
           backoffMs *= 2;
           continue;
         }
-        logger.warn("Failed to execute SQL statement: {}. Error: {}", sql, e.getMessage());
-        return;
+        throw new SQLException("Failed to execute SQL statement: " + sql, e);
       }
     }
 
     if (response == null) {
-      return;
+      throw new SQLException("Received null response for SQL statement: " + sql);
     }
 
     String statementId = response.getStatementId();
@@ -114,15 +134,14 @@ final class DatabricksSqlHelper {
         response = handle.getClient().statementExecution().getStatement(statementId);
         state = response.getStatus() != null ? response.getStatus().getState() : null;
       } catch (Exception e) {
-        logger.warn("Failed to get statement status for '{}': {}", statementId, e.getMessage());
-        break;
+        throw new SQLException("Failed to get statement status for '" + statementId + "'", e);
       }
     }
 
     if (state == StatementState.PENDING || state == StatementState.RUNNING) {
       cancelStatementQuietly(handle, statementId);
-      logger.warn("Databricks SQL query timed out after {} ms. Query: {}", MAX_WAIT_MILLIS, sql);
-      return;
+      throw new SQLException(
+          "Databricks SQL query timed out after " + MAX_WAIT_MILLIS + " ms. Query: " + sql);
     }
 
     if (state != StatementState.SUCCEEDED && state != StatementState.CLOSED) {
@@ -130,8 +149,17 @@ final class DatabricksSqlHelper {
           response.getStatus() != null && response.getStatus().getError() != null
               ? response.getStatus().getError().getMessage()
               : "Unknown error";
-      logger.warn("Databricks SQL query failed with state {}: {}. Query: {}", state, errMsg, sql);
-      return;
+      if (errMsg.contains("USE CATALOG on Catalog '")) {
+        int start =
+            errMsg.indexOf("USE CATALOG on Catalog '") + "USE CATALOG on Catalog '".length();
+        int end = errMsg.indexOf("'", start);
+        if (end > start) {
+          String cat = errMsg.substring(start, end);
+          handle.markCatalogInaccessible(cat);
+          logger.info("Marked catalog '{}' as inaccessible due to insufficient privileges.", cat);
+        }
+      }
+      throw new SQLException("Databricks SQL query failed with state " + state + ": " + errMsg);
     }
 
     if (response.getResult() != null && response.getResult().getDataArray() != null) {

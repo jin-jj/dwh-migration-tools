@@ -106,4 +106,35 @@ public class DatabricksSqlHelperTest {
     assertEquals(Collections.singletonList("row1"), rows.get(0));
     assertEquals(Collections.singletonList("row2"), rows.get(1));
   }
+
+  @Test
+  public void executeQueryOrThrow_whenFailed_throwsSQLExceptionAndMarksCatalogInaccessible() {
+    WorkspaceClient client = mock(WorkspaceClient.class);
+    StatementExecutionAPI statementAPI = mock(StatementExecutionAPI.class);
+    when(client.statementExecution()).thenReturn(statementAPI);
+
+    StatementResponse response = new StatementResponse();
+    response.setStatementId("stmt-fail");
+    StatementStatus status = new StatementStatus().setState(StatementState.FAILED);
+    com.databricks.sdk.service.sql.ServiceError error =
+        new com.databricks.sdk.service.sql.ServiceError()
+            .setMessage(
+                "[INSUFFICIENT_PERMISSIONS] Insufficient privileges:\n"
+                    + "User does not have USE CATALOG on Catalog 'dmishyn'");
+    status.setError(error);
+    response.setStatus(status);
+
+    when(statementAPI.executeStatement(any(ExecuteStatementRequest.class))).thenReturn(response);
+
+    DatabricksHandle handle = new DatabricksHandle(client, "wh-1");
+
+    try {
+      DatabricksSqlHelper.executeQueryOrThrow(
+          handle, "SELECT 1 FROM dmishyn.information_schema.tables");
+      org.junit.Assert.fail("Expected SQLException");
+    } catch (Exception e) {
+      org.junit.Assert.assertTrue(e instanceof java.sql.SQLException);
+      org.junit.Assert.assertTrue(handle.isCatalogInaccessible("dmishyn"));
+    }
+  }
 }

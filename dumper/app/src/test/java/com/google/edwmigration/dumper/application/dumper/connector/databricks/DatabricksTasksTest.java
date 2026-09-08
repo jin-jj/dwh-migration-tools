@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -381,5 +382,252 @@ public class DatabricksTasksTest {
     assertEquals(2, lines.size());
     assertEquals("TableCatalog,TableSchema,TableName,ViewDefinition", lines.get(0));
     assertEquals("hive_metastore,hms_schema,v_table,CREATE VIEW v_table AS SELECT 1", lines.get(1));
+  }
+
+  @Test
+  public void systemCatalogsTask_writesExpectedCsv() throws Exception {
+    mockSqlQuery(
+        "system.information_schema.catalogs",
+        Collections.singletonList(
+            Arrays.asList(
+                "my_catalog",
+                "Production data",
+                "alice@example.com",
+                "1600000000000",
+                "1700000000000")));
+
+    DatabricksSystemSqlCatalogsTask task =
+        new DatabricksSystemSqlCatalogsTask(c -> !c.equalsIgnoreCase("samples"));
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals("CatalogName,Comment,Owner,CreatedAt,UpdatedAt", lines.get(0));
+    assertEquals(
+        "my_catalog,Production data,alice@example.com,1600000000000,1700000000000", lines.get(1));
+  }
+
+  @Test
+  public void systemSchemataTask_writesExpectedCsv() throws Exception {
+    mockSqlQuery(
+        "system.information_schema.schemata",
+        Collections.singletonList(
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "Main schema",
+                "bob@example.com",
+                "1600000000000",
+                "1700000000000")));
+
+    DatabricksSystemSqlSchemataTask task =
+        new DatabricksSystemSqlSchemataTask(c -> true, s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals("CatalogName,SchemaName,Comment,Owner,CreatedAt,UpdatedAt", lines.get(0));
+    assertEquals(
+        "my_catalog,my_schema,Main schema,bob@example.com,1600000000000,1700000000000",
+        lines.get(1));
+  }
+
+  @Test
+  public void systemTablesTask_writesExpectedCsv() throws Exception {
+    mockSqlQuery(
+        "system.information_schema.tables",
+        Collections.singletonList(
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "orders",
+                "MANAGED",
+                "DELTA",
+                "s3://warehouse/orders",
+                "orders table",
+                "charlie",
+                "1200",
+                "2200")));
+
+    DatabricksSystemSqlTablesTask task = new DatabricksSystemSqlTablesTask(c -> true, s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals(
+        "TableCatalog,TableSchema,TableName,TableType,DataSourceFormat,StorageLocation,Comment,Owner,CreatedAt,UpdatedAt",
+        lines.get(0));
+    assertEquals(
+        "my_catalog,my_schema,orders,MANAGED,DELTA,s3://warehouse/orders,orders table,charlie,1200,2200",
+        lines.get(1));
+  }
+
+  @Test
+  public void systemColumnsTask_writesExpectedCsv() throws Exception {
+    mockSqlQuery(
+        "system.information_schema.columns",
+        Arrays.asList(
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "orders",
+                "1",
+                "order_id",
+                "bigint",
+                "false",
+                "primary id",
+                ""),
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "orders",
+                "2",
+                "details",
+                "struct<item:string,qty:int>",
+                "true",
+                "",
+                "")));
+
+    DatabricksSystemSqlColumnsTask task = new DatabricksSystemSqlColumnsTask(c -> true, s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(3, lines.size());
+    assertEquals(
+        "TableCatalog,TableSchema,TableName,OrdinalPosition,ColumnName,DataType,IsNullable,Comment,PartitionIndex",
+        lines.get(0));
+    assertEquals("my_catalog,my_schema,orders,1,order_id,bigint,false,primary id,", lines.get(1));
+    assertEquals(
+        "my_catalog,my_schema,orders,2,details,\"struct<item:string,qty:int>\",true,,",
+        lines.get(2));
+  }
+
+  @Test
+  public void systemViewsTask_writesExpectedCsv() throws Exception {
+    mockSqlQuery(
+        "system.information_schema.views",
+        Collections.singletonList(
+            Arrays.asList("my_catalog", "my_schema", "v_orders", "SELECT * FROM orders")));
+
+    DatabricksSystemSqlViewsTask task = new DatabricksSystemSqlViewsTask(c -> true, s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals("TableCatalog,TableSchema,TableName,ViewDefinition", lines.get(0));
+    assertEquals("my_catalog,my_schema,v_orders,SELECT * FROM orders", lines.get(1));
+  }
+
+  @Test
+  public void systemTableConstraintsTask_writesExpectedCsv() throws Exception {
+    mockSqlQuery(
+        "tc.constraint_type = 'PRIMARY KEY'",
+        Collections.singletonList(
+            Arrays.asList("my_catalog", "my_schema", "orders", "pk_orders", "order_id")));
+    mockSqlQuery(
+        "tc.constraint_type = 'FOREIGN KEY'",
+        Collections.singletonList(
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "orders",
+                "fk_customers",
+                "customer_id",
+                "customers",
+                "id")));
+    mockSqlQuery("NOT IN ('PRIMARY KEY', 'FOREIGN KEY')", Collections.emptyList());
+
+    DatabricksSystemSqlTableConstraintsTask task =
+        new DatabricksSystemSqlTableConstraintsTask(c -> true, s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(3, lines.size());
+    assertEquals(
+        "TableCatalog,TableSchema,TableName,ConstraintName,ConstraintType,ConstraintDetails",
+        lines.get(0));
+    assertEquals("my_catalog,my_schema,orders,pk_orders,PRIMARY KEY,order_id", lines.get(1));
+    assertEquals(
+        "my_catalog,my_schema,orders,fk_customers,FOREIGN KEY,customer_id -> customers(id)",
+        lines.get(2));
+  }
+
+  @Test
+  public void systemFunctionsTask_writesExpectedCsv() throws Exception {
+    mockSqlQuery(
+        "system.information_schema.parameters",
+        Collections.singletonList(Arrays.asList("my_catalog", "my_schema", "add_one", "x", "int")));
+    mockSqlQuery(
+        "system.information_schema.routines",
+        Collections.singletonList(
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "add_one",
+                "int",
+                "RETURN x + 1",
+                "SQL",
+                "adds one",
+                "eve")));
+
+    DatabricksSystemSqlFunctionsTask task =
+        new DatabricksSystemSqlFunctionsTask(c -> true, s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals(
+        "FunctionCatalog,FunctionSchema,FunctionName,DataType,InputParams,RoutineDefinition,RoutineLanguage,Comment,Owner",
+        lines.get(0));
+    assertEquals(
+        "my_catalog,my_schema,add_one,int,x int,RETURN x + 1,SQL,adds one,eve", lines.get(1));
+  }
+
+  @Test
+  public void systemTask_whenQueryFails_throwsSQLExceptionAndHandlesException() {
+    StatementResponse response = new StatementResponse();
+    response.setStatementId("stmt-fail");
+    StatementStatus status = new StatementStatus().setState(StatementState.FAILED);
+    com.databricks.sdk.service.sql.ServiceError error =
+        new com.databricks.sdk.service.sql.ServiceError()
+            .setMessage(
+                "[INSUFFICIENT_PERMISSIONS] User does not have USE CATALOG on Catalog 'system'");
+    status.setError(error);
+    response.setStatus(status);
+
+    when(statementAPI.executeStatement(any())).thenReturn(response);
+
+    DatabricksSystemSqlTablesTask task = new DatabricksSystemSqlTablesTask(c -> true, s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+
+    try {
+      task.doRun(context, sink, handle);
+      org.junit.Assert.fail("Expected SQLException");
+    } catch (Exception e) {
+      org.junit.Assert.assertTrue(e instanceof java.sql.SQLException);
+      org.junit.Assert.assertTrue(task.handleException(e));
+    }
+  }
+
+  @Test
+  public void inaccessibleCatalog_isOmittedFromMatchingCatalogs() {
+    handle.markCatalogInaccessible("dmishyn");
+    mockSqlQuery(
+        "SHOW CATALOGS",
+        Arrays.asList(
+            Collections.singletonList("accessible_catalog"), Collections.singletonList("dmishyn")));
+
+    DatabricksSqlTablesTask task = new DatabricksSqlTablesTask(c -> true, s -> true);
+    List<String> catalogs = task.fetchMatchingCatalogs(handle);
+
+    assertEquals(1, catalogs.size());
+    assertEquals("accessible_catalog", catalogs.get(0));
   }
 }

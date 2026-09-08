@@ -1,0 +1,191 @@
+/*
+ * Copyright 2022-2025 Google LLC
+ * Copyright 2013-2021 CompilerWorks
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.google.edwmigration.dumper.application.dumper.connector.databricks;
+
+import com.google.common.io.ByteSink;
+import com.google.edwmigration.dumper.application.dumper.handle.Handle;
+import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
+import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMonitor;
+import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.FunctionsFormat;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
+import javax.annotation.Nonnull;
+import org.apache.commons.csv.CSVPrinter;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/** Dumps function and UDF definitions from Databricks Unity Catalog system tables. */
+class DatabricksSystemSqlFunctionsTask extends AbstractDatabricksSystemSqlTask
+    implements FunctionsFormat {
+
+  private static final Logger logger =
+      LoggerFactory.getLogger(DatabricksSystemSqlFunctionsTask.class);
+
+  DatabricksSystemSqlFunctionsTask(
+      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
+    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  }
+
+  @Override
+  protected Void doRun(TaskRunContext context, @Nonnull ByteSink sink, @Nonnull Handle handle)
+      throws Exception {
+    DatabricksHandle databricksHandle = (DatabricksHandle) handle;
+    logger.info("Writing functions from system tables to '{}'", getTargetPath());
+    try (Writer writer = sink.asCharSink(StandardCharsets.UTF_8).openBufferedStream();
+        CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
+        RecordProgressMonitor monitor =
+            new RecordProgressMonitor(
+                "Writing functions from system tables to " + getTargetPath())) {
+      Map<String, List<String>> paramsByFunction = new HashMap<>();
+      String paramsSql =
+          "SELECT specific_catalog, specific_schema, specific_name, parameter_name, "
+              + "coalesce(full_data_type, data_type) AS data_type "
+              + "FROM system.information_schema.parameters "
+              + "ORDER BY specific_catalog, specific_schema, specific_name, ordinal_position";
+      try {
+        DatabricksSqlHelper.executeQueryOrThrow(
+            databricksHandle,
+            paramsSql,
+            row -> {
+              if (row.size() >= 5) {
+                String catalog = row.get(0);
+                String schema = row.get(1);
+                String name = row.get(2);
+                String paramName = row.get(3);
+                String dataType = row.get(4);
+                if (catalog != null && schema != null && name != null) {
+                  String key = catalog + "." + schema + "." + name;
+                  String formattedParam =
+                      paramName != null && dataType != null
+                          ? paramName + " " + dataType
+                          : (paramName != null ? paramName : dataType);
+                  if (formattedParam != null) {
+                    paramsByFunction
+                        .computeIfAbsent(key, k -> new ArrayList<>())
+                        .add(formattedParam);
+                  }
+                }
+              }
+            });
+      } catch (SQLException e) {
+        logger.debug("Failed to query parameters from system tables: {}", e.getMessage());
+      }
+
+      String sql =
+          "SELECT routine_catalog, routine_schema, routine_name, "
+              + "coalesce(full_data_type, data_type) AS data_type, "
+              + "routine_definition, external_language, comment, created_by "
+              + "FROM system.information_schema.routines "
+              + "ORDER BY routine_catalog, routine_schema, routine_name";
+      AtomicBoolean success = new AtomicBoolean(false);
+      try {
+        DatabricksSqlHelper.executeQueryOrThrow(
+            databricksHandle,
+            sql,
+            row -> {
+              success.set(true);
+              if (row.size() >= 3) {
+                String catalogName = row.get(0);
+                String schemaName = row.get(1);
+                if (catalogName != null
+                    && schemaName != null
+                    && catalogPredicate.test(catalogName)
+                    && schemaPredicate.test(schemaName)
+                    && !databricksHandle.isCatalogInaccessible(catalogName)) {
+                  monitor.count();
+                  String routineName = row.get(2);
+                  String key = catalogName + "." + schemaName + "." + routineName;
+                  List<String> params = paramsByFunction.get(key);
+                  String inputParams =
+                      params != null && !params.isEmpty() ? StringUtils.join(params, ", ") : null;
+                  try {
+                    printer.printRecord(
+                        row.get(0),
+                        row.get(1),
+                        row.get(2),
+                        row.size() > 3 ? row.get(3) : null,
+                        inputParams,
+                        row.size() > 4 ? row.get(4) : null,
+                        row.size() > 5 ? row.get(5) : null,
+                        row.size() > 6 ? row.get(6) : null,
+                        row.size() > 7 ? row.get(7) : null);
+                  } catch (Exception e) {
+                    throw new RuntimeException("Failed to write function record", e);
+                  }
+                }
+              }
+            });
+      } catch (SQLException e) {
+        String fallbackSql =
+            "SELECT routine_catalog, routine_schema, routine_name, "
+                + "coalesce(full_data_type, data_type) AS data_type, "
+                + "routine_definition, external_language "
+                + "FROM system.information_schema.routines "
+                + "ORDER BY routine_catalog, routine_schema, routine_name";
+        try {
+          DatabricksSqlHelper.executeQueryOrThrow(
+              databricksHandle,
+              fallbackSql,
+              row -> {
+                success.set(true);
+                if (row.size() >= 3) {
+                  String catalogName = row.get(0);
+                  String schemaName = row.get(1);
+                  if (catalogName != null
+                      && schemaName != null
+                      && catalogPredicate.test(catalogName)
+                      && schemaPredicate.test(schemaName)
+                      && !databricksHandle.isCatalogInaccessible(catalogName)) {
+                    monitor.count();
+                    String routineName = row.get(2);
+                    String key = catalogName + "." + schemaName + "." + routineName;
+                    List<String> params = paramsByFunction.get(key);
+                    String inputParams =
+                        params != null && !params.isEmpty() ? StringUtils.join(params, ", ") : null;
+                    try {
+                      printer.printRecord(
+                          row.get(0),
+                          row.get(1),
+                          row.get(2),
+                          row.size() > 3 ? row.get(3) : null,
+                          inputParams,
+                          row.size() > 4 ? row.get(4) : null,
+                          row.size() > 5 ? row.get(5) : null,
+                          null,
+                          null);
+                    } catch (Exception ex) {
+                      throw new RuntimeException("Failed to write function record", ex);
+                    }
+                  }
+                }
+              });
+        } catch (SQLException ex) {
+          throw e;
+        }
+      }
+    }
+    return null;
+  }
+}

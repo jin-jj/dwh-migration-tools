@@ -63,7 +63,10 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
     for (List<String> row : rows) {
       if (!row.isEmpty()) {
         String cat = row.get(0);
-        if (cat != null && catalogPredicate.test(cat) && !cat.equalsIgnoreCase(HIVE_METASTORE)) {
+        if (cat != null
+            && catalogPredicate.test(cat)
+            && !cat.equalsIgnoreCase(HIVE_METASTORE)
+            && !handle.isCatalogInaccessible(cat)) {
           result.add(cat);
         }
       }

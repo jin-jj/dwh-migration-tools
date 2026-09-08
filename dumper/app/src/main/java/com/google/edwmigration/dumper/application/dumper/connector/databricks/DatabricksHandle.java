@@ -20,6 +20,9 @@ import com.databricks.sdk.WorkspaceClient;
 import com.google.common.base.Preconditions;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 import javax.annotation.Nonnull;
 
 /** Handle for Databricks SQL Warehouse metadata dumper. */
@@ -27,6 +30,8 @@ public class DatabricksHandle implements Handle {
 
   private final WorkspaceClient client;
   private final String warehouseId;
+
+  private final Set<String> inaccessibleCatalogs = Collections.synchronizedSet(new HashSet<>());
 
   public DatabricksHandle(@Nonnull WorkspaceClient client, @Nonnull String warehouseId) {
     this.client = Preconditions.checkNotNull(client, "WorkspaceClient cannot be null.");
@@ -45,6 +50,14 @@ public class DatabricksHandle implements Handle {
 
   public boolean hasWarehouseId() {
     return warehouseId != null && !warehouseId.isEmpty();
+  }
+
+  public void markCatalogInaccessible(@Nonnull String catalog) {
+    inaccessibleCatalogs.add(catalog.toLowerCase());
+  }
+
+  public boolean isCatalogInaccessible(@Nonnull String catalog) {
+    return inaccessibleCatalogs.contains(catalog.toLowerCase());
   }
 
   @Override

@@ -21,6 +21,20 @@ To get started using the Dumper, read
 
 The Databricks connector extracts metadata from Databricks Unity Catalog and legacy Hive Metastore (`hive_metastore`) using Databricks SQL Warehouse queries, avoiding HTTP 429 rate limiting on large environments.
 
+#### Extraction Strategy
+
+By default, the connector attempts to query global Unity Catalog system tables (`system.information_schema.*`) first for fast, single-query metadata extraction across all catalogs. If system tables are unavailable or permissions are insufficient, it automatically falls back to per-catalog `<catalog>.information_schema.*` queries.
+
+You can configure the extraction strategy via `-Ddatabricks.metadata.strategy=<STRATEGY>` or by using dedicated connector names:
+
+| Strategy / Connector | Description |
+|---|---|
+| `SYSTEM_THEN_CATALOG` (default) / `databricks` | Query `system.information_schema` first; fall back to per-catalog queries if system table queries fail. |
+| `SYSTEM_ONLY` / `databricks-system-metadata` | Only query `system.information_schema` (fails if system tables are unavailable). |
+| `CATALOG_ONLY` / `databricks-catalog-metadata` | Directly query per-catalog `<catalog>.information_schema` without checking `system.information_schema`. |
+
+If per-catalog queries encounter catalogs where the user lacks `USE CATALOG` permission, the connector automatically skips them for subsequent entity queries to avoid repetitive permission errors.
+
 #### Prerequisites
 - Workspace URL (e.g. `https://<workspace-host>`).
 - Personal Access Token (PAT) or OAuth token. Can be provided via `--password <token>`, standard Databricks environment variables (`DATABRICKS_HOST`, `DATABRICKS_TOKEN`), or `~/.databrickscfg`.
@@ -28,9 +42,19 @@ The Databricks connector extracts metadata from Databricks Unity Catalog and leg
 
 #### Examples
 
-Dump metadata using Databricks SQL Warehouse:
+Dump metadata using Databricks SQL Warehouse (default: system tables with fallback to per-catalog):
 ```bash
 ./bin/dwh-dumper --connector databricks --url https://<workspace-host> --password <token> --warehouse <warehouse-id>
+```
+
+Dump metadata using only system tables:
+```bash
+./bin/dwh-dumper --connector databricks-system-metadata --url https://<workspace-host> --warehouse <warehouse-id>
+```
+
+Dump metadata using only per-catalog queries:
+```bash
+./bin/dwh-dumper --connector databricks-catalog-metadata --url https://<workspace-host> --warehouse <warehouse-id>
 ```
 
 Dump specific catalogs and schemas:
@@ -44,3 +68,4 @@ Dump all Unity Catalog metadata, skipping legacy Hive Metastore:
 ```
 
 [BQMS]: https://cloud.google.com/bigquery/docs/migration-intro
+
