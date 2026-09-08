@@ -53,7 +53,7 @@ class DatabricksSystemSqlCatalogsTask extends AbstractDatabricksSystemSqlTask
             new RecordProgressMonitor(
                 "Writing catalogs from system tables to " + getTargetPath())) {
       String sql =
-          "SELECT catalog_name, comment, owner, "
+          "SELECT catalog_name, comment, catalog_owner, "
               + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
               + "FROM system.information_schema.catalogs ORDER BY catalog_name";
       AtomicBoolean success = new AtomicBoolean(false);
@@ -84,7 +84,7 @@ class DatabricksSystemSqlCatalogsTask extends AbstractDatabricksSystemSqlTask
             });
       } catch (SQLException e) {
         String fallbackSql =
-            "SELECT catalog_name, comment, owner, created, last_altered "
+            "SELECT catalog_name, comment, catalog_owner, created, last_altered "
                 + "FROM system.information_schema.catalogs ORDER BY catalog_name";
         try {
           DatabricksSqlHelper.executeQueryOrThrow(
