@@ -24,6 +24,7 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.FunctionsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
@@ -54,31 +55,58 @@ class DatabricksFunctionsTask extends AbstractDatabricksTask implements Function
       for (String catalogName : catalogs) {
         List<String> schemas = fetchMatchingSchemas(databricksHandle, catalogName);
         for (String schemaName : schemas) {
-          try {
-            for (FunctionInfo f :
-                databricksHandle.getClient().functions().list(catalogName, schemaName)) {
-              monitor.count();
-              String dataType = f.getFullDataType();
-              if (dataType == null && f.getDataType() != null) {
-                dataType = f.getDataType().name();
+          long backoffMs = getInitialRetryBackoffMs();
+          for (int attempt = 1; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+            List<FunctionInfo> functions = new ArrayList<>();
+            try {
+              databricksHandle.acquirePermit();
+              for (FunctionInfo f :
+                  databricksHandle.getClient().functions().list(catalogName, schemaName)) {
+                functions.add(f);
               }
-              printer.printRecord(
-                  f.getCatalogName(),
-                  f.getSchemaName(),
-                  f.getName(),
-                  dataType,
-                  f.getInputParams() != null ? f.getInputParams().toString() : null,
-                  f.getRoutineDefinition(),
-                  f.getExternalLanguage(),
-                  f.getComment(),
-                  f.getOwner());
+              for (FunctionInfo f : functions) {
+                monitor.count();
+                String dataType = f.getFullDataType();
+                if (dataType == null && f.getDataType() != null) {
+                  dataType = f.getDataType().name();
+                }
+                printer.printRecord(
+                    f.getCatalogName(),
+                    f.getSchemaName(),
+                    f.getName(),
+                    dataType,
+                    f.getInputParams() != null ? f.getInputParams().toString() : null,
+                    f.getRoutineDefinition(),
+                    f.getExternalLanguage(),
+                    f.getComment(),
+                    f.getOwner());
+              }
+              break;
+            } catch (Exception e) {
+              if (isRateLimited(e) && attempt < MAX_RATE_LIMIT_RETRIES) {
+                logger.warn(
+                    "Rate limited while listing functions for schema '{}.{}'. Retrying in {}ms (attempt {}/{})",
+                    catalogName,
+                    schemaName,
+                    backoffMs,
+                    attempt,
+                    MAX_RATE_LIMIT_RETRIES);
+                try {
+                  Thread.sleep(backoffMs);
+                } catch (InterruptedException ie) {
+                  Thread.currentThread().interrupt();
+                  throw new RuntimeException("Interrupted during rate limit backoff", ie);
+                }
+                backoffMs *= 2;
+                continue;
+              }
+              logger.warn(
+                  "Failed to list functions for schema '{}.{}': {}",
+                  catalogName,
+                  schemaName,
+                  e.getMessage());
+              break;
             }
-          } catch (Exception e) {
-            logger.warn(
-                "Failed to list functions for schema '{}.{}': {}",
-                catalogName,
-                schemaName,
-                e.getMessage());
           }
         }
       }

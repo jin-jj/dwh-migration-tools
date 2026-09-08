@@ -18,11 +18,15 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.databricks.sdk.WorkspaceClient;
+import com.databricks.sdk.core.DatabricksError;
 import com.databricks.sdk.service.catalog.CatalogInfo;
 import com.databricks.sdk.service.catalog.CatalogsAPI;
 import com.databricks.sdk.service.catalog.ColumnInfo;
@@ -327,6 +331,94 @@ public class DatabricksTasksTest {
         "FunctionCatalog,FunctionSchema,FunctionName,DataType,InputParams,RoutineDefinition,RoutineLanguage,Comment,Owner",
         lines.get(0));
     assertEquals("my_catalog,my_schema,add_one,int,,RETURN x + 1,SQL,adds one,david", lines.get(1));
+  }
+
+  @Test
+  public void catalogsTask_filtersSamplesAndSystemCatalogs() throws Exception {
+    CatalogInfo cat1 = new CatalogInfo().setName("my_catalog");
+    CatalogInfo cat2 = new CatalogInfo().setName("samples");
+    CatalogInfo cat3 = new CatalogInfo().setName("system");
+    when(catalogsAPI.list(any(ListCatalogsRequest.class)))
+        .thenReturn(Arrays.asList(cat1, cat2, cat3));
+
+    DatabricksCatalogsTask task = new DatabricksCatalogsTask(c -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals("CatalogName,Comment,Owner,CreatedAt,UpdatedAt", lines.get(0));
+    assertEquals("my_catalog,,,,", lines.get(1));
+  }
+
+  @Test
+  public void tableConstraintsTask_skipsViews() throws Exception {
+    CatalogInfo cat = new CatalogInfo().setName("my_catalog");
+    when(catalogsAPI.list(any(ListCatalogsRequest.class)))
+        .thenReturn(Collections.singletonList(cat));
+    SchemaInfo schema = new SchemaInfo().setCatalogName("my_catalog").setName("my_schema");
+    when(schemasAPI.list("my_catalog")).thenReturn(Collections.singletonList(schema));
+
+    TableInfo viewSummary =
+        new TableInfo()
+            .setCatalogName("my_catalog")
+            .setSchemaName("my_schema")
+            .setName("v_orders")
+            .setTableType(TableType.VIEW);
+    when(tablesAPI.list("my_catalog", "my_schema"))
+        .thenReturn(Collections.singletonList(viewSummary));
+
+    DatabricksTableConstraintsTask task = new DatabricksTableConstraintsTask(c -> true, s -> true);
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    verify(tablesAPI, never()).get(anyString());
+    List<String> lines = readLines(sink);
+    assertEquals(1, lines.size());
+    assertEquals(
+        "TableCatalog,TableSchema,TableName,ConstraintName,ConstraintType,ConstraintDetails",
+        lines.get(0));
+  }
+
+  @Test
+  public void functionsTask_retriesOnRateLimit() throws Exception {
+    System.setProperty(AbstractDatabricksTask.RETRY_BACKOFF_PROPERTY, "10");
+    try {
+      CatalogInfo cat = new CatalogInfo().setName("my_catalog");
+      when(catalogsAPI.list(any(ListCatalogsRequest.class)))
+          .thenReturn(Collections.singletonList(cat));
+      SchemaInfo schema = new SchemaInfo().setCatalogName("my_catalog").setName("my_schema");
+      when(schemasAPI.list("my_catalog")).thenReturn(Collections.singletonList(schema));
+
+      FunctionInfo fn =
+          new FunctionInfo()
+              .setCatalogName("my_catalog")
+              .setSchemaName("my_schema")
+              .setName("add_one")
+              .setFullDataType("int")
+              .setRoutineDefinition("RETURN x + 1")
+              .setExternalLanguage("SQL")
+              .setComment("adds one")
+              .setOwner("david");
+      when(functionsAPI.list("my_catalog", "my_schema"))
+          .thenThrow(
+              new DatabricksError("TOO_MANY_REQUESTS", "Current request has to be retried", 429))
+          .thenReturn(Collections.singletonList(fn));
+
+      DatabricksFunctionsTask task = new DatabricksFunctionsTask(c -> true, s -> true);
+      MemoryByteSink sink = new MemoryByteSink();
+      task.doRun(context, sink, handle);
+
+      List<String> lines = readLines(sink);
+      assertEquals(2, lines.size());
+      assertEquals(
+          "FunctionCatalog,FunctionSchema,FunctionName,DataType,InputParams,RoutineDefinition,RoutineLanguage,Comment,Owner",
+          lines.get(0));
+      assertEquals(
+          "my_catalog,my_schema,add_one,int,,RETURN x + 1,SQL,adds one,david", lines.get(1));
+    } finally {
+      System.clearProperty(AbstractDatabricksTask.RETRY_BACKOFF_PROPERTY);
+    }
   }
 
   @Test

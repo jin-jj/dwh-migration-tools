@@ -54,24 +54,47 @@ class DatabricksViewsTask extends AbstractDatabricksTask implements ViewsFormat 
       for (String catalogName : catalogs) {
         List<String> schemas = fetchMatchingSchemas(databricksHandle, catalogName);
         for (String schemaName : schemas) {
-          try {
-            for (TableInfo tableInfo :
-                databricksHandle.getClient().tables().list(catalogName, schemaName)) {
-              if (tableInfo.getViewDefinition() != null) {
-                monitor.count();
-                printer.printRecord(
-                    tableInfo.getCatalogName(),
-                    tableInfo.getSchemaName(),
-                    tableInfo.getName(),
-                    tableInfo.getViewDefinition());
+          long backoffMs = getInitialRetryBackoffMs();
+          for (int attempt = 1; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+            try {
+              databricksHandle.acquirePermit();
+              for (TableInfo tableInfo :
+                  databricksHandle.getClient().tables().list(catalogName, schemaName)) {
+                if (tableInfo.getViewDefinition() != null) {
+                  monitor.count();
+                  printer.printRecord(
+                      tableInfo.getCatalogName(),
+                      tableInfo.getSchemaName(),
+                      tableInfo.getName(),
+                      tableInfo.getViewDefinition());
+                }
               }
+              break;
+            } catch (Exception e) {
+              if (isRateLimited(e) && attempt < MAX_RATE_LIMIT_RETRIES) {
+                logger.warn(
+                    "Rate limited while listing views for schema '{}.{}'. Retrying in {}ms (attempt {}/{})",
+                    catalogName,
+                    schemaName,
+                    backoffMs,
+                    attempt,
+                    MAX_RATE_LIMIT_RETRIES);
+                try {
+                  Thread.sleep(backoffMs);
+                } catch (InterruptedException ie) {
+                  Thread.currentThread().interrupt();
+                  throw new RuntimeException("Interrupted during rate limit backoff", ie);
+                }
+                backoffMs *= 2;
+                continue;
+              }
+              logger.warn(
+                  "Failed to list views for schema '{}.{}': {}",
+                  catalogName,
+                  schemaName,
+                  e.getMessage());
+              break;
             }
-          } catch (Exception e) {
-            logger.warn(
-                "Failed to list views for schema '{}.{}': {}",
-                catalogName,
-                schemaName,
-                e.getMessage());
           }
         }
       }

@@ -86,6 +86,13 @@ public class DatabricksConnector extends AbstractConnector
     out.add(new FormatTask(FORMAT_NAME));
 
     Predicate<String> catalogPredicate = arguments.getDatabasePredicate();
+    if (arguments.getDatabases().isEmpty()) {
+      catalogPredicate =
+          catalogPredicate.and(
+              name ->
+                  !name.equalsIgnoreCase(AbstractDatabricksTask.SAMPLES)
+                      && !name.equalsIgnoreCase(AbstractDatabricksTask.SYSTEM));
+    }
     Predicate<String> schemaPredicate = arguments.getSchemaPredicate();
 
     out.add(new DatabricksCatalogsTask(catalogPredicate));

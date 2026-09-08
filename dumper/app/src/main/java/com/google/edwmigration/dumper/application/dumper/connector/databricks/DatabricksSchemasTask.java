@@ -52,22 +52,44 @@ class DatabricksSchemasTask extends AbstractDatabricksTask implements SchemataFo
             new RecordProgressMonitor("Writing schemas to " + getTargetPath())) {
       List<String> catalogs = fetchMatchingCatalogs(databricksHandle);
       for (String catalogName : catalogs) {
-        try {
-          for (SchemaInfo schemaInfo : databricksHandle.getClient().schemas().list(catalogName)) {
-            String name = schemaInfo.getName();
-            if (name != null && schemaPredicate.test(name)) {
-              monitor.count();
-              printer.printRecord(
-                  schemaInfo.getCatalogName(),
-                  schemaInfo.getName(),
-                  schemaInfo.getComment(),
-                  schemaInfo.getOwner(),
-                  schemaInfo.getCreatedAt(),
-                  schemaInfo.getUpdatedAt());
+        long backoffMs = getInitialRetryBackoffMs();
+        for (int attempt = 1; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+          try {
+            databricksHandle.acquirePermit();
+            for (SchemaInfo schemaInfo : databricksHandle.getClient().schemas().list(catalogName)) {
+              String name = schemaInfo.getName();
+              if (name != null && schemaPredicate.test(name)) {
+                monitor.count();
+                printer.printRecord(
+                    schemaInfo.getCatalogName(),
+                    schemaInfo.getName(),
+                    schemaInfo.getComment(),
+                    schemaInfo.getOwner(),
+                    schemaInfo.getCreatedAt(),
+                    schemaInfo.getUpdatedAt());
+              }
             }
+            break;
+          } catch (Exception e) {
+            if (isRateLimited(e) && attempt < MAX_RATE_LIMIT_RETRIES) {
+              logger.warn(
+                  "Rate limited while listing schemas for catalog '{}'. Retrying in {}ms (attempt {}/{})",
+                  catalogName,
+                  backoffMs,
+                  attempt,
+                  MAX_RATE_LIMIT_RETRIES);
+              try {
+                Thread.sleep(backoffMs);
+              } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted during rate limit backoff", ie);
+              }
+              backoffMs *= 2;
+              continue;
+            }
+            logger.warn("Failed to list schemas for catalog '{}': {}", catalogName, e.getMessage());
+            break;
           }
-        } catch (Exception e) {
-          logger.warn("Failed to list schemas for catalog '{}': {}", catalogName, e.getMessage());
         }
       }
     }

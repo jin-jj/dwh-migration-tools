@@ -49,10 +49,14 @@ class DatabricksCatalogsTask extends AbstractDatabricksTask implements CatalogsF
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing catalogs to " + getTargetPath())) {
+      databricksHandle.acquirePermit();
       for (CatalogInfo catalogInfo :
           databricksHandle.getClient().catalogs().list(new ListCatalogsRequest())) {
         String name = catalogInfo.getName();
-        if (name != null && catalogPredicate.test(name)) {
+        if (name != null
+            && catalogPredicate.test(name)
+            && !name.equalsIgnoreCase(SAMPLES)
+            && !name.equalsIgnoreCase(SYSTEM)) {
           monitor.count();
           printer.printRecord(
               catalogInfo.getName(),

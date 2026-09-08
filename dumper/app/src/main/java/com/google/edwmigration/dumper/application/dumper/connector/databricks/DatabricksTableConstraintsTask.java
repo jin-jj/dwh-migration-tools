@@ -20,6 +20,7 @@ import com.databricks.sdk.service.catalog.ForeignKeyConstraint;
 import com.databricks.sdk.service.catalog.PrimaryKeyConstraint;
 import com.databricks.sdk.service.catalog.TableConstraint;
 import com.databricks.sdk.service.catalog.TableInfo;
+import com.databricks.sdk.service.catalog.TableType;
 import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
@@ -61,77 +62,107 @@ class DatabricksTableConstraintsTask extends AbstractDatabricksTask
       for (String catalogName : catalogs) {
         List<String> schemas = fetchMatchingSchemas(databricksHandle, catalogName);
         for (String schemaName : schemas) {
-          try {
-            for (TableInfo summary :
-                databricksHandle.getClient().tables().list(catalogName, schemaName)) {
-              TableInfo tableInfo = summary;
-              try {
-                String fullName = summary.getFullName();
-                if (fullName == null && summary.getName() != null) {
-                  fullName = catalogName + "." + schemaName + "." + summary.getName();
+          long backoffMs = getInitialRetryBackoffMs();
+          for (int attempt = 1; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+            try {
+              databricksHandle.acquirePermit();
+              for (TableInfo summary :
+                  databricksHandle.getClient().tables().list(catalogName, schemaName)) {
+                if (summary.getTableType() == TableType.VIEW
+                    || summary.getTableType() == TableType.MATERIALIZED_VIEW) {
+                  continue;
                 }
-                if (fullName != null) {
-                  TableInfo detailed = databricksHandle.getClient().tables().get(fullName);
-                  if (detailed != null) {
-                    tableInfo = detailed;
+                TableInfo tableInfo = summary;
+                if (summary.getTableConstraints() == null) {
+                  try {
+                    String fullName = summary.getFullName();
+                    if (fullName == null && summary.getName() != null) {
+                      fullName = catalogName + "." + schemaName + "." + summary.getName();
+                    }
+                    if (fullName != null) {
+                      databricksHandle.acquirePermit();
+                      TableInfo detailed = databricksHandle.getClient().tables().get(fullName);
+                      if (detailed != null) {
+                        tableInfo = detailed;
+                      }
+                    }
+                  } catch (Exception e) {
+                    logger.debug(
+                        "Failed to get detailed table info for '{}.{}.{}': {}",
+                        catalogName,
+                        schemaName,
+                        summary.getName(),
+                        e.getMessage());
                   }
                 }
-              } catch (Exception e) {
-                logger.debug(
-                    "Failed to get detailed table info for '{}.{}.{}': {}",
+                Collection<TableConstraint> constraints = tableInfo.getTableConstraints();
+                if (constraints != null) {
+                  for (TableConstraint constraint : constraints) {
+                    if (constraint.getPrimaryKeyConstraint() != null) {
+                      PrimaryKeyConstraint pk = constraint.getPrimaryKeyConstraint();
+                      monitor.count();
+                      String details =
+                          pk.getChildColumns() != null
+                              ? StringUtils.join(pk.getChildColumns(), ", ")
+                              : "";
+                      printer.printRecord(
+                          tableInfo.getCatalogName(),
+                          tableInfo.getSchemaName(),
+                          tableInfo.getName(),
+                          pk.getName(),
+                          "PRIMARY KEY",
+                          details);
+                    }
+                    if (constraint.getForeignKeyConstraint() != null) {
+                      ForeignKeyConstraint fk = constraint.getForeignKeyConstraint();
+                      monitor.count();
+                      String childCols =
+                          fk.getChildColumns() != null
+                              ? StringUtils.join(fk.getChildColumns(), ", ")
+                              : "";
+                      String parentCols =
+                          fk.getParentColumns() != null
+                              ? StringUtils.join(fk.getParentColumns(), ", ")
+                              : "";
+                      String details =
+                          childCols + " -> " + fk.getParentTable() + "(" + parentCols + ")";
+                      printer.printRecord(
+                          tableInfo.getCatalogName(),
+                          tableInfo.getSchemaName(),
+                          tableInfo.getName(),
+                          fk.getName(),
+                          "FOREIGN KEY",
+                          details);
+                    }
+                  }
+                }
+              }
+              break;
+            } catch (Exception e) {
+              if (isRateLimited(e) && attempt < MAX_RATE_LIMIT_RETRIES) {
+                logger.warn(
+                    "Rate limited while listing table constraints for schema '{}.{}'. Retrying in {}ms (attempt {}/{})",
                     catalogName,
                     schemaName,
-                    summary.getName(),
-                    e.getMessage());
-              }
-              Collection<TableConstraint> constraints = tableInfo.getTableConstraints();
-              if (constraints != null) {
-                for (TableConstraint constraint : constraints) {
-                  if (constraint.getPrimaryKeyConstraint() != null) {
-                    PrimaryKeyConstraint pk = constraint.getPrimaryKeyConstraint();
-                    monitor.count();
-                    String details =
-                        pk.getChildColumns() != null
-                            ? StringUtils.join(pk.getChildColumns(), ", ")
-                            : "";
-                    printer.printRecord(
-                        tableInfo.getCatalogName(),
-                        tableInfo.getSchemaName(),
-                        tableInfo.getName(),
-                        pk.getName(),
-                        "PRIMARY KEY",
-                        details);
-                  }
-                  if (constraint.getForeignKeyConstraint() != null) {
-                    ForeignKeyConstraint fk = constraint.getForeignKeyConstraint();
-                    monitor.count();
-                    String childCols =
-                        fk.getChildColumns() != null
-                            ? StringUtils.join(fk.getChildColumns(), ", ")
-                            : "";
-                    String parentCols =
-                        fk.getParentColumns() != null
-                            ? StringUtils.join(fk.getParentColumns(), ", ")
-                            : "";
-                    String details =
-                        childCols + " -> " + fk.getParentTable() + "(" + parentCols + ")";
-                    printer.printRecord(
-                        tableInfo.getCatalogName(),
-                        tableInfo.getSchemaName(),
-                        tableInfo.getName(),
-                        fk.getName(),
-                        "FOREIGN KEY",
-                        details);
-                  }
+                    backoffMs,
+                    attempt,
+                    MAX_RATE_LIMIT_RETRIES);
+                try {
+                  Thread.sleep(backoffMs);
+                } catch (InterruptedException ie) {
+                  Thread.currentThread().interrupt();
+                  throw new RuntimeException("Interrupted during rate limit backoff", ie);
                 }
+                backoffMs *= 2;
+                continue;
               }
+              logger.warn(
+                  "Failed to list table constraints for schema '{}.{}': {}",
+                  catalogName,
+                  schemaName,
+                  e.getMessage());
+              break;
             }
-          } catch (Exception e) {
-            logger.warn(
-                "Failed to list table constraints for schema '{}.{}': {}",
-                catalogName,
-                schemaName,
-                e.getMessage());
           }
         }
       }

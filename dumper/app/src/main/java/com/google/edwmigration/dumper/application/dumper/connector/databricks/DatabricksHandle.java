@@ -18,6 +18,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import com.databricks.sdk.WorkspaceClient;
 import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.RateLimiter;
 import com.google.edwmigration.dumper.application.dumper.handle.AbstractHandle;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -27,12 +28,38 @@ import org.apache.commons.lang3.StringUtils;
 /** Handle holding the Databricks WorkspaceClient and optional SQL warehouse identifier. */
 public class DatabricksHandle extends AbstractHandle {
 
+  private static final double DEFAULT_REQUESTS_PER_SECOND = 20.0;
+
   private final WorkspaceClient client;
   @Nullable private final String warehouseId;
+  private final RateLimiter rateLimiter;
 
   public DatabricksHandle(@Nonnull WorkspaceClient client, @Nullable String warehouseId) {
+    this(client, warehouseId, RateLimiter.create(resolveRequestsPerSecond()));
+  }
+
+  public DatabricksHandle(
+      @Nonnull WorkspaceClient client,
+      @Nullable String warehouseId,
+      @Nonnull RateLimiter rateLimiter) {
     this.client = Preconditions.checkNotNull(client, "WorkspaceClient was null.");
     this.warehouseId = warehouseId;
+    this.rateLimiter = Preconditions.checkNotNull(rateLimiter, "RateLimiter was null.");
+  }
+
+  private static double resolveRequestsPerSecond() {
+    String envRateLimit = System.getenv("DATABRICKS_RATE_LIMIT");
+    if (envRateLimit != null) {
+      try {
+        double parsed = Double.parseDouble(envRateLimit.trim());
+        if (parsed > 0) {
+          return parsed;
+        }
+      } catch (NumberFormatException ignored) {
+        // Fall back to default
+      }
+    }
+    return DEFAULT_REQUESTS_PER_SECOND;
   }
 
   @Nonnull
@@ -47,5 +74,9 @@ public class DatabricksHandle extends AbstractHandle {
   @CheckForNull
   public String getWarehouseId() {
     return warehouseId;
+  }
+
+  public void acquirePermit() {
+    rateLimiter.acquire();
   }
 }
