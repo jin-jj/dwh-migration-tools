@@ -23,40 +23,83 @@ import javax.annotation.Nonnull;
 import javax.annotation.ParametersAreNonnullByDefault;
 
 /**
- * Represents a strategy for extracting Databricks metadata.
+ * Chooses which of the three extraction tiers run, and in what order they fall back.
  *
- * <p>SYSTEM queries global {@code system.information_schema.*} views across all catalogs. CATALOG
- * queries per-catalog {@code <catalog>.information_schema.*} views individually.
+ * <p>The tiers, from cheapest and most complete to most expensive and least complete:
+ *
+ * <ol>
+ *   <li><b>system</b> — {@code system.information_schema.*}. One query covers every catalog in the
+ *       metastore. Requires the system schema to be enabled and readable.
+ *   <li><b>catalog</b> — {@code <catalog>.information_schema.*}, queried one catalog at a time.
+ *       Works when the system schema is unavailable, but costs one query per catalog and silently
+ *       omits catalogs the caller cannot read.
+ *   <li><b>rest</b> — the Unity Catalog REST API. Needs no SQL warehouse at all, which is the whole
+ *       point of having it, but it is request-per-schema (and request-per-table for constraints)
+ *       and cannot see {@code hive_metastore}.
+ * </ol>
+ *
+ * <p>Each tier writes the same output file, and a tier runs only when every tier before it failed,
+ * so at most one of them contributes to the dump.
  */
 @ParametersAreNonnullByDefault
 enum DatabricksInput {
-  /** Query system.information_schema first, falling back to per-catalog information_schema. */
+  /** Try the system schema, then per-catalog schemas, then the REST API. The default. */
+  SYSTEM_THEN_CATALOG_THEN_REST {
+    @Override
+    @Nonnull
+    ImmutableList<Task<?>> tasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
+      return ImmutableList.of(
+          systemTask,
+          catalogTask.onlyIfFailed(systemTask),
+          restTask.onlyIfAllFailed(systemTask, catalogTask));
+    }
+  },
+  /** Try the system schema, then per-catalog schemas. Never touch the REST API. */
   SYSTEM_THEN_CATALOG {
     @Override
     @Nonnull
-    ImmutableList<Task<?>> tasks(AbstractTask<?> systemTask, AbstractTask<?> catalogTask) {
+    ImmutableList<Task<?>> tasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
       return ImmutableList.of(systemTask, catalogTask.onlyIfFailed(systemTask));
     }
   },
-  /** Query per-catalog information_schema only. */
+  /** Query per-catalog information schemas only. */
   CATALOG_ONLY {
     @Override
     @Nonnull
-    ImmutableList<Task<?>> tasks(AbstractTask<?> systemTask, AbstractTask<?> catalogTask) {
+    ImmutableList<Task<?>> tasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
       return ImmutableList.of(catalogTask);
     }
   },
-  /** Query system.information_schema only. */
+  /** Query the system information schema only. */
   SYSTEM_ONLY {
     @Override
     @Nonnull
-    ImmutableList<Task<?>> tasks(AbstractTask<?> systemTask, AbstractTask<?> catalogTask) {
+    ImmutableList<Task<?>> tasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
       return ImmutableList.of(systemTask);
+    }
+  },
+  /** Use the Unity Catalog REST API only. Does not need a SQL warehouse. */
+  REST_ONLY {
+    @Override
+    @Nonnull
+    ImmutableList<Task<?>> tasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
+      return ImmutableList.of(restTask);
     }
   };
 
+  /** Returns whether this strategy runs any tier that needs a SQL warehouse. */
+  boolean requiresWarehouse() {
+    return this != REST_ONLY;
+  }
+
   @Nonnull
-  abstract ImmutableList<Task<?>> tasks(AbstractTask<?> systemTask, AbstractTask<?> catalogTask);
+  abstract ImmutableList<Task<?>> tasks(
+      AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask);
 
   @Nonnull
   public static DatabricksInput fromString(@Nonnull String value) {
@@ -67,9 +110,14 @@ enum DatabricksInput {
       case "system-only":
       case "system":
         return SYSTEM_ONLY;
+      case "rest-only":
+      case "rest":
+        return REST_ONLY;
       case "system-then-catalog":
-      default:
         return SYSTEM_THEN_CATALOG;
+      case "system-then-catalog-then-rest":
+      default:
+        return SYSTEM_THEN_CATALOG_THEN_REST;
     }
   }
 }

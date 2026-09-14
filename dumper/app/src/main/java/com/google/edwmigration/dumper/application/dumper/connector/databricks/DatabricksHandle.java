@@ -18,6 +18,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import com.databricks.sdk.WorkspaceClient;
 import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.RateLimiter;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import java.io.IOException;
 import java.util.Collections;
@@ -28,14 +29,35 @@ import javax.annotation.Nonnull;
 /** Handle for Databricks SQL Warehouse metadata dumper. */
 public class DatabricksHandle implements Handle {
 
+  /**
+   * Databricks does not publish a per-second limit for the Unity Catalog listing endpoints, so this
+   * is a deliberately conservative default rather than a documented ceiling.
+   */
+  static final double DEFAULT_REST_REQUESTS_PER_SECOND = 20.0;
+
   private final WorkspaceClient client;
   private final String warehouseId;
+
+  /** Throttles the REST fallback tier. Shared by every task, since the quota is per workspace. */
+  private final RateLimiter restRateLimiter;
 
   private final Set<String> inaccessibleCatalogs = Collections.synchronizedSet(new HashSet<>());
 
   public DatabricksHandle(@Nonnull WorkspaceClient client, @Nonnull String warehouseId) {
-    this.client = Preconditions.checkNotNull(client, "WorkspaceClient cannot be null.");
-    this.warehouseId = Preconditions.checkNotNull(warehouseId, "warehouseId cannot be null.");
+    this(client, warehouseId, DEFAULT_REST_REQUESTS_PER_SECOND);
+  }
+
+  public DatabricksHandle(
+      @Nonnull WorkspaceClient client, @Nonnull String warehouseId, double restRequestsPerSecond) {
+    Preconditions.checkNotNull(client, "WorkspaceClient cannot be null.");
+    Preconditions.checkNotNull(warehouseId, "warehouseId cannot be null.");
+    Preconditions.checkArgument(
+        restRequestsPerSecond > 0,
+        "REST requests per second must be positive, but was %s",
+        restRequestsPerSecond);
+    this.client = client;
+    this.warehouseId = warehouseId;
+    this.restRateLimiter = RateLimiter.create(restRequestsPerSecond);
   }
 
   @Nonnull
@@ -50,6 +72,11 @@ public class DatabricksHandle implements Handle {
 
   public boolean hasWarehouseId() {
     return warehouseId != null && !warehouseId.isEmpty();
+  }
+
+  /** Blocks until this thread is allowed to issue one more Databricks REST request. */
+  public void acquireRestPermit() {
+    restRateLimiter.acquire();
   }
 
   public void markCatalogInaccessible(@Nonnull String catalog) {

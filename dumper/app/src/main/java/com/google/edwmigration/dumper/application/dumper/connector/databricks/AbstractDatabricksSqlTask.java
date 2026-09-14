@@ -16,9 +16,12 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksCatalogNames.HIVE_METASTORE;
+
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
+import com.google.edwmigration.dumper.application.dumper.task.TaskCategory;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,13 +31,15 @@ import org.apache.commons.csv.CSVFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Base class for the per-catalog {@code <catalog>.information_schema} extraction tier.
+ *
+ * <p>This is the second tier of the fallback chain. It is marked optional and swallows its own
+ * failure so that the REST tier behind it gets a chance to run.
+ */
 abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
 
   private static final Logger logger = LoggerFactory.getLogger(AbstractDatabricksSqlTask.class);
-
-  public static final String SAMPLES = "samples";
-  public static final String SYSTEM = "system";
-  public static final String HIVE_METASTORE = "hive_metastore";
 
   protected static final CSVFormat FORMAT = CSVFormat.DEFAULT;
 
@@ -55,6 +60,22 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
   AbstractDatabricksSqlTask(
       @Nonnull String targetPath, @Nonnull Predicate<String> catalogPredicate) {
     this(targetPath, catalogPredicate, s -> true);
+  }
+
+  @Nonnull
+  @Override
+  public TaskCategory getCategory() {
+    return TaskCategory.OPTIONAL;
+  }
+
+  @Override
+  public boolean handleException(Exception e) {
+    logger.info(
+        "Databricks per-catalog query for '{}' failed ({}); falling back to the Unity Catalog REST"
+            + " API if that tier is enabled.",
+        getTargetPath(),
+        e.getMessage());
+    return true;
   }
 
   /**

@@ -21,6 +21,7 @@ import com.databricks.sdk.core.DatabricksConfig;
 import com.google.auto.service.AutoService;
 import com.google.common.base.Preconditions;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
+import com.google.edwmigration.dumper.application.dumper.MetadataDumperUsageException;
 import com.google.edwmigration.dumper.application.dumper.annotations.RespectsInput;
 import com.google.edwmigration.dumper.application.dumper.connector.AbstractConnector;
 import com.google.edwmigration.dumper.application.dumper.connector.Connector;
@@ -78,8 +79,14 @@ public class DatabricksConnector extends AbstractConnector
   public enum DatabricksConnectorProperty implements ConnectorPropertyWithDefault {
     STRATEGY(
         "databricks.metadata.strategy",
-        "Strategy for extracting Databricks metadata: system-then-catalog (default), catalog-only, or system-only.",
-        "system-then-catalog"),
+        "Extraction strategy: system-then-catalog-then-rest (default), system-then-catalog,"
+            + " system-only, catalog-only, or rest-only. Each tier runs only if the tiers before"
+            + " it failed. rest-only does not need a SQL warehouse.",
+        "system-then-catalog-then-rest"),
+    REST_REQUESTS_PER_SECOND(
+        "databricks.rest.requests-per-second",
+        "Maximum Unity Catalog REST requests per second issued by the REST tier.",
+        String.valueOf(DatabricksHandle.DEFAULT_REST_REQUESTS_PER_SECOND)),
     SKIP_HIVE_METASTORE(
         "databricks.skip-hive-metastore",
         "Whether to skip dumping legacy Databricks Hive Metastore metadata.",
@@ -117,11 +124,11 @@ public class DatabricksConnector extends AbstractConnector
   private final DatabricksInput inputSource;
 
   public DatabricksConnector() {
-    this(CONNECTOR_NAME, DatabricksInput.SYSTEM_THEN_CATALOG);
+    this(CONNECTOR_NAME, DatabricksInput.SYSTEM_THEN_CATALOG_THEN_REST);
   }
 
   protected DatabricksConnector(@Nonnull String name) {
-    this(name, DatabricksInput.SYSTEM_THEN_CATALOG);
+    this(name, DatabricksInput.SYSTEM_THEN_CATALOG_THEN_REST);
   }
 
   public DatabricksConnector(@Nonnull String name, @Nonnull DatabricksInput inputSource) {
@@ -133,8 +140,19 @@ public class DatabricksConnector extends AbstractConnector
   public void validate(@Nonnull ConnectorArguments arguments) {
     Preconditions.checkArgument(arguments.hasUri(), "--url param is required");
     Preconditions.checkArgument(
-        arguments.getWarehouse() != null && !arguments.getWarehouse().isEmpty(),
-        "--warehouse <warehouse_id> is required for SQL-based Databricks metadata extraction");
+        !resolveStrategy(arguments).requiresWarehouse()
+            || (arguments.getWarehouse() != null && !arguments.getWarehouse().isEmpty()),
+        "--warehouse <warehouse_id> is required unless"
+            + " -Ddatabricks.metadata.strategy=rest-only is set");
+  }
+
+  /** Returns the strategy the user asked for, or the connector's own default. */
+  @Nonnull
+  private DatabricksInput resolveStrategy(@Nonnull ConnectorArguments arguments) {
+    String strategyDefinition = arguments.getDefinition(DatabricksConnectorProperty.STRATEGY);
+    return strategyDefinition == null
+        ? inputSource
+        : DatabricksInput.fromString(strategyDefinition);
   }
 
   @Override
@@ -148,8 +166,8 @@ public class DatabricksConnector extends AbstractConnector
       catalogPredicate =
           catalogPredicate.and(
               name ->
-                  !name.equalsIgnoreCase(AbstractDatabricksSqlTask.SAMPLES)
-                      && !name.equalsIgnoreCase(AbstractDatabricksSqlTask.SYSTEM));
+                  !name.equalsIgnoreCase(DatabricksCatalogNames.SAMPLES)
+                      && !name.equalsIgnoreCase(DatabricksCatalogNames.SYSTEM));
     }
     boolean skipHive =
         arguments.isSkipHiveMetastore()
@@ -158,50 +176,53 @@ public class DatabricksConnector extends AbstractConnector
     if (skipHive) {
       catalogPredicate =
           catalogPredicate.and(
-              name -> !name.equalsIgnoreCase(AbstractDatabricksSqlTask.HIVE_METASTORE));
+              name -> !name.equalsIgnoreCase(DatabricksCatalogNames.HIVE_METASTORE));
     }
     Predicate<String> schemaPredicate = arguments.getSchemaPredicate();
 
-    DatabricksInput strategy = inputSource;
-    String strategyDef = arguments.getDefinition(DatabricksConnectorProperty.STRATEGY);
-    if (strategyDef != null) {
-      strategy = DatabricksInput.fromString(strategyDef);
-    }
+    DatabricksInput strategy = resolveStrategy(arguments);
 
     out.addAll(
         strategy.tasks(
             new DatabricksSystemSqlCatalogsTask(catalogPredicate),
-            new DatabricksSqlCatalogsTask(catalogPredicate)));
+            new DatabricksSqlCatalogsTask(catalogPredicate),
+            new DatabricksRestCatalogsTask(catalogPredicate)));
     out.addAll(
         strategy.tasks(
             new DatabricksSystemSqlSchemataTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlSchemataTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSqlSchemataTask(catalogPredicate, schemaPredicate),
+            new DatabricksRestSchemataTask(catalogPredicate, schemaPredicate)));
     out.addAll(
         strategy.tasks(
             new DatabricksSystemSqlTablesTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlTablesTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSqlTablesTask(catalogPredicate, schemaPredicate),
+            new DatabricksRestTablesTask(catalogPredicate, schemaPredicate)));
     out.addAll(
         strategy.tasks(
             new DatabricksSystemSqlColumnsTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlColumnsTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSqlColumnsTask(catalogPredicate, schemaPredicate),
+            new DatabricksRestColumnsTask(catalogPredicate, schemaPredicate)));
     out.addAll(
         strategy.tasks(
             new DatabricksSystemSqlViewsTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlViewsTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSqlViewsTask(catalogPredicate, schemaPredicate),
+            new DatabricksRestViewsTask(catalogPredicate, schemaPredicate)));
     out.addAll(
         strategy.tasks(
             new DatabricksSystemSqlTableConstraintsTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlTableConstraintsTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSqlTableConstraintsTask(catalogPredicate, schemaPredicate),
+            new DatabricksRestTableConstraintsTask(catalogPredicate, schemaPredicate)));
     out.addAll(
         strategy.tasks(
             new DatabricksSystemSqlFunctionsTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlFunctionsTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSqlFunctionsTask(catalogPredicate, schemaPredicate),
+            new DatabricksRestFunctionsTask(catalogPredicate, schemaPredicate)));
 
     boolean includesHiveMetastore =
         !skipHive
-            && (catalogPredicate.test(AbstractDatabricksSqlTask.HIVE_METASTORE)
+            && (catalogPredicate.test(DatabricksCatalogNames.HIVE_METASTORE)
                 || arguments.getDatabases().stream()
-                    .anyMatch(d -> d.equalsIgnoreCase(AbstractDatabricksSqlTask.HIVE_METASTORE)));
+                    .anyMatch(d -> d.equalsIgnoreCase(DatabricksCatalogNames.HIVE_METASTORE)));
     if (includesHiveMetastore) {
       if (arguments.getWarehouse() != null) {
         out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
@@ -223,7 +244,28 @@ public class DatabricksConnector extends AbstractConnector
       config.setToken(arguments.getPasswordOrPrompt());
     }
     WorkspaceClient client = new WorkspaceClient(config);
-    return new DatabricksHandle(client, arguments.getWarehouse());
+    String warehouse = arguments.getWarehouse();
+    return new DatabricksHandle(
+        client, warehouse == null ? "" : warehouse, restRequestsPerSecond(arguments));
+  }
+
+  private static double restRequestsPerSecond(@Nonnull ConnectorArguments arguments) {
+    String value =
+        arguments.getDefinitionOrDefault(DatabricksConnectorProperty.REST_REQUESTS_PER_SECOND);
+    try {
+      double parsed = Double.parseDouble(value.trim());
+      if (parsed > 0) {
+        return parsed;
+      }
+    } catch (NumberFormatException e) {
+      // Reported below, together with the out-of-range case.
+    }
+    throw new MetadataDumperUsageException(
+        "Property "
+            + DatabricksConnectorProperty.REST_REQUESTS_PER_SECOND.getName()
+            + " must be a positive number, but was '"
+            + value
+            + "'");
   }
 
   @Nonnull

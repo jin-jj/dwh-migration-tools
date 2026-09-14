@@ -37,6 +37,15 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class DatabricksConnectorTest {
 
+  /** {@link DumpMetadataTask} and {@link FormatTask}, which every dump carries. */
+  private static final int SETUP_TASKS = 2;
+
+  /** catalogs, schemata, tables, columns, views, table constraints and functions. */
+  private static final int DATASETS = 7;
+
+  /** schemata, tables, columns and views, dumped separately for the legacy metastore. */
+  private static final int HIVE_METASTORE_TASKS = 4;
+
   private final DatabricksConnector connector = new DatabricksConnector();
 
   @Test
@@ -116,38 +125,43 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    // 2 setup tasks + 14 UC tasks (7 system + 7 catalog fallback) + 4 HMS tasks = 20 tasks
-    assertEquals(20, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3 + HIVE_METASTORE_TASKS, tasks.size());
     assertTrue(tasks.get(0) instanceof DumpMetadataTask);
     assertTrue(tasks.get(1) instanceof FormatTask);
     assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
     assertTrue(tasks.get(3) instanceof DatabricksSqlCatalogsTask);
-    assertTrue(tasks.get(4) instanceof DatabricksSystemSqlSchemataTask);
-    assertTrue(tasks.get(5) instanceof DatabricksSqlSchemataTask);
-    assertTrue(tasks.get(6) instanceof DatabricksSystemSqlTablesTask);
-    assertTrue(tasks.get(7) instanceof DatabricksSqlTablesTask);
-    assertTrue(tasks.get(8) instanceof DatabricksSystemSqlColumnsTask);
-    assertTrue(tasks.get(9) instanceof DatabricksSqlColumnsTask);
-    assertTrue(tasks.get(10) instanceof DatabricksSystemSqlViewsTask);
-    assertTrue(tasks.get(11) instanceof DatabricksSqlViewsTask);
-    assertTrue(tasks.get(12) instanceof DatabricksSystemSqlTableConstraintsTask);
-    assertTrue(tasks.get(13) instanceof DatabricksSqlTableConstraintsTask);
-    assertTrue(tasks.get(14) instanceof DatabricksSystemSqlFunctionsTask);
-    assertTrue(tasks.get(15) instanceof DatabricksSqlFunctionsTask);
-    assertTrue(tasks.get(16) instanceof DatabricksHiveMetastoreSchemataTask);
-    assertTrue(tasks.get(17) instanceof DatabricksHiveMetastoreTablesTask);
-    assertTrue(tasks.get(18) instanceof DatabricksHiveMetastoreColumnsTask);
-    assertTrue(tasks.get(19) instanceof DatabricksHiveMetastoreViewsTask);
+    assertTrue(tasks.get(4) instanceof DatabricksRestCatalogsTask);
+    assertTrue(tasks.get(5) instanceof DatabricksSystemSqlSchemataTask);
+    assertTrue(tasks.get(6) instanceof DatabricksSqlSchemataTask);
+    assertTrue(tasks.get(7) instanceof DatabricksRestSchemataTask);
+    assertTrue(tasks.get(8) instanceof DatabricksSystemSqlTablesTask);
+    assertTrue(tasks.get(9) instanceof DatabricksSqlTablesTask);
+    assertTrue(tasks.get(10) instanceof DatabricksRestTablesTask);
+    assertTrue(tasks.get(11) instanceof DatabricksSystemSqlColumnsTask);
+    assertTrue(tasks.get(12) instanceof DatabricksSqlColumnsTask);
+    assertTrue(tasks.get(13) instanceof DatabricksRestColumnsTask);
+    assertTrue(tasks.get(14) instanceof DatabricksSystemSqlViewsTask);
+    assertTrue(tasks.get(15) instanceof DatabricksSqlViewsTask);
+    assertTrue(tasks.get(16) instanceof DatabricksRestViewsTask);
+    assertTrue(tasks.get(17) instanceof DatabricksSystemSqlTableConstraintsTask);
+    assertTrue(tasks.get(18) instanceof DatabricksSqlTableConstraintsTask);
+    assertTrue(tasks.get(19) instanceof DatabricksRestTableConstraintsTask);
+    assertTrue(tasks.get(20) instanceof DatabricksSystemSqlFunctionsTask);
+    assertTrue(tasks.get(21) instanceof DatabricksSqlFunctionsTask);
+    assertTrue(tasks.get(22) instanceof DatabricksRestFunctionsTask);
+    assertTrue(tasks.get(23) instanceof DatabricksHiveMetastoreSchemataTask);
+    assertTrue(tasks.get(24) instanceof DatabricksHiveMetastoreTablesTask);
+    assertTrue(tasks.get(25) instanceof DatabricksHiveMetastoreColumnsTask);
+    assertTrue(tasks.get(26) instanceof DatabricksHiveMetastoreViewsTask);
 
-    // Verify conditions: each catalog task should depend on failure of its corresponding system
-    // task
-    assertTrue(tasks.get(3).getConditions().length > 0);
-    assertTrue(tasks.get(5).getConditions().length > 0);
-    assertTrue(tasks.get(7).getConditions().length > 0);
-    assertTrue(tasks.get(9).getConditions().length > 0);
-    assertTrue(tasks.get(11).getConditions().length > 0);
-    assertTrue(tasks.get(13).getConditions().length > 0);
-    assertTrue(tasks.get(15).getConditions().length > 0);
+    // The first tier of each dataset is unconditional; the two fallback tiers behind it are gated
+    // on their predecessors having failed.
+    for (int dataset = 0; dataset < DATASETS; dataset++) {
+      int systemTier = SETUP_TASKS + dataset * 3;
+      assertEquals(0, tasks.get(systemTier).getConditions().length);
+      assertTrue(tasks.get(systemTier + 1).getConditions().length > 0);
+      assertTrue(tasks.get(systemTier + 2).getConditions().length > 0);
+    }
   }
 
   @Test
@@ -162,8 +176,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    // 2 setup tasks + 14 UC tasks = 16 tasks
-    assertEquals(16, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3, tasks.size());
     assertTrue(tasks.get(0) instanceof DumpMetadataTask);
     assertTrue(tasks.get(1) instanceof FormatTask);
     assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
@@ -185,8 +198,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     new DatabricksCatalogMetadataConnector().addTasksTo(tasks, arguments);
 
-    // 2 setup tasks + 7 catalog tasks = 9 tasks
-    assertEquals(9, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS, tasks.size());
     assertTrue(tasks.get(2) instanceof DatabricksSqlCatalogsTask);
     assertTrue(tasks.get(3) instanceof DatabricksSqlSchemataTask);
     assertTrue(tasks.get(4) instanceof DatabricksSqlTablesTask);
@@ -211,8 +223,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     new DatabricksSystemMetadataConnector().addTasksTo(tasks, arguments);
 
-    // 2 setup tasks + 7 system tasks = 9 tasks
-    assertEquals(9, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS, tasks.size());
     assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
     assertTrue(tasks.get(3) instanceof DatabricksSystemSqlSchemataTask);
     assertTrue(tasks.get(4) instanceof DatabricksSystemSqlTablesTask);
@@ -238,8 +249,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    // 2 setup tasks + 7 catalog tasks = 9 tasks
-    assertEquals(9, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS, tasks.size());
     assertTrue(tasks.get(2) instanceof DatabricksSqlCatalogsTask);
     assertFalse(tasks.stream().anyMatch(t -> t instanceof AbstractDatabricksSystemSqlTask));
   }
@@ -255,8 +265,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    // 2 setup tasks + 14 UC tasks + 4 HMS tasks = 20 tasks
-    assertEquals(20, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3 + HIVE_METASTORE_TASKS, tasks.size());
     assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreSchemataTask));
     assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
     assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreColumnsTask));
@@ -277,7 +286,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    assertEquals(16, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3, tasks.size());
     assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
     assertTrue(tasks.get(3) instanceof DatabricksSqlCatalogsTask);
     assertFalse(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
@@ -297,8 +306,46 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    assertEquals(16, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3, tasks.size());
     assertFalse(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
+  }
+
+  @Test
+  public void addTasksTo_restOnlyStrategy_addsOnlyRestTasks() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector",
+            "databricks",
+            "--url",
+            "https://dbc-test.cloud.databricks.com",
+            "--skip-hive-metastore",
+            "-Ddatabricks.metadata.strategy=rest-only");
+    List<Task<?>> tasks = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+
+    assertEquals(SETUP_TASKS + DATASETS, tasks.size());
+    assertTrue(tasks.get(2) instanceof DatabricksRestCatalogsTask);
+    assertTrue(tasks.get(3) instanceof DatabricksRestSchemataTask);
+    assertTrue(tasks.get(4) instanceof DatabricksRestTablesTask);
+    assertTrue(tasks.get(5) instanceof DatabricksRestColumnsTask);
+    assertTrue(tasks.get(6) instanceof DatabricksRestViewsTask);
+    assertTrue(tasks.get(7) instanceof DatabricksRestTableConstraintsTask);
+    assertTrue(tasks.get(8) instanceof DatabricksRestFunctionsTask);
+    assertFalse(tasks.stream().anyMatch(t -> t instanceof AbstractDatabricksSqlTask));
+    // The REST tier never runs behind another tier, so it must not be gated on anything.
+    assertEquals(0, tasks.get(2).getConditions().length);
+  }
+
+  @Test
+  public void validate_restOnlyStrategyWithoutWarehouse_succeeds() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector",
+            "databricks",
+            "--url",
+            "https://dbc-test.cloud.databricks.com",
+            "-Ddatabricks.metadata.strategy=rest-only");
+    connector.validate(arguments);
   }
 
   @Test
@@ -307,6 +354,7 @@ public class DatabricksConnectorTest {
     assertEquals(
         ImmutableList.of(
             DatabricksConnector.DatabricksConnectorProperty.STRATEGY,
+            DatabricksConnector.DatabricksConnectorProperty.REST_REQUESTS_PER_SECOND,
             DatabricksConnector.DatabricksConnectorProperty.SKIP_HIVE_METASTORE),
         ImmutableList.copyOf(connector.getPropertyConstants()));
   }
