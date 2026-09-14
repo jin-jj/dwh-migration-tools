@@ -23,25 +23,25 @@ import com.databricks.sdk.service.sql.Format;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.google.common.collect.ImmutableList;
+import com.google.common.io.ByteStreams;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.Reader;
+import java.io.PushbackInputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.zip.GZIPInputStream;
 import javax.annotation.Nonnull;
-import org.apache.commons.csv.CSVFormat;
-import org.apache.commons.csv.CSVParser;
-import org.apache.commons.csv.CSVRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,8 +51,8 @@ import org.slf4j.LoggerFactory;
  * <p>Two result transports are supported. {@code INLINE} returns rows embedded in the JSON response
  * and is limited by Databricks to 25 MiB, beyond which the statement is aborted; it is appropriate
  * for small results such as {@code SHOW} commands. {@code EXTERNAL_LINKS} streams arbitrarily large
- * results as CSV through pre-signed URLs and must be used for bulk queries such as metastore-wide
- * {@code information_schema} scans.
+ * results through pre-signed URLs and must be used for bulk queries such as metastore-wide {@code
+ * information_schema} scans.
  *
  * <p>All methods propagate failures. Callers are tasks, which are the failure boundary, and a
  * swallowed failure would silently produce an empty output file and defeat connector fallback.
@@ -61,6 +61,8 @@ final class DatabricksSqlHelper {
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksSqlHelper.class);
 
+  private static final JsonFactory JSON_FACTORY = new JsonFactory();
+
   private static final long MAX_WAIT_MILLIS = 600_000L;
   private static final long POLL_INTERVAL_MILLIS = 1_000L;
   private static final int MAX_RETRIES = 5;
@@ -68,6 +70,7 @@ final class DatabricksSqlHelper {
   private static final int HTTP_READ_TIMEOUT_MILLIS = 300_000;
   private static final String WAIT_TIMEOUT = "30s";
   private static final String PERMISSION_DENIED_MARKER = "USE CATALOG on Catalog '";
+  private static final byte[] GZIP_MAGIC = {(byte) 0x1f, (byte) 0x8b};
 
   private DatabricksSqlHelper() {}
 
@@ -103,15 +106,17 @@ final class DatabricksSqlHelper {
   /**
    * Executes a statement with the external-links transport, streaming rows to {@code rowConsumer}.
    *
-   * <p>Results are transferred as CSV through pre-signed URLs, which lifts the 25 MiB inline result
-   * cap to 100 GiB and keeps memory bounded.
+   * <p>Results are transferred through pre-signed URLs, which lifts the 25 MiB inline result cap to
+   * 100 GiB and keeps memory bounded. The payload is JSON rather than CSV because only JSON keeps
+   * SQL {@code NULL} distinct from the string {@code "null"}, and because a CSV payload carries a
+   * header row on its first chunk that would otherwise be read as data.
    */
   static void executeBulkQueryOrThrow(
       @Nonnull DatabricksHandle handle,
       @Nonnull String sql,
       @Nonnull Consumer<List<String>> rowConsumer)
       throws SQLException {
-    execute(handle, sql, Disposition.EXTERNAL_LINKS, Format.CSV, rowConsumer);
+    execute(handle, sql, Disposition.EXTERNAL_LINKS, Format.JSON_ARRAY, rowConsumer);
   }
 
   private static void execute(
@@ -243,6 +248,11 @@ final class DatabricksSqlHelper {
     }
   }
 
+  /**
+   * Streams one result chunk, whose body is a JSON array of arrays of nullable strings.
+   *
+   * <p>Jackson reads it token by token so that a chunk does not have to fit in memory.
+   */
   private static void readExternalLink(ExternalLink link, Consumer<List<String>> rowConsumer)
       throws SQLException {
     String url = link.getExternalLink();
@@ -250,20 +260,54 @@ final class DatabricksSqlHelper {
       return;
     }
     try (InputStream in = openLink(url, link.getHttpHeaders());
-        Reader reader = new InputStreamReader(in, StandardCharsets.UTF_8);
-        CSVParser parser = CSVFormat.DEFAULT.parse(reader)) {
-      for (CSVRecord record : parser) {
-        List<String> row = new ArrayList<>(record.size());
-        for (int i = 0; i < record.size(); i++) {
-          row.add(record.get(i));
-        }
-        rowConsumer.accept(row);
+        JsonParser parser = JSON_FACTORY.createParser(in)) {
+      if (parser.nextToken() == null) {
+        return;
+      }
+      expect(parser, JsonToken.START_ARRAY, "the start of the result array");
+      while (parser.nextToken() == JsonToken.START_ARRAY) {
+        rowConsumer.accept(readRow(parser));
       }
     } catch (IOException e) {
       throw new SQLException("Failed to read Databricks result chunk from external link", e);
     }
   }
 
+  @Nonnull
+  private static List<String> readRow(JsonParser parser) throws IOException, SQLException {
+    List<String> row = new ArrayList<>();
+    JsonToken token = parser.nextToken();
+    while (token != null && token != JsonToken.END_ARRAY) {
+      if (token == JsonToken.VALUE_NULL) {
+        row.add(null);
+      } else if (token.isScalarValue()) {
+        row.add(parser.getText());
+      } else {
+        throw new SQLException("Unexpected " + token + " in a Databricks result row.");
+      }
+      token = parser.nextToken();
+    }
+    return row;
+  }
+
+  private static void expect(JsonParser parser, JsonToken expected, String what)
+      throws SQLException {
+    if (parser.currentToken() != expected) {
+      throw new SQLException(
+          "Malformed Databricks result chunk: expected "
+              + what
+              + " but found "
+              + parser.currentToken());
+    }
+  }
+
+  /**
+   * Opens a pre-signed result link.
+   *
+   * <p>The headers the API attached to the link carry the decryption credential and must be sent,
+   * but the Databricks credentials must not be: the URL is signed for the storage service, not for
+   * Databricks.
+   */
   private static InputStream openLink(String url, Map<String, String> headers) throws IOException {
     HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
     connection.setRequestMethod("GET");
@@ -279,11 +323,27 @@ final class DatabricksSqlHelper {
       connection.disconnect();
       throw new IOException("Result chunk download failed with HTTP status " + status);
     }
-    InputStream in = connection.getInputStream();
-    if ("gzip".equalsIgnoreCase(connection.getContentEncoding())) {
-      return new GZIPInputStream(in);
+    return decompressIfNeeded(connection.getInputStream());
+  }
+
+  /**
+   * Wraps {@code in} in a gzip reader if it starts with the gzip magic number.
+   *
+   * <p>Databricks does not document whether a result chunk arrives compressed, and {@link
+   * HttpURLConnection} does not decompress on its own, so the content is what decides.
+   */
+  @Nonnull
+  private static InputStream decompressIfNeeded(InputStream in) throws IOException {
+    PushbackInputStream pushback = new PushbackInputStream(in, GZIP_MAGIC.length);
+    byte[] magic = new byte[GZIP_MAGIC.length];
+    int read = ByteStreams.read(pushback, magic, 0, magic.length);
+    if (read > 0) {
+      pushback.unread(magic, 0, read);
     }
-    return in;
+    if (read == GZIP_MAGIC.length && Arrays.equals(magic, GZIP_MAGIC)) {
+      return new GZIPInputStream(pushback);
+    }
+    return pushback;
   }
 
   private static ResultData fetchChunk(DatabricksHandle handle, String statementId, long chunkIndex)
