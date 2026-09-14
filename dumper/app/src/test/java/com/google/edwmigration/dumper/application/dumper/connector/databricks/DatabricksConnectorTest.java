@@ -43,8 +43,8 @@ public class DatabricksConnectorTest {
   /** catalogs, schemata, tables, columns, views, table constraints and functions. */
   private static final int DATASETS = 7;
 
-  /** schemata, tables, columns and views, dumped separately for the legacy metastore. */
-  private static final int HIVE_METASTORE_TASKS = 4;
+  /** catalogs, schemata, tables, columns and views, dumped separately for the legacy metastore. */
+  private static final int HIVE_METASTORE_TASKS = 5;
 
   private final DatabricksConnector connector = new DatabricksConnector();
 
@@ -149,10 +149,11 @@ public class DatabricksConnectorTest {
     assertTrue(tasks.get(20) instanceof DatabricksSystemSqlFunctionsTask);
     assertTrue(tasks.get(21) instanceof DatabricksSqlFunctionsTask);
     assertTrue(tasks.get(22) instanceof DatabricksRestFunctionsTask);
-    assertTrue(tasks.get(23) instanceof DatabricksHiveMetastoreSchemataTask);
-    assertTrue(tasks.get(24) instanceof DatabricksHiveMetastoreTablesTask);
-    assertTrue(tasks.get(25) instanceof DatabricksHiveMetastoreColumnsTask);
-    assertTrue(tasks.get(26) instanceof DatabricksHiveMetastoreViewsTask);
+    assertTrue(tasks.get(23) instanceof DatabricksHiveMetastoreCatalogsTask);
+    assertTrue(tasks.get(24) instanceof DatabricksHiveMetastoreSchemataTask);
+    assertTrue(tasks.get(25) instanceof DatabricksHiveMetastoreTablesTask);
+    assertTrue(tasks.get(26) instanceof DatabricksHiveMetastoreColumnsTask);
+    assertTrue(tasks.get(27) instanceof DatabricksHiveMetastoreViewsTask);
 
     // The first tier of each dataset is unconditional; the two fallback tiers behind it are gated
     // on their predecessors having failed.

@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -30,11 +31,14 @@ import com.databricks.sdk.service.sql.StatementStatus;
 import com.google.edwmigration.dumper.application.dumper.task.MemoryByteSink;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import java.io.IOException;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -306,6 +310,12 @@ public class DatabricksTasksTest {
     mockSqlQuery(
         "SHOW SCHEMAS IN hive_metastore",
         Collections.singletonList(Collections.singletonList("hms_schema")));
+    mockSqlQuery(
+        "DESCRIBE SCHEMA EXTENDED hive_metastore.`hms_schema`",
+        Arrays.asList(
+            Arrays.asList("Database Name", "hms_schema"),
+            Arrays.asList("Comment", "legacy sales data"),
+            Arrays.asList("Owner", "alice@example.com")));
 
     DatabricksHiveMetastoreSchemataTask task = new DatabricksHiveMetastoreSchemataTask(s -> true);
     MemoryByteSink sink = new MemoryByteSink();
@@ -314,65 +324,69 @@ public class DatabricksTasksTest {
     List<String> lines = readLines(sink);
     assertEquals(2, lines.size());
     assertEquals("CatalogName,SchemaName,Comment,Owner,CreatedAt,UpdatedAt", lines.get(0));
-    assertEquals("hive_metastore,hms_schema,,,,", lines.get(1));
+    assertEquals("hive_metastore,hms_schema,legacy sales data,alice@example.com,,", lines.get(1));
+  }
+
+  @Test
+  public void hiveMetastoreCatalogsTask_writesTheLegacyCatalog() throws Exception {
+    DatabricksHiveMetastoreCatalogsTask task = new DatabricksHiveMetastoreCatalogsTask();
+    MemoryByteSink sink = new MemoryByteSink();
+    task.doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals("CatalogName,Comment,Owner,CreatedAt,UpdatedAt", lines.get(0));
+    assertTrue(lines.get(1).startsWith("hive_metastore,"));
   }
 
   @Test
   public void hiveMetastoreTablesTask_writesExpectedCsv() throws Exception {
-    mockSqlQuery(
-        "SHOW SCHEMAS IN hive_metastore",
-        Collections.singletonList(Collections.singletonList("hms_schema")));
-    mockSqlQuery(
-        "SHOW TABLES IN hive_metastore.`hms_schema`",
-        Collections.singletonList(Arrays.asList("hms_schema", "hms_table", "false")));
+    mockHiveMetastoreSchema();
 
     DatabricksHiveMetastoreTablesTask task = new DatabricksHiveMetastoreTablesTask(s -> true);
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
     List<String> lines = readLines(sink);
-    assertEquals(2, lines.size());
+    assertEquals(3, lines.size());
     assertEquals(
         "TableCatalog,TableSchema,TableName,TableType,DataSourceFormat,StorageLocation,Comment,Owner,CreatedAt,UpdatedAt",
         lines.get(0));
-    assertEquals("hive_metastore,hms_schema,hms_table,MANAGED,DELTA,,,,,", lines.get(1));
+    assertEquals(
+        "hive_metastore,hms_schema,hms_table,EXTERNAL,parquet,s3://bucket/hms_table,orders table,"
+            + "alice@example.com,"
+            + expectedCreatedAtMillis()
+            + ",",
+        lines.get(1));
+    assertEquals("hive_metastore,hms_schema,v_table,VIEW,,,,,,", lines.get(2));
   }
 
   @Test
   public void hiveMetastoreColumnsTask_writesExpectedCsv() throws Exception {
-    mockSqlQuery(
-        "SHOW SCHEMAS IN hive_metastore",
-        Collections.singletonList(Collections.singletonList("hms_schema")));
-    mockSqlQuery(
-        "SHOW TABLES IN hive_metastore.`hms_schema`",
-        Collections.singletonList(Arrays.asList("hms_schema", "hms_table", "false")));
-    mockSqlQuery(
-        "DESCRIBE TABLE hive_metastore.`hms_schema`.`hms_table`",
-        Collections.singletonList(Arrays.asList("id", "int", "id comment")));
+    mockHiveMetastoreSchema();
 
     DatabricksHiveMetastoreColumnsTask task = new DatabricksHiveMetastoreColumnsTask(s -> true);
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
     List<String> lines = readLines(sink);
-    assertEquals(2, lines.size());
+    assertEquals(5, lines.size());
     assertEquals(
         "TableCatalog,TableSchema,TableName,OrdinalPosition,ColumnName,DataType,IsNullable,Comment,PartitionIndex",
         lines.get(0));
-    assertEquals("hive_metastore,hms_schema,hms_table,1,id,int,true,id comment,", lines.get(1));
+    assertEquals("hive_metastore,hms_schema,hms_table,1,id,BIGINT,false,,", lines.get(1));
+    // 'country' partitions the table, so it carries a partition index.
+    assertEquals("hive_metastore,hms_schema,hms_table,2,country,STRING,true,,1", lines.get(2));
+    // A nested struct keeps its field list rather than degrading to the bare word 'struct'.
+    assertEquals(
+        "hive_metastore,hms_schema,hms_table,3,addr,\"STRUCT<city: STRING, zip: INT>\",true,,",
+        lines.get(3));
+    assertEquals("hive_metastore,hms_schema,v_table,1,one,INT,false,,", lines.get(4));
   }
 
   @Test
   public void hiveMetastoreViewsTask_writesExpectedCsv() throws Exception {
-    mockSqlQuery(
-        "SHOW SCHEMAS IN hive_metastore",
-        Collections.singletonList(Collections.singletonList("hms_schema")));
-    mockSqlQuery(
-        "SHOW TABLES IN hive_metastore.`hms_schema`",
-        Collections.singletonList(Arrays.asList("hms_schema", "v_table", "false")));
-    mockSqlQuery(
-        "SHOW CREATE TABLE hive_metastore.`hms_schema`.`v_table`",
-        Collections.singletonList(Collections.singletonList("CREATE VIEW v_table AS SELECT 1")));
+    mockHiveMetastoreSchema();
 
     DatabricksHiveMetastoreViewsTask task = new DatabricksHiveMetastoreViewsTask(s -> true);
     MemoryByteSink sink = new MemoryByteSink();
@@ -381,7 +395,61 @@ public class DatabricksTasksTest {
     List<String> lines = readLines(sink);
     assertEquals(2, lines.size());
     assertEquals("TableCatalog,TableSchema,TableName,ViewDefinition", lines.get(0));
-    assertEquals("hive_metastore,hms_schema,v_table,CREATE VIEW v_table AS SELECT 1", lines.get(1));
+    assertEquals("hive_metastore,hms_schema,v_table,SELECT 1 AS one", lines.get(1));
+  }
+
+  private static final String HMS_CREATED_TIME = "Thu Jan 01 00:00:00 UTC 2015";
+
+  /** One table and one view, described the way SHOW TABLE EXTENDED describes them. */
+  private void mockHiveMetastoreSchema() {
+    mockSqlQuery(
+        "SHOW SCHEMAS IN hive_metastore",
+        Collections.singletonList(Collections.singletonList("hms_schema")));
+    mockSqlQuery(
+        "SHOW TABLE EXTENDED IN hive_metastore.`hms_schema`",
+        Arrays.asList(
+            Arrays.asList(
+                "hms_schema",
+                "hms_table",
+                "false",
+                "Catalog: hive_metastore\n"
+                    + "Database: hms_schema\n"
+                    + "Table: hms_table\n"
+                    + "Owner: alice@example.com\n"
+                    + "Created Time: "
+                    + HMS_CREATED_TIME
+                    + "\n"
+                    + "Last Access: UNKNOWN\n"
+                    + "Created By: Spark 3.4.1\n"
+                    + "Type: EXTERNAL\n"
+                    + "Provider: parquet\n"
+                    + "Comment: orders table\n"
+                    + "Location: s3://bucket/hms_table\n"
+                    + "Partition Provider: Catalog\n"
+                    + "Partition Columns: [`country`]\n"
+                    + "Schema: root\n"
+                    + " |-- id: long (nullable = false)\n"
+                    + " |-- country: string (nullable = true)\n"
+                    + " |-- addr: struct (nullable = true)\n"
+                    + " |    |-- city: string (nullable = true)\n"
+                    + " |    |-- zip: integer (nullable = true)\n"),
+            Arrays.asList(
+                "hms_schema",
+                "v_table",
+                "false",
+                "Catalog: hive_metastore\n"
+                    + "Database: hms_schema\n"
+                    + "Table: v_table\n"
+                    + "Type: VIEW\n"
+                    + "View Text: SELECT 1 AS one\n"
+                    + "Schema: root\n"
+                    + " |-- one: integer (nullable = false)\n")));
+  }
+
+  private static long expectedCreatedAtMillis() throws ParseException {
+    return new SimpleDateFormat("EEE MMM dd HH:mm:ss zzz yyyy", Locale.ROOT)
+        .parse(HMS_CREATED_TIME)
+        .getTime();
   }
 
   @Test

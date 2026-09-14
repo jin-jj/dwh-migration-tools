@@ -16,34 +16,30 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
-import com.google.common.base.Preconditions;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksCatalogNames.HIVE_METASTORE;
+
 import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
-import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMonitor;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TablesFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Dumps table definitions from Databricks legacy hive_metastore via DBSQL. */
-class DatabricksHiveMetastoreTablesTask extends AbstractTask<Void> implements TablesFormat {
+/** Dumps table definitions from the legacy {@code hive_metastore} catalog. */
+class DatabricksHiveMetastoreTablesTask extends AbstractDatabricksHiveMetastoreTask
+    implements TablesFormat {
 
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksHiveMetastoreTablesTask.class);
 
-  private final Predicate<String> schemaPredicate;
-
   DatabricksHiveMetastoreTablesTask(@Nonnull Predicate<String> schemaPredicate) {
-    super(HMS_ZIP_ENTRY_NAME);
-    this.schemaPredicate =
-        Preconditions.checkNotNull(schemaPredicate, "Schema predicate was null.");
+    super(HMS_ZIP_ENTRY_NAME, schemaPredicate);
   }
 
   @Override
@@ -59,39 +55,23 @@ class DatabricksHiveMetastoreTablesTask extends AbstractTask<Void> implements Ta
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore tables to " + getTargetPath())) {
-      List<List<String>> schemaRows =
-          DatabricksSqlHelper.executeQueryOrThrow(
-              databricksHandle, "SHOW SCHEMAS IN hive_metastore");
-      for (List<String> schemaRow : schemaRows) {
-        if (schemaRow.isEmpty()) {
-          continue;
-        }
-        String schemaName = schemaRow.get(0);
-        if (schemaName == null || !schemaPredicate.test(schemaName)) {
-          continue;
-        }
-        List<List<String>> tableRows =
-            DatabricksSqlHelper.executeQueryOrThrow(
-                databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
-        for (List<String> tableRow : tableRows) {
-          if (tableRow.size() >= 2) {
-            String tableName = tableRow.get(1);
-            boolean isTemp = tableRow.size() > 2 && "true".equalsIgnoreCase(tableRow.get(2));
+      forEachTable(
+          databricksHandle,
+          (schemaName, table) -> {
             monitor.count();
             printer.printRecord(
-                "hive_metastore",
+                HIVE_METASTORE,
                 schemaName,
-                tableName,
-                isTemp ? "TEMPORARY" : "MANAGED",
-                "DELTA",
-                /* storageLocation= */ null,
-                /* comment= */ null,
-                /* owner= */ null,
-                /* createdAt= */ null,
+                table.name(),
+                table.type(),
+                table.provider(),
+                table.location(),
+                table.comment(),
+                table.owner(),
+                table.createdAtMillis(),
+                // The legacy metastore records no modification time.
                 /* updatedAt= */ null);
-          }
-        }
-      }
+          });
     }
     return null;
   }

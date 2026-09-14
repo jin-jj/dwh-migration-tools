@@ -24,6 +24,7 @@ public interface DatabricksMetadataDumpFormat {
   interface CatalogsFormat {
 
     String ZIP_ENTRY_NAME = "catalogs.csv";
+    String HMS_ZIP_ENTRY_NAME = "catalogs-hms.csv";
 
     enum Header {
       CatalogName,

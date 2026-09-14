@@ -16,34 +16,37 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
-import com.google.common.base.Preconditions;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksCatalogNames.HIVE_METASTORE;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.escapeIdentifier;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.executeQueryOrThrow;
+
 import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
-import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMonitor;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Dumps schema definitions from Databricks legacy hive_metastore via DBSQL. */
-class DatabricksHiveMetastoreSchemataTask extends AbstractTask<Void> implements SchemataFormat {
+/** Dumps schema definitions from the legacy {@code hive_metastore} catalog. */
+class DatabricksHiveMetastoreSchemataTask extends AbstractDatabricksHiveMetastoreTask
+    implements SchemataFormat {
 
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksHiveMetastoreSchemataTask.class);
 
-  private final Predicate<String> schemaPredicate;
-
   DatabricksHiveMetastoreSchemataTask(@Nonnull Predicate<String> schemaPredicate) {
-    super(HMS_ZIP_ENTRY_NAME);
-    this.schemaPredicate =
-        Preconditions.checkNotNull(schemaPredicate, "Schema predicate was null.");
+    super(HMS_ZIP_ENTRY_NAME, schemaPredicate);
   }
 
   @Override
@@ -59,25 +62,46 @@ class DatabricksHiveMetastoreSchemataTask extends AbstractTask<Void> implements 
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore schemas to " + getTargetPath())) {
-      List<List<String>> rows =
-          DatabricksSqlHelper.executeQueryOrThrow(
-              databricksHandle, "SHOW SCHEMAS IN hive_metastore");
-      for (List<String> row : rows) {
-        if (!row.isEmpty()) {
-          String schemaName = row.get(0);
-          if (schemaName != null && schemaPredicate.test(schemaName)) {
-            monitor.count();
-            printer.printRecord(
-                "hive_metastore",
-                schemaName,
-                /* comment= */ null,
-                /* owner= */ null,
-                /* createdAt= */ null,
-                /* updatedAt= */ null);
-          }
-        }
+      for (String schemaName : fetchMatchingSchemaNames(databricksHandle)) {
+        Map<String, String> description = describeSchema(databricksHandle, schemaName);
+        monitor.count();
+        printer.printRecord(
+            HIVE_METASTORE,
+            schemaName,
+            description.get("comment"),
+            description.get("owner"),
+            // The legacy metastore records neither creation nor modification time for schemas.
+            /* createdAt= */ null,
+            /* updatedAt= */ null);
       }
     }
     return null;
+  }
+
+  /**
+   * Returns the lower-cased property names and values of {@code DESCRIBE SCHEMA EXTENDED}.
+   *
+   * <p>There are only ever a handful of schemas, so the query per schema is affordable here. A
+   * schema that cannot be described still gets a row, just without its comment and owner.
+   */
+  private static Map<String, String> describeSchema(
+      @Nonnull DatabricksHandle handle, @Nonnull String schemaName) {
+    Map<String, String> description = new LinkedHashMap<>();
+    List<List<String>> rows;
+    try {
+      rows =
+          executeQueryOrThrow(
+              handle,
+              "DESCRIBE SCHEMA EXTENDED " + HIVE_METASTORE + "." + escapeIdentifier(schemaName));
+    } catch (SQLException e) {
+      logger.warn("Failed to describe hive_metastore.{}: {}", schemaName, e.getMessage());
+      return description;
+    }
+    for (List<String> row : rows) {
+      if (row.size() >= 2 && row.get(0) != null) {
+        description.put(row.get(0).trim().toLowerCase(Locale.ROOT), row.get(1));
+      }
+    }
+    return description;
   }
 }

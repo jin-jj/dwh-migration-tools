@@ -16,35 +16,38 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
-import com.google.common.base.Preconditions;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksCatalogNames.HIVE_METASTORE;
+
 import com.google.common.io.ByteSink;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTable.Column;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
-import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMonitor;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
-import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Dumps column definitions from Databricks legacy hive_metastore via DBSQL. */
-class DatabricksHiveMetastoreColumnsTask extends AbstractTask<Void> implements ColumnsFormat {
+/**
+ * Dumps column definitions from the legacy {@code hive_metastore} catalog.
+ *
+ * <p>Columns are read from the schema tree that {@code SHOW TABLE EXTENDED} prints for each table,
+ * which costs one query per schema. {@code DESCRIBE TABLE} would additionally give column comments,
+ * but at one query per table, which is not affordable on a metastore of any size. Column comments
+ * are therefore left empty here.
+ */
+class DatabricksHiveMetastoreColumnsTask extends AbstractDatabricksHiveMetastoreTask
+    implements ColumnsFormat {
 
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksHiveMetastoreColumnsTask.class);
 
-  private final Predicate<String> schemaPredicate;
-
   DatabricksHiveMetastoreColumnsTask(@Nonnull Predicate<String> schemaPredicate) {
-    super(HMS_ZIP_ENTRY_NAME);
-    this.schemaPredicate =
-        Preconditions.checkNotNull(schemaPredicate, "Schema predicate was null.");
+    super(HMS_ZIP_ENTRY_NAME, schemaPredicate);
   }
 
   @Override
@@ -60,54 +63,24 @@ class DatabricksHiveMetastoreColumnsTask extends AbstractTask<Void> implements C
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore columns to " + getTargetPath())) {
-      List<List<String>> schemaRows =
-          DatabricksSqlHelper.executeQueryOrThrow(
-              databricksHandle, "SHOW SCHEMAS IN hive_metastore");
-      for (List<String> schemaRow : schemaRows) {
-        if (schemaRow.isEmpty()) {
-          continue;
-        }
-        String schemaName = schemaRow.get(0);
-        if (schemaName == null || !schemaPredicate.test(schemaName)) {
-          continue;
-        }
-        List<List<String>> tableRows =
-            DatabricksSqlHelper.executeQueryOrThrow(
-                databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
-        for (List<String> tableRow : tableRows) {
-          if (tableRow.size() < 2) {
-            continue;
-          }
-          String tableName = tableRow.get(1);
-          List<List<String>> describeRows =
-              DatabricksSqlHelper.executeQueryOrThrow(
-                  databricksHandle,
-                  "DESCRIBE TABLE hive_metastore.`" + schemaName + "`.`" + tableName + "`");
-          int ordinal = 1;
-          for (List<String> colRow : describeRows) {
-            if (colRow.size() >= 2) {
-              String colName = colRow.get(0);
-              String dataType = colRow.get(1);
-              String comment = colRow.size() > 2 ? colRow.get(2) : null;
-              // Spark DESCRIBE TABLE includes partitioning and metadata headers starting with #
-              if (StringUtils.isBlank(colName) || colName.startsWith("#")) {
-                break;
-              }
+      forEachTable(
+          databricksHandle,
+          (schemaName, table) -> {
+            int ordinal = 1;
+            for (Column column : table.columns()) {
               monitor.count();
               printer.printRecord(
-                  "hive_metastore",
+                  HIVE_METASTORE,
                   schemaName,
-                  tableName,
+                  table.name(),
                   ordinal++,
-                  colName,
-                  dataType,
-                  /* isNullable= */ true,
-                  comment,
-                  /* partitionIndex= */ null);
+                  column.name(),
+                  column.dataType(),
+                  column.nullable(),
+                  /* comment= */ null,
+                  table.partitionIndexOf(column.name()));
             }
-          }
-        }
-      }
+          });
     }
     return null;
   }

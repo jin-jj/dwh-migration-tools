@@ -16,35 +16,37 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
-import com.google.common.base.Preconditions;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksCatalogNames.HIVE_METASTORE;
+
 import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
-import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMonitor;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ViewsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
-import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Dumps view definitions from Databricks legacy hive_metastore via DBSQL. */
-class DatabricksHiveMetastoreViewsTask extends AbstractTask<Void> implements ViewsFormat {
+/**
+ * Dumps view definitions from the legacy {@code hive_metastore} catalog.
+ *
+ * <p>Views are identified by the table type reported by {@code SHOW TABLE EXTENDED}. The previous
+ * implementation ran {@code SHOW CREATE TABLE} on every table and kept the ones whose DDL happened
+ * to contain the substring "VIEW", which both cost a query per table and misclassified any table
+ * with, say, a column named {@code review}.
+ */
+class DatabricksHiveMetastoreViewsTask extends AbstractDatabricksHiveMetastoreTask
+    implements ViewsFormat {
 
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksHiveMetastoreViewsTask.class);
 
-  private final Predicate<String> schemaPredicate;
-
   DatabricksHiveMetastoreViewsTask(@Nonnull Predicate<String> schemaPredicate) {
-    super(HMS_ZIP_ENTRY_NAME);
-    this.schemaPredicate =
-        Preconditions.checkNotNull(schemaPredicate, "Schema predicate was null.");
+    super(HMS_ZIP_ENTRY_NAME, schemaPredicate);
   }
 
   @Override
@@ -60,42 +62,15 @@ class DatabricksHiveMetastoreViewsTask extends AbstractTask<Void> implements Vie
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore views to " + getTargetPath())) {
-      List<List<String>> schemaRows =
-          DatabricksSqlHelper.executeQueryOrThrow(
-              databricksHandle, "SHOW SCHEMAS IN hive_metastore");
-      for (List<String> schemaRow : schemaRows) {
-        if (schemaRow.isEmpty()) {
-          continue;
-        }
-        String schemaName = schemaRow.get(0);
-        if (schemaName == null || !schemaPredicate.test(schemaName)) {
-          continue;
-        }
-        List<List<String>> tableRows =
-            DatabricksSqlHelper.executeQueryOrThrow(
-                databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
-        for (List<String> tableRow : tableRows) {
-          if (tableRow.size() < 2) {
-            continue;
-          }
-          String tableName = tableRow.get(1);
-          List<List<String>> createTableRows =
-              DatabricksSqlHelper.executeQueryOrThrow(
-                  databricksHandle,
-                  "SHOW CREATE TABLE hive_metastore.`" + schemaName + "`.`" + tableName + "`");
-          StringBuilder ddlBuilder = new StringBuilder();
-          for (List<String> ddlRow : createTableRows) {
-            if (!ddlRow.isEmpty() && ddlRow.get(0) != null) {
-              ddlBuilder.append(ddlRow.get(0)).append("\n");
+      forEachTable(
+          databricksHandle,
+          (schemaName, table) -> {
+            if (!table.isView()) {
+              return;
             }
-          }
-          String ddl = ddlBuilder.toString().trim();
-          if (StringUtils.containsIgnoreCase(ddl, "VIEW")) {
             monitor.count();
-            printer.printRecord("hive_metastore", schemaName, tableName, ddl);
-          }
-        }
-      }
+            printer.printRecord(HIVE_METASTORE, schemaName, table.name(), table.viewText());
+          });
     }
     return null;
   }

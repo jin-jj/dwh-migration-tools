@@ -224,12 +224,11 @@ public class DatabricksConnector extends AbstractConnector
                 || arguments.getDatabases().stream()
                     .anyMatch(d -> d.equalsIgnoreCase(DatabricksCatalogNames.HIVE_METASTORE)));
     if (includesHiveMetastore) {
-      if (arguments.getWarehouse() != null) {
-        out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
-        out.add(new DatabricksHiveMetastoreTablesTask(schemaPredicate));
-        out.add(new DatabricksHiveMetastoreColumnsTask(schemaPredicate));
-        out.add(new DatabricksHiveMetastoreViewsTask(schemaPredicate));
-      }
+      out.add(new DatabricksHiveMetastoreCatalogsTask());
+      out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
+      out.add(new DatabricksHiveMetastoreTablesTask(schemaPredicate));
+      out.add(new DatabricksHiveMetastoreColumnsTask(schemaPredicate));
+      out.add(new DatabricksHiveMetastoreViewsTask(schemaPredicate));
     }
   }
 
