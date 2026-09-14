@@ -17,6 +17,8 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -24,10 +26,12 @@ import static org.mockito.Mockito.when;
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ResultData;
+import com.databricks.sdk.service.sql.ServiceError;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -48,7 +52,7 @@ public class DatabricksSqlHelperTest {
   }
 
   @Test
-  public void executeQuery_succeedsAndReturnsRows() {
+  public void executeQueryOrThrow_succeedsAndReturnsRows() throws Exception {
     WorkspaceClient client = mock(WorkspaceClient.class);
     StatementExecutionAPI statementAPI = mock(StatementExecutionAPI.class);
     when(client.statementExecution()).thenReturn(statementAPI);
@@ -67,7 +71,7 @@ public class DatabricksSqlHelperTest {
     when(statementAPI.executeStatement(any(ExecuteStatementRequest.class))).thenReturn(response);
 
     DatabricksHandle handle = new DatabricksHandle(client, "wh-1");
-    List<List<String>> rows = DatabricksSqlHelper.executeQuery(handle, "SELECT 1");
+    List<List<String>> rows = DatabricksSqlHelper.executeQueryOrThrow(handle, "SELECT 1");
 
     assertEquals(2, rows.size());
     assertEquals(Arrays.asList("cat1", "schema1"), rows.get(0));
@@ -75,7 +79,7 @@ public class DatabricksSqlHelperTest {
   }
 
   @Test
-  public void executeQuery_handlesPagination() {
+  public void executeQueryOrThrow_handlesPagination() throws Exception {
     WorkspaceClient client = mock(WorkspaceClient.class);
     StatementExecutionAPI statementAPI = mock(StatementExecutionAPI.class);
     when(client.statementExecution()).thenReturn(statementAPI);
@@ -100,7 +104,7 @@ public class DatabricksSqlHelperTest {
     when(statementAPI.getStatementResultChunkN("stmt-1", 1L)).thenReturn(chunk1);
 
     DatabricksHandle handle = new DatabricksHandle(client, "wh-1");
-    List<List<String>> rows = DatabricksSqlHelper.executeQuery(handle, "SELECT 1");
+    List<List<String>> rows = DatabricksSqlHelper.executeQueryOrThrow(handle, "SELECT 1");
 
     assertEquals(2, rows.size());
     assertEquals(Collections.singletonList("row1"), rows.get(0));
@@ -116,8 +120,8 @@ public class DatabricksSqlHelperTest {
     StatementResponse response = new StatementResponse();
     response.setStatementId("stmt-fail");
     StatementStatus status = new StatementStatus().setState(StatementState.FAILED);
-    com.databricks.sdk.service.sql.ServiceError error =
-        new com.databricks.sdk.service.sql.ServiceError()
+    ServiceError error =
+        new ServiceError()
             .setMessage(
                 "[INSUFFICIENT_PERMISSIONS] Insufficient privileges:\n"
                     + "User does not have USE CATALOG on Catalog 'dmishyn'");
@@ -128,13 +132,11 @@ public class DatabricksSqlHelperTest {
 
     DatabricksHandle handle = new DatabricksHandle(client, "wh-1");
 
-    try {
-      DatabricksSqlHelper.executeQueryOrThrow(
-          handle, "SELECT 1 FROM dmishyn.information_schema.tables");
-      org.junit.Assert.fail("Expected SQLException");
-    } catch (Exception e) {
-      org.junit.Assert.assertTrue(e instanceof java.sql.SQLException);
-      org.junit.Assert.assertTrue(handle.isCatalogInaccessible("dmishyn"));
-    }
+    assertThrows(
+        SQLException.class,
+        () ->
+            DatabricksSqlHelper.executeQueryOrThrow(
+                handle, "SELECT 1 FROM dmishyn.information_schema.tables"));
+    assertTrue(handle.isCatalogInaccessible("dmishyn"));
   }
 }

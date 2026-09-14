@@ -62,7 +62,7 @@ class DatabricksSqlSchemataTask extends AbstractDatabricksSqlTask implements Sch
                 + ".information_schema.schemata ORDER BY schema_name";
         AtomicBoolean success = new AtomicBoolean(false);
         try {
-          DatabricksSqlHelper.executeQuery(
+          DatabricksSqlHelper.executeQueryOrThrow(
               databricksHandle,
               sql,
               row -> {
@@ -99,7 +99,7 @@ class DatabricksSqlSchemataTask extends AbstractDatabricksSqlTask implements Sch
                   + escapedCatalog
                   + ".information_schema.schemata ORDER BY schema_name";
           try {
-            DatabricksSqlHelper.executeQuery(
+            DatabricksSqlHelper.executeQueryOrThrow(
                 databricksHandle,
                 fallbackSql,
                 row -> {

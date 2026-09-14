@@ -617,7 +617,7 @@ public class DatabricksTasksTest {
   }
 
   @Test
-  public void inaccessibleCatalog_isOmittedFromMatchingCatalogs() {
+  public void inaccessibleCatalog_isOmittedFromMatchingCatalogs() throws Exception {
     handle.markCatalogInaccessible("dmishyn");
     mockSqlQuery(
         "SHOW CATALOGS",

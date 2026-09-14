@@ -78,7 +78,7 @@ class DatabricksSqlTableConstraintsTask extends AbstractDatabricksSqlTask
                 + "ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position";
         try {
           Map<String, ConstraintAccumulator> pkMap = new LinkedHashMap<>();
-          DatabricksSqlHelper.executeQuery(
+          DatabricksSqlHelper.executeQueryOrThrow(
               databricksHandle,
               pkSql,
               row -> {
@@ -153,7 +153,7 @@ class DatabricksSqlTableConstraintsTask extends AbstractDatabricksSqlTask
                 + "ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position";
         try {
           Map<String, ConstraintAccumulator> fkMap = new LinkedHashMap<>();
-          DatabricksSqlHelper.executeQuery(
+          DatabricksSqlHelper.executeQueryOrThrow(
               databricksHandle,
               fkSql,
               row -> {
@@ -219,7 +219,7 @@ class DatabricksSqlTableConstraintsTask extends AbstractDatabricksSqlTask
                 + "ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position";
         try {
           Map<String, ConstraintAccumulator> otherMap = new LinkedHashMap<>();
-          DatabricksSqlHelper.executeQuery(
+          DatabricksSqlHelper.executeQueryOrThrow(
               databricksHandle,
               otherSql,
               row -> {
@@ -267,7 +267,7 @@ class DatabricksSqlTableConstraintsTask extends AbstractDatabricksSqlTask
                   + ".information_schema.table_constraints "
                   + "ORDER BY table_schema, table_name, constraint_name";
           try {
-            DatabricksSqlHelper.executeQuery(
+            DatabricksSqlHelper.executeQueryOrThrow(
                 databricksHandle,
                 fallbackSql,
                 row -> {

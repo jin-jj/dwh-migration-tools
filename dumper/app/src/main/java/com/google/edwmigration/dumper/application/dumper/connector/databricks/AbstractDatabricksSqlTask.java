@@ -19,6 +19,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
@@ -56,10 +57,17 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
     this(targetPath, catalogPredicate, s -> true);
   }
 
+  /**
+   * Returns the catalogs that match the user-supplied filter and are readable.
+   *
+   * <p>{@code hive_metastore} is excluded because it is a legacy catalog that does not expose an
+   * {@code information_schema}. It is dumped by the dedicated Hive Metastore tasks instead.
+   */
   @Nonnull
-  protected List<String> fetchMatchingCatalogs(@Nonnull DatabricksHandle handle) {
+  protected List<String> fetchMatchingCatalogs(@Nonnull DatabricksHandle handle)
+      throws SQLException {
     List<String> result = new ArrayList<>();
-    List<List<String>> rows = DatabricksSqlHelper.executeQuery(handle, "SHOW CATALOGS");
+    List<List<String>> rows = DatabricksSqlHelper.executeQueryOrThrow(handle, "SHOW CATALOGS");
     for (List<String> row : rows) {
       if (!row.isEmpty()) {
         String cat = row.get(0);

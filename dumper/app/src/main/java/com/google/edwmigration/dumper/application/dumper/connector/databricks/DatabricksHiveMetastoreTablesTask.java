@@ -60,7 +60,8 @@ class DatabricksHiveMetastoreTablesTask extends AbstractTask<Void> implements Ta
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore tables to " + getTargetPath())) {
       List<List<String>> schemaRows =
-          DatabricksSqlHelper.executeQuery(databricksHandle, "SHOW SCHEMAS IN hive_metastore");
+          DatabricksSqlHelper.executeQueryOrThrow(
+              databricksHandle, "SHOW SCHEMAS IN hive_metastore");
       for (List<String> schemaRow : schemaRows) {
         if (schemaRow.isEmpty()) {
           continue;
@@ -70,7 +71,7 @@ class DatabricksHiveMetastoreTablesTask extends AbstractTask<Void> implements Ta
           continue;
         }
         List<List<String>> tableRows =
-            DatabricksSqlHelper.executeQuery(
+            DatabricksSqlHelper.executeQueryOrThrow(
                 databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
         for (List<String> tableRow : tableRows) {
           if (tableRow.size() >= 2) {

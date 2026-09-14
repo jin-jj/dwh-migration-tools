@@ -49,7 +49,7 @@ class DatabricksSqlCatalogsTask extends AbstractDatabricksSqlTask implements Cat
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing catalogs to " + getTargetPath())) {
       List<List<String>> catalogRows =
-          DatabricksSqlHelper.executeQuery(databricksHandle, "SHOW CATALOGS");
+          DatabricksSqlHelper.executeQueryOrThrow(databricksHandle, "SHOW CATALOGS");
       for (List<String> row : catalogRows) {
         if (row.isEmpty()) {
           continue;
@@ -63,7 +63,7 @@ class DatabricksSqlCatalogsTask extends AbstractDatabricksSqlTask implements Cat
         String owner = null;
         try {
           List<List<String>> descRows =
-              DatabricksSqlHelper.executeQuery(
+              DatabricksSqlHelper.executeQueryOrThrow(
                   databricksHandle,
                   "DESCRIBE CATALOG EXTENDED " + DatabricksSqlHelper.escapeIdentifier(catalogName));
           for (List<String> descRow : descRows) {

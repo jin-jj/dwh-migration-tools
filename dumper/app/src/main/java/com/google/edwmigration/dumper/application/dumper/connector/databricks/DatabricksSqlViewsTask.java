@@ -59,7 +59,7 @@ class DatabricksSqlViewsTask extends AbstractDatabricksSqlTask implements ViewsF
                 + escapedCatalog
                 + ".information_schema.views ORDER BY table_schema, table_name";
         try {
-          DatabricksSqlHelper.executeQuery(
+          DatabricksSqlHelper.executeQueryOrThrow(
               databricksHandle,
               sql,
               row -> {

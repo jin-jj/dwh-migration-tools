@@ -61,7 +61,8 @@ class DatabricksHiveMetastoreColumnsTask extends AbstractTask<Void> implements C
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore columns to " + getTargetPath())) {
       List<List<String>> schemaRows =
-          DatabricksSqlHelper.executeQuery(databricksHandle, "SHOW SCHEMAS IN hive_metastore");
+          DatabricksSqlHelper.executeQueryOrThrow(
+              databricksHandle, "SHOW SCHEMAS IN hive_metastore");
       for (List<String> schemaRow : schemaRows) {
         if (schemaRow.isEmpty()) {
           continue;
@@ -71,7 +72,7 @@ class DatabricksHiveMetastoreColumnsTask extends AbstractTask<Void> implements C
           continue;
         }
         List<List<String>> tableRows =
-            DatabricksSqlHelper.executeQuery(
+            DatabricksSqlHelper.executeQueryOrThrow(
                 databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
         for (List<String> tableRow : tableRows) {
           if (tableRow.size() < 2) {
@@ -79,7 +80,7 @@ class DatabricksHiveMetastoreColumnsTask extends AbstractTask<Void> implements C
           }
           String tableName = tableRow.get(1);
           List<List<String>> describeRows =
-              DatabricksSqlHelper.executeQuery(
+              DatabricksSqlHelper.executeQueryOrThrow(
                   databricksHandle,
                   "DESCRIBE TABLE hive_metastore.`" + schemaName + "`.`" + tableName + "`");
           int ordinal = 1;

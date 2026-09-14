@@ -64,7 +64,7 @@ class DatabricksSqlColumnsTask extends AbstractDatabricksSqlTask implements Colu
                 + ".information_schema.columns ORDER BY table_schema, table_name, ordinal_position";
         AtomicBoolean success = new AtomicBoolean(false);
         try {
-          DatabricksSqlHelper.executeQuery(
+          DatabricksSqlHelper.executeQueryOrThrow(
               databricksHandle,
               sql,
               row -> {
@@ -105,7 +105,7 @@ class DatabricksSqlColumnsTask extends AbstractDatabricksSqlTask implements Colu
                   + escapedCatalog
                   + ".information_schema.columns ORDER BY table_schema, table_name, ordinal_position";
           try {
-            DatabricksSqlHelper.executeQuery(
+            DatabricksSqlHelper.executeQueryOrThrow(
                 databricksHandle,
                 fallbackSql,
                 row -> {

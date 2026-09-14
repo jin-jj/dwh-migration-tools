@@ -69,7 +69,7 @@ class DatabricksSqlFunctionsTask extends AbstractDatabricksSqlTask implements Fu
                 + ".information_schema.parameters "
                 + "ORDER BY specific_schema, specific_name, ordinal_position";
         try {
-          DatabricksSqlHelper.executeQuery(
+          DatabricksSqlHelper.executeQueryOrThrow(
               databricksHandle,
               paramsSql,
               row -> {
@@ -106,7 +106,7 @@ class DatabricksSqlFunctionsTask extends AbstractDatabricksSqlTask implements Fu
                 + "ORDER BY routine_schema, routine_name";
         AtomicBoolean success = new AtomicBoolean(false);
         try {
-          DatabricksSqlHelper.executeQuery(
+          DatabricksSqlHelper.executeQueryOrThrow(
               databricksHandle,
               sql,
               row -> {
@@ -154,7 +154,7 @@ class DatabricksSqlFunctionsTask extends AbstractDatabricksSqlTask implements Fu
                   + ".information_schema.routines "
                   + "ORDER BY routine_schema, routine_name";
           try {
-            DatabricksSqlHelper.executeQuery(
+            DatabricksSqlHelper.executeQueryOrThrow(
                 databricksHandle,
                 fallbackSql,
                 row -> {

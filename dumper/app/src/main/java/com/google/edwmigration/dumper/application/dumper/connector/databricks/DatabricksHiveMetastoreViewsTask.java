@@ -61,7 +61,8 @@ class DatabricksHiveMetastoreViewsTask extends AbstractTask<Void> implements Vie
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore views to " + getTargetPath())) {
       List<List<String>> schemaRows =
-          DatabricksSqlHelper.executeQuery(databricksHandle, "SHOW SCHEMAS IN hive_metastore");
+          DatabricksSqlHelper.executeQueryOrThrow(
+              databricksHandle, "SHOW SCHEMAS IN hive_metastore");
       for (List<String> schemaRow : schemaRows) {
         if (schemaRow.isEmpty()) {
           continue;
@@ -71,7 +72,7 @@ class DatabricksHiveMetastoreViewsTask extends AbstractTask<Void> implements Vie
           continue;
         }
         List<List<String>> tableRows =
-            DatabricksSqlHelper.executeQuery(
+            DatabricksSqlHelper.executeQueryOrThrow(
                 databricksHandle, "SHOW TABLES IN hive_metastore.`" + schemaName + "`");
         for (List<String> tableRow : tableRows) {
           if (tableRow.size() < 2) {
@@ -79,7 +80,7 @@ class DatabricksHiveMetastoreViewsTask extends AbstractTask<Void> implements Vie
           }
           String tableName = tableRow.get(1);
           List<List<String>> createTableRows =
-              DatabricksSqlHelper.executeQuery(
+              DatabricksSqlHelper.executeQueryOrThrow(
                   databricksHandle,
                   "SHOW CREATE TABLE hive_metastore.`" + schemaName + "`.`" + tableName + "`");
           StringBuilder ddlBuilder = new StringBuilder();

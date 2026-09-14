@@ -60,7 +60,8 @@ class DatabricksHiveMetastoreSchemataTask extends AbstractTask<Void> implements 
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing hive_metastore schemas to " + getTargetPath())) {
       List<List<String>> rows =
-          DatabricksSqlHelper.executeQuery(databricksHandle, "SHOW SCHEMAS IN hive_metastore");
+          DatabricksSqlHelper.executeQueryOrThrow(
+              databricksHandle, "SHOW SCHEMAS IN hive_metastore");
       for (List<String> row : rows) {
         if (!row.isEmpty()) {
           String schemaName = row.get(0);
