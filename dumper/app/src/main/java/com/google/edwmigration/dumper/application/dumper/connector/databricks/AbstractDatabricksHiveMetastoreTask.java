@@ -18,6 +18,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksCatalogNames.HIVE_METASTORE;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.escapeIdentifier;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.executeBulkQueryOrThrow;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.executeQueryOrThrow;
 
 import com.google.common.base.Preconditions;
@@ -25,6 +26,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskCategory;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -84,6 +86,9 @@ abstract class AbstractDatabricksHiveMetastoreTask extends AbstractTask<Void> {
    *
    * <p>One {@code SHOW TABLE EXTENDED} covers a whole schema, so the cost is one query per schema
    * rather than the two-per-table that {@code SHOW TABLES} plus {@code DESCRIBE TABLE} would need.
+   * Each row carries a description of a kilobyte or more, so the result is streamed through the
+   * external-links transport: a large schema would exceed the 25 MiB cap of the inline one, which
+   * aborts the statement outright.
    *
    * <p>A schema that cannot be read is logged and skipped, because a single unreadable or corrupt
    * schema should not cost the caller the whole metastore. If every schema fails, the failure is
@@ -95,33 +100,43 @@ abstract class AbstractDatabricksHiveMetastoreTask extends AbstractTask<Void> {
     int failures = 0;
     SQLException lastFailure = null;
     for (String schemaName : schemaNames) {
-      List<List<String>> rows;
+      String sql =
+          "SHOW TABLE EXTENDED IN "
+              + HIVE_METASTORE
+              + "."
+              + escapeIdentifier(schemaName)
+              + " LIKE '*'";
       try {
-        rows =
-            executeQueryOrThrow(
-                handle,
-                "SHOW TABLE EXTENDED IN "
-                    + HIVE_METASTORE
-                    + "."
-                    + escapeIdentifier(schemaName)
-                    + " LIKE '*'");
+        executeBulkQueryOrThrow(handle, sql, row -> describe(schemaName, row, consumer));
       } catch (SQLException e) {
         failures++;
         lastFailure = e;
         logger.warn(
             "Failed to describe the tables of hive_metastore.{}: {}", schemaName, e.getMessage());
-        continue;
-      }
-      for (List<String> row : rows) {
-        // SHOW TABLE EXTENDED returns (namespace, tableName, isTemporary, information).
-        if (row.size() < 4 || row.get(3) == null) {
-          continue;
-        }
-        consumer.accept(schemaName, DatabricksHiveMetastoreTable.parse(row.get(3)));
+      } catch (UncheckedIOException e) {
+        throw e.getCause();
       }
     }
     if (lastFailure != null && failures == schemaNames.size()) {
       throw lastFailure;
+    }
+  }
+
+  /**
+   * Parses one {@code SHOW TABLE EXTENDED} row and hands it to {@code consumer}.
+   *
+   * <p>The consumer contract of the SQL helper cannot declare {@code IOException}, so a write
+   * failure travels as an {@link UncheckedIOException} and is unwrapped by the caller.
+   */
+  private static void describe(String schemaName, List<String> row, TableConsumer consumer) {
+    // SHOW TABLE EXTENDED returns (namespace, tableName, isTemporary, information).
+    if (row.size() < 4 || row.get(3) == null) {
+      return;
+    }
+    try {
+      consumer.accept(schemaName, DatabricksHiveMetastoreTable.parse(row.get(3)));
+    } catch (IOException e) {
+      throw new UncheckedIOException("Failed to write a record of the dump", e);
     }
   }
 

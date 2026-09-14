@@ -233,7 +233,7 @@ final class DatabricksHiveMetastoreTable {
       return null;
     }
     try {
-      return new SimpleDateFormat(CREATED_TIME_PATTERN, Locale.ROOT).parse(createdTime).getTime();
+      return new SimpleDateFormat(CREATED_TIME_PATTERN, Locale.US).parse(createdTime).getTime();
     } catch (ParseException e) {
       logger.debug("Unparseable 'Created Time' value '{}'.", createdTime);
       return null;
