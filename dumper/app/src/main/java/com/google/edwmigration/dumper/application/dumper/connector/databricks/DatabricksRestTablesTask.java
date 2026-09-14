@@ -50,31 +50,24 @@ class DatabricksRestTablesTask extends AbstractDatabricksRestTask implements Tab
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing tables to " + getTargetPath())) {
-      for (String catalogName : fetchMatchingCatalogNames(databricksHandle)) {
-        for (String schemaName : fetchMatchingSchemaNames(databricksHandle, catalogName)) {
-          forEachTable(
-              databricksHandle,
-              catalogName,
-              schemaName,
-              /* includeColumns= */ false,
-              table -> {
-                monitor.count();
-                TableType tableType = table.getTableType();
-                DataSourceFormat format = table.getDataSourceFormat();
-                printer.printRecord(
-                    catalogName,
-                    schemaName,
-                    table.getName(),
-                    tableType == null ? null : tableType.name(),
-                    format == null ? null : format.name(),
-                    table.getStorageLocation(),
-                    table.getComment(),
-                    table.getOwner(),
-                    table.getCreatedAt(),
-                    table.getUpdatedAt());
-              });
-        }
-      }
+      forEachTableInMetastore(
+          databricksHandle,
+          table -> {
+            monitor.count();
+            TableType tableType = table.getTableType();
+            DataSourceFormat format = table.getDataSourceFormat();
+            printer.printRecord(
+                table.getCatalogName(),
+                table.getSchemaName(),
+                table.getName(),
+                tableType == null ? null : tableType.name(),
+                format == null ? null : format.name(),
+                table.getStorageLocation(),
+                table.getComment(),
+                table.getOwner(),
+                table.getCreatedAt(),
+                table.getUpdatedAt());
+          });
     }
     return null;
   }

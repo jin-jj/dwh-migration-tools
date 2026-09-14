@@ -28,12 +28,20 @@ import com.databricks.sdk.service.catalog.ListTablesRequest;
 import com.databricks.sdk.service.catalog.ListTablesResponse;
 import com.databricks.sdk.service.catalog.SchemaInfo;
 import com.databricks.sdk.service.catalog.TableInfo;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.Page;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskCategory;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
@@ -55,6 +63,17 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
   private static final Logger logger = LoggerFactory.getLogger(AbstractDatabricksRestTask.class);
 
   protected static final CSVFormat FORMAT = CSVFormat.DEFAULT;
+
+  /**
+   * Serializes the cached table listing.
+   *
+   * <p>Unknown properties are ignored on the way back in so that a listing written by one version
+   * of the SDK stays readable, and absent ones are omitted on the way out to keep the file small.
+   */
+  private static final ObjectMapper MAPPER =
+      new ObjectMapper()
+          .setSerializationInclusion(JsonInclude.Include.NON_NULL)
+          .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
   protected final Predicate<String> catalogPredicate;
   protected final Predicate<String> schemaPredicate;
@@ -210,5 +229,54 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
           }
         });
     return ImmutableList.copyOf(names);
+  }
+
+  /**
+   * Streams every table of every matching schema of every matching catalog.
+   *
+   * <p>The tables, columns, views and constraints tasks all read the same {@code /tables/list}
+   * responses, so the walk happens once for the connector and its result is shared through {@link
+   * DatabricksHandle#tableListing}. Each {@link TableInfo} carries its own catalog and schema name,
+   * so the caller does not need them passed separately.
+   */
+  protected void forEachTableInMetastore(
+      @Nonnull DatabricksHandle handle,
+      @Nonnull DatabricksRestHelper.ItemConsumer<TableInfo> consumer)
+      throws IOException {
+    Path listing = handle.tableListing(file -> writeTableListing(handle, file));
+    try (BufferedReader reader = Files.newBufferedReader(listing, StandardCharsets.UTF_8)) {
+      String line;
+      while ((line = reader.readLine()) != null) {
+        consumer.accept(MAPPER.readValue(line, TableInfo.class));
+      }
+    }
+  }
+
+  /**
+   * Walks the metastore and writes one table per line.
+   *
+   * <p>Columns are requested even though only one task needs them: fetching the union once is
+   * cheaper than walking the metastore a second time without them.
+   */
+  private void writeTableListing(DatabricksHandle handle, Path file) throws IOException {
+    logger.info("Listing the tables of the metastore over the REST API.");
+    long schemas = 0;
+    try (BufferedWriter writer = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+      for (String catalogName : fetchMatchingCatalogNames(handle)) {
+        for (String schemaName : fetchMatchingSchemaNames(handle, catalogName)) {
+          forEachTable(
+              handle,
+              catalogName,
+              schemaName,
+              /* includeColumns= */ true,
+              table -> {
+                writer.write(MAPPER.writeValueAsString(table));
+                writer.newLine();
+              });
+          schemas++;
+        }
+      }
+    }
+    logger.info("Listed the tables of {} schemas.", schemas);
   }
 }

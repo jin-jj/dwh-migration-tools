@@ -29,8 +29,6 @@ import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDu
 import java.io.IOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
@@ -71,21 +69,13 @@ class DatabricksRestTableConstraintsTask extends AbstractDatabricksRestTask
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing table constraints to " + getTargetPath())) {
-      for (String catalogName : fetchMatchingCatalogNames(databricksHandle)) {
-        for (String schemaName : fetchMatchingSchemaNames(databricksHandle, catalogName)) {
-          List<String> tableNames = new ArrayList<>();
-          forEachTable(
-              databricksHandle,
-              catalogName,
-              schemaName,
-              /* includeColumns= */ false,
-              table -> {
-                if (table.getName() != null) {
-                  tableNames.add(table.getName());
-                }
-              });
-          for (String tableName : tableNames) {
-            String fullName = catalogName + "." + schemaName + "." + tableName;
+      forEachTableInMetastore(
+          databricksHandle,
+          listed -> {
+            String fullName = listed.getFullName();
+            if (fullName == null) {
+              return;
+            }
             TableInfo table =
                 DatabricksRestHelper.callWithRetry(
                     databricksHandle,
@@ -96,14 +86,18 @@ class DatabricksRestTableConstraintsTask extends AbstractDatabricksRestTask
                             .tables()
                             .get(new GetTableRequest().setFullName(fullName)));
             if (table == null || table.getTableConstraints() == null) {
-              continue;
+              return;
             }
             for (TableConstraint constraint : table.getTableConstraints()) {
-              printConstraint(printer, monitor, catalogName, schemaName, tableName, constraint);
+              printConstraint(
+                  printer,
+                  monitor,
+                  listed.getCatalogName(),
+                  listed.getSchemaName(),
+                  listed.getName(),
+                  constraint);
             }
-          }
-        }
-      }
+          });
     }
     return null;
   }

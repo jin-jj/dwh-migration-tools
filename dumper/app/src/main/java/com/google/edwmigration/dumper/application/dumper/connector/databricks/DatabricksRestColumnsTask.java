@@ -55,33 +55,26 @@ class DatabricksRestColumnsTask extends AbstractDatabricksRestTask implements Co
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing columns to " + getTargetPath())) {
-      for (String catalogName : fetchMatchingCatalogNames(databricksHandle)) {
-        for (String schemaName : fetchMatchingSchemaNames(databricksHandle, catalogName)) {
-          forEachTable(
-              databricksHandle,
-              catalogName,
-              schemaName,
-              /* includeColumns= */ true,
-              table -> {
-                if (table.getColumns() == null) {
-                  return;
-                }
-                for (ColumnInfo column : table.getColumns()) {
-                  monitor.count();
-                  printer.printRecord(
-                      catalogName,
-                      schemaName,
-                      table.getName(),
-                      ordinalOf(column),
-                      column.getName(),
-                      typeOf(column),
-                      column.getNullable(),
-                      column.getComment(),
-                      column.getPartitionIndex());
-                }
-              });
-        }
-      }
+      forEachTableInMetastore(
+          databricksHandle,
+          table -> {
+            if (table.getColumns() == null) {
+              return;
+            }
+            for (ColumnInfo column : table.getColumns()) {
+              monitor.count();
+              printer.printRecord(
+                  table.getCatalogName(),
+                  table.getSchemaName(),
+                  table.getName(),
+                  ordinalOf(column),
+                  column.getName(),
+                  typeOf(column),
+                  column.getNullable(),
+                  column.getComment(),
+                  column.getPartitionIndex());
+            }
+          });
     }
     return null;
   }

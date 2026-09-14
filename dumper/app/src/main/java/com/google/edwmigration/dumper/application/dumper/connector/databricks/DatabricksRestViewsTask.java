@@ -49,23 +49,19 @@ class DatabricksRestViewsTask extends AbstractDatabricksRestTask implements View
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing views to " + getTargetPath())) {
-      for (String catalogName : fetchMatchingCatalogNames(databricksHandle)) {
-        for (String schemaName : fetchMatchingSchemaNames(databricksHandle, catalogName)) {
-          forEachTable(
-              databricksHandle,
-              catalogName,
-              schemaName,
-              /* includeColumns= */ false,
-              table -> {
-                if (!isView(table.getTableType())) {
-                  return;
-                }
-                monitor.count();
-                printer.printRecord(
-                    catalogName, schemaName, table.getName(), table.getViewDefinition());
-              });
-        }
-      }
+      forEachTableInMetastore(
+          databricksHandle,
+          table -> {
+            if (!isView(table.getTableType())) {
+              return;
+            }
+            monitor.count();
+            printer.printRecord(
+                table.getCatalogName(),
+                table.getSchemaName(),
+                table.getName(),
+                table.getViewDefinition());
+          });
     }
     return null;
   }

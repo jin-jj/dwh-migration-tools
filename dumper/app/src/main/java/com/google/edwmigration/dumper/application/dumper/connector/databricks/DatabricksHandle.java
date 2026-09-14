@@ -21,9 +21,12 @@ import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.RateLimiter;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
 /** Handle for Databricks SQL Warehouse metadata dumper. */
@@ -42,6 +45,10 @@ public class DatabricksHandle implements Handle {
   private final RateLimiter restRateLimiter;
 
   private final Set<String> inaccessibleCatalogs = Collections.synchronizedSet(new HashSet<>());
+
+  private final Object tableListingLock = new Object();
+
+  @CheckForNull private Path tableListing;
 
   public DatabricksHandle(@Nonnull WorkspaceClient client, @Nonnull String warehouseId) {
     this(client, warehouseId, DEFAULT_REST_REQUESTS_PER_SECOND);
@@ -87,6 +94,45 @@ public class DatabricksHandle implements Handle {
     return inaccessibleCatalogs.contains(catalog.toLowerCase());
   }
 
+  /** Writes the Unity Catalog table listing to a file. */
+  interface TableListingBuilder {
+    void writeTo(@Nonnull Path file) throws IOException;
+  }
+
+  /**
+   * Returns a file holding every table of the metastore, building it on the first call.
+   *
+   * <p>Four of the REST tasks read the same {@code /tables/list} responses and differ only in what
+   * they project out of them, so without this they would each walk the whole metastore. The listing
+   * goes to disk rather than to memory because it scales with the size of the metastore, and it is
+   * built by whichever task runs first: they all share the connector's catalog and schema filters,
+   * so it does not matter which.
+   */
+  @Nonnull
+  Path tableListing(@Nonnull TableListingBuilder builder) throws IOException {
+    Preconditions.checkNotNull(builder, "Table listing builder was null.");
+    synchronized (tableListingLock) {
+      if (tableListing == null) {
+        Path file = Files.createTempFile("dwh-dumper-databricks-tables", ".jsonl");
+        try {
+          builder.writeTo(file);
+        } catch (IOException | RuntimeException e) {
+          Files.deleteIfExists(file);
+          throw e;
+        }
+        this.tableListing = file;
+      }
+      return tableListing;
+    }
+  }
+
   @Override
-  public void close() throws IOException {}
+  public void close() throws IOException {
+    synchronized (tableListingLock) {
+      if (tableListing != null) {
+        Files.deleteIfExists(tableListing);
+        this.tableListing = null;
+      }
+    }
+  }
 }
