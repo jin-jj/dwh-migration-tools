@@ -113,9 +113,6 @@ public class ConnectorArguments extends DefaultArguments {
   public static final String OPT_PRIVATE_KEY_PASSWORD = "private-key-password";
   public static final String OPT_IGNORE_CLONE_ONLY_DATABASE = "ignore-clone-only-database";
 
-  // Databricks
-  public static final String OPT_SKIP_HIVE_METASTORE = "skip-hive-metastore";
-
   // Cloudera
   public static final String OPT_YARN_APPLICATION_TYPES = "yarn-application-types";
   public static final String OPT_SPARK_HISTORY_SERVICE_NAMES = "spark-history-service-names";
@@ -255,10 +252,6 @@ public class ConnectorArguments extends DefaultArguments {
       parser.accepts(
           OPT_IGNORE_CLONE_ONLY_DATABASE,
           "Whether to ignore clone-only databases (databases containing only cloned tables).");
-  private final OptionSpec<Void> optionSkipHiveMetastore =
-      parser.accepts(
-          OPT_SKIP_HIVE_METASTORE,
-          "Whether to skip dumping legacy Databricks Hive Metastore metadata.");
 
   private final OptionSpec<ZonedDateTime> optionStartDate =
       parser
@@ -803,10 +796,6 @@ public class ConnectorArguments extends DefaultArguments {
 
   public boolean isIgnoreCloneOnlyDatabase() {
     return getOptions().has(optionIgnoreCloneOnlyDatabase);
-  }
-
-  public boolean isSkipHiveMetastore() {
-    return getOptions().has(optionSkipHiveMetastore);
   }
 
   @Nonnull

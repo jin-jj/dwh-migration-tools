@@ -62,10 +62,23 @@ Dump specific catalogs and schemas:
 ./bin/dwh-dumper --connector databricks --url https://<workspace-host> --warehouse <warehouse-id> --database catalog1,catalog2 --schema schema1,schema2
 ```
 
+Dump metadata without a SQL warehouse, using only the Unity Catalog REST API:
+```bash
+./bin/dwh-dumper --connector databricks --url https://<workspace-host> -Ddatabricks.metadata.strategy=rest-only
+```
+
 Dump all Unity Catalog metadata, skipping legacy Hive Metastore:
 ```bash
-./bin/dwh-dumper --connector databricks --url https://<workspace-host> --warehouse <warehouse-id> --skip-hive-metastore
+./bin/dwh-dumper --connector databricks --url https://<workspace-host> --warehouse <warehouse-id> -Ddatabricks.skip-hive-metastore=true
 ```
+
+#### Connector properties
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `databricks.metadata.strategy` | `system-then-catalog-then-rest` | Which extraction tiers to run, and in what order. Also accepts `system-then-catalog`, `system-only`, `catalog-only` and `rest-only`. Each tier runs only if the tiers before it failed. |
+| `databricks.skip-hive-metastore` | `false` | Skip the legacy `hive_metastore` catalog. |
+| `databricks.rest.requests-per-second` | `20` | Ceiling on the request rate of the REST tier. |
 
 [BQMS]: https://cloud.google.com/bigquery/docs/migration-intro
 

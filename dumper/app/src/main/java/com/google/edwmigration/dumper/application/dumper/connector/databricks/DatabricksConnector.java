@@ -65,10 +65,6 @@ import org.slf4j.LoggerFactory;
     order = 500,
     arg = ConnectorArguments.OPT_SCHEMA,
     description = "The list of schemas to dump, separated by commas.")
-@RespectsInput(
-    order = 600,
-    arg = ConnectorArguments.OPT_SKIP_HIVE_METASTORE,
-    description = "Whether to skip dumping legacy Databricks Hive Metastore metadata.")
 public class DatabricksConnector extends AbstractConnector
     implements MetadataConnector, DatabricksMetadataDumpFormat {
 
@@ -170,9 +166,8 @@ public class DatabricksConnector extends AbstractConnector
                       && !name.equalsIgnoreCase(DatabricksCatalogNames.SYSTEM));
     }
     boolean skipHive =
-        arguments.isSkipHiveMetastore()
-            || Boolean.parseBoolean(
-                arguments.getDefinitionOrDefault(DatabricksConnectorProperty.SKIP_HIVE_METASTORE));
+        Boolean.parseBoolean(
+            arguments.getDefinitionOrDefault(DatabricksConnectorProperty.SKIP_HIVE_METASTORE));
     if (skipHive) {
       catalogPredicate =
           catalogPredicate.and(

@@ -195,7 +195,7 @@ public class DatabricksConnectorTest {
             "https://dbc-test.cloud.databricks.com",
             "--warehouse",
             "warehouse123",
-            "--skip-hive-metastore");
+            "-Ddatabricks.skip-hive-metastore=true");
     List<Task<?>> tasks = new ArrayList<>();
     new DatabricksCatalogMetadataConnector().addTasksTo(tasks, arguments);
 
@@ -220,7 +220,7 @@ public class DatabricksConnectorTest {
             "https://dbc-test.cloud.databricks.com",
             "--warehouse",
             "warehouse123",
-            "--skip-hive-metastore");
+            "-Ddatabricks.skip-hive-metastore=true");
     List<Task<?>> tasks = new ArrayList<>();
     new DatabricksSystemMetadataConnector().addTasksTo(tasks, arguments);
 
@@ -245,7 +245,7 @@ public class DatabricksConnectorTest {
             "https://dbc-test.cloud.databricks.com",
             "--warehouse",
             "warehouse123",
-            "--skip-hive-metastore",
+            "-Ddatabricks.skip-hive-metastore=true",
             "-Ddatabricks.metadata.strategy=catalog-only");
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
@@ -274,26 +274,6 @@ public class DatabricksConnectorTest {
   }
 
   @Test
-  public void addTasksTo_withSkipHiveMetastoreFlag_addsOnlyUcTasks() throws Exception {
-    ConnectorArguments arguments =
-        new ConnectorArguments(
-            "--connector",
-            "databricks",
-            "--url",
-            "https://dbc-test.cloud.databricks.com",
-            "--warehouse",
-            "warehouse123",
-            "--skip-hive-metastore");
-    List<Task<?>> tasks = new ArrayList<>();
-    connector.addTasksTo(tasks, arguments);
-
-    assertEquals(SETUP_TASKS + DATASETS * 3, tasks.size());
-    assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
-    assertTrue(tasks.get(3) instanceof DatabricksSqlCatalogsTask);
-    assertFalse(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
-  }
-
-  @Test
   public void addTasksTo_withSkipHiveMetastoreProperty_addsOnlyUcTasks() throws Exception {
     ConnectorArguments arguments =
         new ConnectorArguments(
@@ -308,6 +288,8 @@ public class DatabricksConnectorTest {
     connector.addTasksTo(tasks, arguments);
 
     assertEquals(SETUP_TASKS + DATASETS * 3, tasks.size());
+    assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
+    assertTrue(tasks.get(3) instanceof DatabricksSqlCatalogsTask);
     assertFalse(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
   }
 
@@ -319,7 +301,7 @@ public class DatabricksConnectorTest {
             "databricks",
             "--url",
             "https://dbc-test.cloud.databricks.com",
-            "--skip-hive-metastore",
+            "-Ddatabricks.skip-hive-metastore=true",
             "-Ddatabricks.metadata.strategy=rest-only");
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
