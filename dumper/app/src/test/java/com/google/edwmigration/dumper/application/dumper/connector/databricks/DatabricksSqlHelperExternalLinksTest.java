@@ -18,11 +18,14 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.exactly;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
+import static com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -60,6 +63,10 @@ public class DatabricksSqlHelperExternalLinksTest {
 
   private static final String CHUNK_PATH = "/results/chunk-0";
   private static final String DECRYPTION_HEADER = "x-amz-server-side-encryption-customer-key";
+  private static final String RETRY_AFTER = "Retry-After";
+
+  /** Mirrors the retry budget of the helper under test. */
+  private static final int MAX_RETRIES = 5;
 
   private WireMockServer server;
   private StatementExecutionAPI statementApi;
@@ -126,6 +133,7 @@ public class DatabricksSqlHelperExternalLinksTest {
         getRequestedFor(urlEqualTo(CHUNK_PATH)).withHeader(DECRYPTION_HEADER, equalTo("secret")));
   }
 
+  /** A rejected link will not start working, so the retry budget must not be spent on it. */
   @Test
   public void executeBulkQueryOrThrow_whenTheLinkHasExpired_throws() throws Exception {
     server.stubFor(get(urlEqualTo(CHUNK_PATH)).willReturn(aResponse().withStatus(403)));
@@ -133,6 +141,7 @@ public class DatabricksSqlHelperExternalLinksTest {
 
     SQLException thrown = assertThrows(SQLException.class, this::collect);
     assertEquals("Failed to read Databricks result chunk from external link", thrown.getMessage());
+    server.verify(exactly(1), getRequestedFor(urlEqualTo(CHUNK_PATH)));
   }
 
   @Test
@@ -152,6 +161,76 @@ public class DatabricksSqlHelperExternalLinksTest {
     assertEquals(
         Arrays.asList(Collections.singletonList("first"), Collections.singletonList("second")),
         collect());
+  }
+
+  /** Losing one chunk fails the whole query, so a transient refusal is worth waiting out. */
+  @Test
+  public void executeBulkQueryOrThrow_recoversFromATransientFailure() throws Exception {
+    String scenario = "transient";
+    server.stubFor(
+        get(urlEqualTo(CHUNK_PATH))
+            .inScenario(scenario)
+            .whenScenarioStateIs(STARTED)
+            .willReturn(aResponse().withStatus(503).withHeader(RETRY_AFTER, "0"))
+            .willSetStateTo("recovered"));
+    server.stubFor(
+        get(urlEqualTo(CHUNK_PATH))
+            .inScenario(scenario)
+            .whenScenarioStateIs("recovered")
+            .willReturn(aResponse().withBody("[[\"recovered\"]]")));
+    respondWithLink(new ExternalLink().setExternalLink(server.baseUrl() + CHUNK_PATH));
+
+    assertEquals(Collections.singletonList(Collections.singletonList("recovered")), collect());
+    server.verify(exactly(2), getRequestedFor(urlEqualTo(CHUNK_PATH)));
+  }
+
+  /**
+   * Asserts the header is consulted at all, by timing rather than by inspection.
+   *
+   * <p>Two retries told to wait zero seconds should cost nothing. Ignoring the header would fall
+   * back to the jittered schedule, whose first two waits are at least 500ms and 1000ms, so the
+   * margin between honoring and not honoring it is well over a second.
+   */
+  @Test
+  public void executeBulkQueryOrThrow_honorsRetryAfter() throws Exception {
+    String scenario = "throttled";
+    server.stubFor(
+        get(urlEqualTo(CHUNK_PATH))
+            .inScenario(scenario)
+            .whenScenarioStateIs(STARTED)
+            .willReturn(aResponse().withStatus(429).withHeader(RETRY_AFTER, "0"))
+            .willSetStateTo("second"));
+    server.stubFor(
+        get(urlEqualTo(CHUNK_PATH))
+            .inScenario(scenario)
+            .whenScenarioStateIs("second")
+            .willReturn(aResponse().withStatus(429).withHeader(RETRY_AFTER, "0"))
+            .willSetStateTo("third"));
+    server.stubFor(
+        get(urlEqualTo(CHUNK_PATH))
+            .inScenario(scenario)
+            .whenScenarioStateIs("third")
+            .willReturn(aResponse().withBody("[[\"ok\"]]")));
+    respondWithLink(new ExternalLink().setExternalLink(server.baseUrl() + CHUNK_PATH));
+
+    long startedAt = System.nanoTime();
+    collect();
+    long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L;
+
+    assertTrue(
+        "Two zero-second waits took " + elapsedMillis + "ms, so Retry-After was ignored.",
+        elapsedMillis < 1_000L);
+  }
+
+  @Test
+  public void executeBulkQueryOrThrow_whenRetriesAreExhausted_throws() throws Exception {
+    server.stubFor(
+        get(urlEqualTo(CHUNK_PATH))
+            .willReturn(aResponse().withStatus(503).withHeader(RETRY_AFTER, "0")));
+    respondWithLink(new ExternalLink().setExternalLink(server.baseUrl() + CHUNK_PATH));
+
+    assertThrows(SQLException.class, this::collect);
+    server.verify(exactly(MAX_RETRIES), getRequestedFor(urlEqualTo(CHUNK_PATH)));
   }
 
   private void respondWithLink(ExternalLink link) {

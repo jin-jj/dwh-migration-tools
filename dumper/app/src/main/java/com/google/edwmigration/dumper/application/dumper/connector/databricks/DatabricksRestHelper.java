@@ -44,7 +44,6 @@ final class DatabricksRestHelper {
   private static final Logger logger = LoggerFactory.getLogger(DatabricksRestHelper.class);
 
   private static final int MAX_ATTEMPTS = 5;
-  private static final long INITIAL_BACKOFF_MS = 2_000L;
 
   /**
    * Requested page size. Leaving {@code max_results} unset makes Databricks return the whole result
@@ -149,6 +148,13 @@ final class DatabricksRestHelper {
    * Invokes {@code call} once a rate limit permit is available, retrying while Databricks reports
    * throttling.
    *
+   * <p>The SDK retries internally first, honoring {@code Retry-After} and giving up after four
+   * attempts; a throttling failure seen here has therefore already been waited out once. The
+   * response headers do not survive into {@link DatabricksError}, so this outer loop backs off on a
+   * jittered schedule instead. The jitter is the point: a dump runs these tasks concurrently and
+   * the workspace throttles all of them together, so a fixed schedule would have them retry in
+   * lockstep.
+   *
    * @throws IOException if the call still fails after exhausting the retry budget.
    */
   @CheckForNull
@@ -159,7 +165,6 @@ final class DatabricksRestHelper {
     Preconditions.checkNotNull(description, "Description was null.");
     Preconditions.checkNotNull(call, "Call was null.");
 
-    long backoffMs = INITIAL_BACKOFF_MS;
     for (int attempt = 1; ; attempt++) {
       handle.acquireRestPermit();
       try {
@@ -168,6 +173,7 @@ final class DatabricksRestHelper {
         if (!isRateLimited(e) || attempt >= MAX_ATTEMPTS) {
           throw new IOException("Failed while " + description + ": " + e.getMessage(), e);
         }
+        long backoffMs = DatabricksBackoff.delayMillis(attempt);
         logger.warn(
             "Throttled while {}. Retrying in {}ms (attempt {} of {}).",
             description,
@@ -175,7 +181,6 @@ final class DatabricksRestHelper {
             attempt,
             MAX_ATTEMPTS);
         sleep(backoffMs);
-        backoffMs *= 2;
       }
     }
   }

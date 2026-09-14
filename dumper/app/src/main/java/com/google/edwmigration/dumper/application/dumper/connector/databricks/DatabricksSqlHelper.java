@@ -70,6 +70,7 @@ final class DatabricksSqlHelper {
   private static final int HTTP_READ_TIMEOUT_MILLIS = 300_000;
   private static final String WAIT_TIMEOUT = "30s";
   private static final String PERMISSION_DENIED_MARKER = "USE CATALOG on Catalog '";
+  private static final String RETRY_AFTER = "Retry-After";
   private static final byte[] GZIP_MAGIC = {(byte) 0x1f, (byte) 0x8b};
 
   private DatabricksSqlHelper() {}
@@ -154,21 +155,28 @@ final class DatabricksSqlHelper {
     }
   }
 
+  /**
+   * Submits a statement, retrying if the workspace reports throttling.
+   *
+   * <p>This sits on top of the SDK's own retry, which already honors {@code Retry-After} and gives
+   * up after four attempts. The headers never reach us — a Databricks SDK error carries only a
+   * status and an error code — so this outer loop cannot honor the header itself, and exists only
+   * to extend the budget across the hours a large dump can run.
+   */
   private static StatementResponse submit(
       DatabricksHandle handle, ExecuteStatementRequest request, String sql) throws SQLException {
-    long backoffMs = 1000L;
     for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         return handle.getClient().statementExecution().executeStatement(request);
       } catch (Exception e) {
         if (isRateLimited(e) && attempt < MAX_RETRIES) {
+          long backoffMs = DatabricksBackoff.delayMillis(attempt);
           logger.warn(
               "Rate limited on SQL statement execution. Retrying in {}ms (attempt {}/{})",
               backoffMs,
               attempt,
               MAX_RETRIES);
           sleep(backoffMs, "rate limit backoff");
-          backoffMs *= 2;
           continue;
         }
         throw new SQLException("Failed to execute SQL statement: " + sql, e);
@@ -302,13 +310,60 @@ final class DatabricksSqlHelper {
   }
 
   /**
-   * Opens a pre-signed result link.
+   * Opens a pre-signed result link, retrying transient failures.
    *
    * <p>The headers the API attached to the link carry the decryption credential and must be sent,
    * but the Databricks credentials must not be: the URL is signed for the storage service, not for
    * Databricks.
+   *
+   * <p>This is the only request the connector issues itself rather than through the SDK, so it is
+   * both the only one that would otherwise have no retry at all and the only one whose {@code
+   * Retry-After} header is visible to us. Losing a chunk fails the whole query, and a bulk result
+   * can run to many chunks, so a single transient refusal from the object store is worth waiting
+   * out. The link stays valid for about fifteen minutes, so it can be re-requested as-is.
    */
   private static InputStream openLink(String url, Map<String, String> headers) throws IOException {
+    for (int attempt = 1; ; attempt++) {
+      boolean retriable;
+      long retryAfterMillis;
+      String failure;
+      try {
+        HttpURLConnection connection = connect(url, headers);
+        int status = connection.getResponseCode();
+        if (status / 100 == 2) {
+          return decompressIfNeeded(connection.getInputStream());
+        }
+        retriable = isRetriableStatus(status);
+        retryAfterMillis =
+            DatabricksBackoff.retryAfterMillis(connection.getHeaderField(RETRY_AFTER));
+        connection.disconnect();
+        failure = "HTTP status " + status;
+      } catch (IOException e) {
+        // A connect or read timeout is as transient as a 503, and arrives as an exception instead.
+        retriable = true;
+        retryAfterMillis = DatabricksBackoff.NO_RETRY_AFTER;
+        failure = e.toString();
+      }
+      if (!retriable || attempt >= MAX_RETRIES) {
+        throw new IOException(
+            "Result chunk download failed after " + attempt + " attempt(s) with " + failure + ".");
+      }
+      long delayMillis =
+          retryAfterMillis == DatabricksBackoff.NO_RETRY_AFTER
+              ? DatabricksBackoff.delayMillis(attempt)
+              : retryAfterMillis;
+      logger.warn(
+          "Result chunk download failed with {}. Retrying in {}ms (attempt {} of {}).",
+          failure,
+          delayMillis,
+          attempt,
+          MAX_RETRIES);
+      sleep(delayMillis, "result chunk download backoff");
+    }
+  }
+
+  private static HttpURLConnection connect(String url, Map<String, String> headers)
+      throws IOException {
     HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
     connection.setRequestMethod("GET");
     connection.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MILLIS);
@@ -318,12 +373,15 @@ final class DatabricksSqlHelper {
         connection.setRequestProperty(header.getKey(), header.getValue());
       }
     }
-    int status = connection.getResponseCode();
-    if (status / 100 != 2) {
-      connection.disconnect();
-      throw new IOException("Result chunk download failed with HTTP status " + status);
-    }
-    return decompressIfNeeded(connection.getInputStream());
+    return connection;
+  }
+
+  /**
+   * Returns whether the status is worth retrying. A pre-signed URL that is rejected outright is not
+   * going to start working, so only throttling and server-side faults qualify.
+   */
+  private static boolean isRetriableStatus(int status) {
+    return status == 429 || status / 100 == 5;
   }
 
   /**
