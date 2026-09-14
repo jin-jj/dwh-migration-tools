@@ -23,8 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.CatalogsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
@@ -37,6 +35,15 @@ class DatabricksSystemSqlCatalogsTask extends AbstractDatabricksSystemSqlTask
 
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksSystemSqlCatalogsTask.class);
+
+  private static final String SQL =
+      "SELECT catalog_name, comment, catalog_owner, "
+          + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
+          + "FROM system.information_schema.catalogs ORDER BY catalog_name";
+
+  private static final String COMPATIBILITY_SQL =
+      "SELECT catalog_name, comment, catalog_owner, created, last_altered "
+          + "FROM system.information_schema.catalogs ORDER BY catalog_name";
 
   DatabricksSystemSqlCatalogsTask(@Nonnull Predicate<String> catalogPredicate) {
     super(ZIP_ENTRY_NAME, catalogPredicate);
@@ -52,69 +59,21 @@ class DatabricksSystemSqlCatalogsTask extends AbstractDatabricksSystemSqlTask
         RecordProgressMonitor monitor =
             new RecordProgressMonitor(
                 "Writing catalogs from system tables to " + getTargetPath())) {
-      String sql =
-          "SELECT catalog_name, comment, catalog_owner, "
-              + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
-              + "FROM system.information_schema.catalogs ORDER BY catalog_name";
-      AtomicBoolean success = new AtomicBoolean(false);
-      try {
-        DatabricksSqlHelper.executeQueryOrThrow(
-            databricksHandle,
-            sql,
-            row -> {
-              success.set(true);
-              if (!row.isEmpty()) {
-                String catalogName = row.get(0);
-                if (catalogName != null
-                    && catalogPredicate.test(catalogName)
-                    && !databricksHandle.isCatalogInaccessible(catalogName)) {
-                  monitor.count();
-                  try {
-                    printer.printRecord(
-                        catalogName,
-                        row.size() > 1 ? row.get(1) : null,
-                        row.size() > 2 ? row.get(2) : null,
-                        row.size() > 3 ? row.get(3) : null,
-                        row.size() > 4 ? row.get(4) : null);
-                  } catch (Exception e) {
-                    throw new RuntimeException("Failed to write catalog record", e);
-                  }
-                }
-              }
-            });
-      } catch (SQLException e) {
-        String fallbackSql =
-            "SELECT catalog_name, comment, catalog_owner, created, last_altered "
-                + "FROM system.information_schema.catalogs ORDER BY catalog_name";
-        try {
-          DatabricksSqlHelper.executeQueryOrThrow(
-              databricksHandle,
-              fallbackSql,
-              row -> {
-                success.set(true);
-                if (!row.isEmpty()) {
-                  String catalogName = row.get(0);
-                  if (catalogName != null
-                      && catalogPredicate.test(catalogName)
-                      && !databricksHandle.isCatalogInaccessible(catalogName)) {
-                    monitor.count();
-                    try {
-                      printer.printRecord(
-                          catalogName,
-                          row.size() > 1 ? row.get(1) : null,
-                          row.size() > 2 ? row.get(2) : null,
-                          row.size() > 3 ? row.get(3) : null,
-                          row.size() > 4 ? row.get(4) : null);
-                    } catch (Exception ex) {
-                      throw new RuntimeException("Failed to write catalog record", ex);
-                    }
-                  }
-                }
-              });
-        } catch (SQLException ex) {
-          throw e;
-        }
-      }
+      executeWithCompatibilityFallback(
+          databricksHandle,
+          SQL,
+          COMPATIBILITY_SQL,
+          row -> {
+            String catalogName = cell(row, 0);
+            if (catalogName == null
+                || !catalogPredicate.test(catalogName)
+                || databricksHandle.isCatalogInaccessible(catalogName)) {
+              return;
+            }
+            monitor.count();
+            printer.printRecord(
+                catalogName, cell(row, 1), cell(row, 2), cell(row, 3), cell(row, 4));
+          });
     }
     return null;
   }

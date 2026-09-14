@@ -592,23 +592,39 @@ public class DatabricksTasksTest {
   }
 
   @Test
-  public void systemTableConstraintsTask_writesExpectedCsv() throws Exception {
+  public void systemTableConstraintsTask_writesOneRecordPerConstraint() throws Exception {
     mockSqlQuery(
-        "tc.constraint_type = 'PRIMARY KEY'",
-        Collections.singletonList(
-            Arrays.asList("my_catalog", "my_schema", "orders", "pk_orders", "order_id")));
-    mockSqlQuery(
-        "tc.constraint_type = 'FOREIGN KEY'",
-        Collections.singletonList(
+        "system.information_schema.table_constraints",
+        Arrays.asList(
+            Arrays.asList(
+                "my_catalog", "my_schema", "orders", "chk_total", "CHECK", null, null, null),
             Arrays.asList(
                 "my_catalog",
                 "my_schema",
                 "orders",
                 "fk_customers",
+                "FOREIGN KEY",
                 "customer_id",
                 "customers",
-                "id")));
-    mockSqlQuery("NOT IN ('PRIMARY KEY', 'FOREIGN KEY')", Collections.emptyList());
+                "id"),
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "orders",
+                "pk_orders",
+                "PRIMARY KEY",
+                "order_id",
+                null,
+                null),
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "orders",
+                "pk_orders",
+                "PRIMARY KEY",
+                "line",
+                null,
+                null)));
 
     DatabricksSystemSqlTableConstraintsTask task =
         new DatabricksSystemSqlTableConstraintsTask(c -> true, s -> true);
@@ -616,14 +632,16 @@ public class DatabricksTasksTest {
     task.doRun(context, sink, handle);
 
     List<String> lines = readLines(sink);
-    assertEquals(3, lines.size());
+    assertEquals(4, lines.size());
     assertEquals(
         "TableCatalog,TableSchema,TableName,ConstraintName,ConstraintType,ConstraintDetails",
         lines.get(0));
-    assertEquals("my_catalog,my_schema,orders,pk_orders,PRIMARY KEY,order_id", lines.get(1));
+    assertEquals("my_catalog,my_schema,orders,chk_total,CHECK,", lines.get(1));
     assertEquals(
         "my_catalog,my_schema,orders,fk_customers,FOREIGN KEY,customer_id -> customers(id)",
         lines.get(2));
+    assertEquals(
+        "my_catalog,my_schema,orders,pk_orders,PRIMARY KEY,\"order_id, line\"", lines.get(3));
   }
 
   @Test

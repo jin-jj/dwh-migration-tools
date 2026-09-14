@@ -34,6 +34,11 @@ class DatabricksSystemSqlViewsTask extends AbstractDatabricksSystemSqlTask imple
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksSystemSqlViewsTask.class);
 
+  private static final String SQL =
+      "SELECT table_catalog, table_schema, table_name, view_definition "
+          + "FROM system.information_schema.views "
+          + "ORDER BY table_catalog, table_schema, table_name";
+
   DatabricksSystemSqlViewsTask(
       @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
     super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
@@ -48,30 +53,23 @@ class DatabricksSystemSqlViewsTask extends AbstractDatabricksSystemSqlTask imple
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing views from system tables to " + getTargetPath())) {
-      String sql =
-          "SELECT table_catalog, table_schema, table_name, view_definition "
-              + "FROM system.information_schema.views ORDER BY table_catalog, table_schema, table_name";
-      DatabricksSqlHelper.executeQueryOrThrow(
+      executeWithCompatibilityFallback(
           databricksHandle,
-          sql,
+          SQL,
+          // This statement uses no runtime-dependent functions, so it has no fallback variant.
+          /* compatibilitySql= */ null,
           row -> {
-            if (row.size() >= 3) {
-              String catalogName = row.get(0);
-              String schemaName = row.get(1);
-              if (catalogName != null
-                  && schemaName != null
-                  && catalogPredicate.test(catalogName)
-                  && schemaPredicate.test(schemaName)
-                  && !databricksHandle.isCatalogInaccessible(catalogName)) {
-                monitor.count();
-                try {
-                  printer.printRecord(
-                      row.get(0), row.get(1), row.get(2), row.size() > 3 ? row.get(3) : null);
-                } catch (Exception e) {
-                  throw new RuntimeException("Failed to write view record", e);
-                }
-              }
+            String catalogName = cell(row, 0);
+            String schemaName = cell(row, 1);
+            if (catalogName == null
+                || schemaName == null
+                || !catalogPredicate.test(catalogName)
+                || !schemaPredicate.test(schemaName)
+                || databricksHandle.isCatalogInaccessible(catalogName)) {
+              return;
             }
+            monitor.count();
+            printer.printRecord(catalogName, schemaName, cell(row, 2), cell(row, 3));
           });
     }
     return null;

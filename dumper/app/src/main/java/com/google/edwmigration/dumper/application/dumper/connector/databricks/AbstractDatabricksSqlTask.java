@@ -26,6 +26,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
+import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVFormat;
 import org.slf4j.Logger;
@@ -76,6 +77,17 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
         getTargetPath(),
         e.getMessage());
     return true;
+  }
+
+  /**
+   * Returns column {@code index} of {@code row}, or {@code null} if the row is shorter than that.
+   *
+   * <p>A result row can be short if the statement fell back to a variant with fewer columns, so
+   * reads are guarded rather than assumed.
+   */
+  @CheckForNull
+  protected static String cell(@Nonnull List<String> row, int index) {
+    return index < row.size() ? row.get(index) : null;
   }
 
   /**

@@ -23,8 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
@@ -37,6 +35,15 @@ class DatabricksSystemSqlSchemataTask extends AbstractDatabricksSystemSqlTask
 
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksSystemSqlSchemataTask.class);
+
+  private static final String SQL =
+      "SELECT catalog_name, schema_name, comment, schema_owner, "
+          + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
+          + "FROM system.information_schema.schemata ORDER BY catalog_name, schema_name";
+
+  private static final String COMPATIBILITY_SQL =
+      "SELECT catalog_name, schema_name, comment, schema_owner, created, last_altered "
+          + "FROM system.information_schema.schemata ORDER BY catalog_name, schema_name";
 
   DatabricksSystemSqlSchemataTask(
       @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
@@ -53,77 +60,24 @@ class DatabricksSystemSqlSchemataTask extends AbstractDatabricksSystemSqlTask
         RecordProgressMonitor monitor =
             new RecordProgressMonitor(
                 "Writing schemata from system tables to " + getTargetPath())) {
-      String sql =
-          "SELECT catalog_name, schema_name, comment, schema_owner, "
-              + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
-              + "FROM system.information_schema.schemata ORDER BY catalog_name, schema_name";
-      AtomicBoolean success = new AtomicBoolean(false);
-      try {
-        DatabricksSqlHelper.executeQueryOrThrow(
-            databricksHandle,
-            sql,
-            row -> {
-              success.set(true);
-              if (row.size() >= 2) {
-                String catalogName = row.get(0);
-                String schemaName = row.get(1);
-                if (catalogName != null
-                    && schemaName != null
-                    && catalogPredicate.test(catalogName)
-                    && schemaPredicate.test(schemaName)
-                    && !databricksHandle.isCatalogInaccessible(catalogName)) {
-                  monitor.count();
-                  try {
-                    printer.printRecord(
-                        row.get(0),
-                        row.get(1),
-                        row.size() > 2 ? row.get(2) : null,
-                        row.size() > 3 ? row.get(3) : null,
-                        row.size() > 4 ? row.get(4) : null,
-                        row.size() > 5 ? row.get(5) : null);
-                  } catch (Exception e) {
-                    throw new RuntimeException("Failed to write schema record", e);
-                  }
-                }
-              }
-            });
-      } catch (SQLException e) {
-        String fallbackSql =
-            "SELECT catalog_name, schema_name, comment, schema_owner, created, last_altered "
-                + "FROM system.information_schema.schemata ORDER BY catalog_name, schema_name";
-        try {
-          DatabricksSqlHelper.executeQueryOrThrow(
-              databricksHandle,
-              fallbackSql,
-              row -> {
-                success.set(true);
-                if (row.size() >= 2) {
-                  String catalogName = row.get(0);
-                  String schemaName = row.get(1);
-                  if (catalogName != null
-                      && schemaName != null
-                      && catalogPredicate.test(catalogName)
-                      && schemaPredicate.test(schemaName)
-                      && !databricksHandle.isCatalogInaccessible(catalogName)) {
-                    monitor.count();
-                    try {
-                      printer.printRecord(
-                          row.get(0),
-                          row.get(1),
-                          row.size() > 2 ? row.get(2) : null,
-                          row.size() > 3 ? row.get(3) : null,
-                          row.size() > 4 ? row.get(4) : null,
-                          row.size() > 5 ? row.get(5) : null);
-                    } catch (Exception ex) {
-                      throw new RuntimeException("Failed to write schema record", ex);
-                    }
-                  }
-                }
-              });
-        } catch (SQLException ex) {
-          throw e;
-        }
-      }
+      executeWithCompatibilityFallback(
+          databricksHandle,
+          SQL,
+          COMPATIBILITY_SQL,
+          row -> {
+            String catalogName = cell(row, 0);
+            String schemaName = cell(row, 1);
+            if (catalogName == null
+                || schemaName == null
+                || !catalogPredicate.test(catalogName)
+                || !schemaPredicate.test(schemaName)
+                || databricksHandle.isCatalogInaccessible(catalogName)) {
+              return;
+            }
+            monitor.count();
+            printer.printRecord(
+                catalogName, schemaName, cell(row, 2), cell(row, 3), cell(row, 4), cell(row, 5));
+          });
     }
     return null;
   }

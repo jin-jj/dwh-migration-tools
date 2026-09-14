@@ -23,8 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TablesFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
@@ -36,6 +34,19 @@ class DatabricksSystemSqlTablesTask extends AbstractDatabricksSystemSqlTask
     implements TablesFormat {
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksSystemSqlTablesTask.class);
+
+  private static final String SQL =
+      "SELECT table_catalog, table_schema, table_name, table_type, "
+          + "data_source_format, storage_path, comment, table_owner, "
+          + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
+          + "FROM system.information_schema.tables "
+          + "ORDER BY table_catalog, table_schema, table_name";
+
+  private static final String COMPATIBILITY_SQL =
+      "SELECT table_catalog, table_schema, table_name, table_type, "
+          + "data_source_format, storage_path, comment, table_owner, created, last_altered "
+          + "FROM system.information_schema.tables "
+          + "ORDER BY table_catalog, table_schema, table_name";
 
   DatabricksSystemSqlTablesTask(
       @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
@@ -51,87 +62,33 @@ class DatabricksSystemSqlTablesTask extends AbstractDatabricksSystemSqlTask
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing tables from system tables to " + getTargetPath())) {
-      String sql =
-          "SELECT table_catalog, table_schema, table_name, table_type, "
-              + "data_source_format, storage_path, comment, table_owner, "
-              + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
-              + "FROM system.information_schema.tables ORDER BY table_catalog, table_schema, table_name";
-      AtomicBoolean success = new AtomicBoolean(false);
-      try {
-        DatabricksSqlHelper.executeQueryOrThrow(
-            databricksHandle,
-            sql,
-            row -> {
-              success.set(true);
-              if (row.size() >= 3) {
-                String catalogName = row.get(0);
-                String schemaName = row.get(1);
-                if (catalogName != null
-                    && schemaName != null
-                    && catalogPredicate.test(catalogName)
-                    && schemaPredicate.test(schemaName)
-                    && !databricksHandle.isCatalogInaccessible(catalogName)) {
-                  monitor.count();
-                  try {
-                    printer.printRecord(
-                        row.get(0),
-                        row.get(1),
-                        row.get(2),
-                        row.size() > 3 ? row.get(3) : null,
-                        row.size() > 4 ? row.get(4) : null,
-                        row.size() > 5 ? row.get(5) : null,
-                        row.size() > 6 ? row.get(6) : null,
-                        row.size() > 7 ? row.get(7) : null,
-                        row.size() > 8 ? row.get(8) : null,
-                        row.size() > 9 ? row.get(9) : null);
-                  } catch (Exception e) {
-                    throw new RuntimeException("Failed to write table record", e);
-                  }
-                }
-              }
-            });
-      } catch (SQLException e) {
-        String fallbackSql =
-            "SELECT table_catalog, table_schema, table_name, table_type, "
-                + "data_source_format, storage_path, comment, table_owner, created, last_altered "
-                + "FROM system.information_schema.tables ORDER BY table_catalog, table_schema, table_name";
-        try {
-          DatabricksSqlHelper.executeQueryOrThrow(
-              databricksHandle,
-              fallbackSql,
-              row -> {
-                success.set(true);
-                if (row.size() >= 3) {
-                  String catalogName = row.get(0);
-                  String schemaName = row.get(1);
-                  if (catalogName != null
-                      && schemaName != null
-                      && catalogPredicate.test(catalogName)
-                      && schemaPredicate.test(schemaName)
-                      && !databricksHandle.isCatalogInaccessible(catalogName)) {
-                    monitor.count();
-                    try {
-                      printer.printRecord(
-                          row.get(0),
-                          row.get(1),
-                          row.get(2),
-                          row.size() > 3 ? row.get(3) : null,
-                          row.size() > 4 ? row.get(4) : null,
-                          row.size() > 5 ? row.get(5) : null,
-                          row.size() > 6 ? row.get(6) : null,
-                          row.size() > 7 ? row.get(7) : null,
-                          row.size() > 8 ? row.get(8) : null,
-                          row.size() > 9 ? row.get(9) : null);
-                    } catch (Exception ex) {
-                      throw new RuntimeException("Failed to write table record", ex);
-                    }
-                  }
-                }
-              });
-        } catch (SQLException ex) {
-          throw e;
-        }
-      }
+      executeWithCompatibilityFallback(
+          databricksHandle,
+          SQL,
+          COMPATIBILITY_SQL,
+          row -> {
+            String catalogName = cell(row, 0);
+            String schemaName = cell(row, 1);
+            if (catalogName == null
+                || schemaName == null
+                || !catalogPredicate.test(catalogName)
+                || !schemaPredicate.test(schemaName)
+                || databricksHandle.isCatalogInaccessible(catalogName)) {
+              return;
+            }
+            monitor.count();
+            printer.printRecord(
+                catalogName,
+                schemaName,
+                cell(row, 2),
+                cell(row, 3),
+                cell(row, 4),
+                cell(row, 5),
+                cell(row, 6),
+                cell(row, 7),
+                cell(row, 8),
+                cell(row, 9));
+          });
     }
     return null;
   }
