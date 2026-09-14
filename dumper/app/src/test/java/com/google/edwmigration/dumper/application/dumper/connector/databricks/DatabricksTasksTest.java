@@ -236,25 +236,30 @@ public class DatabricksTasksTest {
   }
 
   @Test
-  public void tableConstraintsTask_writesExpectedCsv() throws Exception {
+  public void tableConstraintsTask_writesOneRecordPerConstraint() throws Exception {
     mockSqlQuery(
         "SHOW CATALOGS", Collections.singletonList(Collections.singletonList("my_catalog")));
     mockSqlQuery(
-        "PRIMARY KEY",
-        Collections.singletonList(
-            Arrays.asList("my_catalog", "my_schema", "orders", "pk_orders", "order_id")));
-    mockSqlQuery(
-        "FOREIGN KEY",
-        Collections.singletonList(
+        "information_schema.table_constraints",
+        Arrays.asList(
             Arrays.asList(
                 "my_catalog",
                 "my_schema",
                 "orders",
                 "fk_customers",
+                "FOREIGN KEY",
                 "customer_id",
                 "customers",
-                "id")));
-    mockSqlQuery("NOT IN ('PRIMARY KEY', 'FOREIGN KEY')", Collections.emptyList());
+                "id"),
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "orders",
+                "pk_orders",
+                "PRIMARY KEY",
+                "order_id",
+                null,
+                null)));
 
     DatabricksSqlTableConstraintsTask task =
         new DatabricksSqlTableConstraintsTask(c -> true, s -> true);
@@ -266,10 +271,10 @@ public class DatabricksTasksTest {
     assertEquals(
         "TableCatalog,TableSchema,TableName,ConstraintName,ConstraintType,ConstraintDetails",
         lines.get(0));
-    assertEquals("my_catalog,my_schema,orders,pk_orders,PRIMARY KEY,order_id", lines.get(1));
     assertEquals(
         "my_catalog,my_schema,orders,fk_customers,FOREIGN KEY,customer_id -> customers(id)",
-        lines.get(2));
+        lines.get(1));
+    assertEquals("my_catalog,my_schema,orders,pk_orders,PRIMARY KEY,order_id", lines.get(2));
   }
 
   @Test

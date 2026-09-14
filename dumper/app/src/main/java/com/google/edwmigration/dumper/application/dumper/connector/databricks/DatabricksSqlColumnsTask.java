@@ -21,21 +21,38 @@ import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMonitor;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnsFormat;
-import java.io.IOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
+import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Dumps column definitions from Databricks Unity Catalog via SQL Warehouse queries. */
+/** Dumps column definitions from the {@code information_schema} of each catalog. */
 class DatabricksSqlColumnsTask extends AbstractDatabricksSqlTask implements ColumnsFormat {
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksSqlColumnsTask.class);
+
+  /**
+   * {@code full_data_type} carries the complete type, including the element types of arrays, maps
+   * and structs, where {@code data_type} carries only the outermost type name.
+   */
+  private static final String SQL =
+      "SELECT table_catalog, table_schema, table_name, ordinal_position, column_name, "
+          + "coalesce(full_data_type, data_type) AS data_type, is_nullable, comment, "
+          + "partition_index "
+          + "FROM "
+          + CATALOG
+          + ".information_schema.columns ORDER BY table_schema, table_name, ordinal_position";
+
+  private static final String COMPATIBILITY_SQL =
+      "SELECT table_catalog, table_schema, table_name, ordinal_position, column_name, "
+          + "data_type, is_nullable, comment, partition_index "
+          + "FROM "
+          + CATALOG
+          + ".information_schema.columns ORDER BY table_schema, table_name, ordinal_position";
 
   DatabricksSqlColumnsTask(
       @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
@@ -51,101 +68,43 @@ class DatabricksSqlColumnsTask extends AbstractDatabricksSqlTask implements Colu
         CSVPrinter printer = FORMAT.withHeader(Header.class).print(writer);
         RecordProgressMonitor monitor =
             new RecordProgressMonitor("Writing columns to " + getTargetPath())) {
-      List<String> catalogs = fetchMatchingCatalogs(databricksHandle);
-      for (String catalogName : catalogs) {
-        String escapedCatalog = DatabricksSqlHelper.escapeIdentifier(catalogName);
-        String sql =
-            "SELECT table_catalog, table_schema, table_name, ordinal_position, column_name, "
-                + "coalesce(full_data_type, data_type) AS data_type, "
-                + "case when is_nullable = 'YES' then 'true' else 'false' end AS is_nullable, "
-                + "comment, partition_index "
-                + "FROM "
-                + escapedCatalog
-                + ".information_schema.columns ORDER BY table_schema, table_name, ordinal_position";
-        AtomicBoolean success = new AtomicBoolean(false);
-        try {
-          DatabricksSqlHelper.executeQueryOrThrow(
-              databricksHandle,
-              sql,
-              row -> {
-                success.set(true);
-                if (row.size() >= 5) {
-                  String schemaName = row.get(1);
-                  if (schemaName != null && schemaPredicate.test(schemaName)) {
-                    monitor.count();
-                    try {
-                      printer.printRecord(
-                          row.get(0),
-                          row.get(1),
-                          row.get(2),
-                          row.get(3),
-                          row.get(4),
-                          row.size() > 5 ? row.get(5) : null,
-                          row.size() > 6 ? row.get(6) : null,
-                          row.size() > 7 ? row.get(7) : null,
-                          row.size() > 8 ? row.get(8) : null);
-                    } catch (IOException e) {
-                      throw new RuntimeException("Failed to write column record", e);
-                    }
-                  }
-                }
-              });
-        } catch (Exception e) {
-          logger.warn(
-              "Failed to query information_schema.columns for catalog '{}': {}",
-              catalogName,
-              e.getMessage());
-        }
-
-        if (!success.get()) {
-          String fallbackSql =
-              "SELECT table_catalog, table_schema, table_name, ordinal_position, column_name, "
-                  + "data_type, is_nullable, comment, partition_index "
-                  + "FROM "
-                  + escapedCatalog
-                  + ".information_schema.columns ORDER BY table_schema, table_name, ordinal_position";
-          try {
-            DatabricksSqlHelper.executeQueryOrThrow(
-                databricksHandle,
-                fallbackSql,
-                row -> {
-                  if (row.size() >= 5) {
-                    String schemaName = row.get(1);
-                    if (schemaName != null && schemaPredicate.test(schemaName)) {
-                      monitor.count();
-                      String nullable = row.size() > 6 ? row.get(6) : null;
-                      if (nullable != null) {
-                        nullable =
-                            "YES".equalsIgnoreCase(nullable)
-                                ? "true"
-                                : ("NO".equalsIgnoreCase(nullable) ? "false" : nullable);
-                      }
-                      try {
-                        printer.printRecord(
-                            row.get(0),
-                            row.get(1),
-                            row.get(2),
-                            row.get(3),
-                            row.get(4),
-                            row.size() > 5 ? row.get(5) : null,
-                            nullable,
-                            row.size() > 7 ? row.get(7) : null,
-                            row.size() > 8 ? row.get(8) : null);
-                      } catch (IOException e) {
-                        throw new RuntimeException("Failed to write column record", e);
-                      }
-                    }
-                  }
-                });
-          } catch (Exception e) {
-            logger.warn(
-                "Failed fallback query on information_schema.columns for catalog '{}': {}",
-                catalogName,
-                e.getMessage());
-          }
-        }
-      }
+      executePerCatalog(
+          databricksHandle,
+          SQL,
+          COMPATIBILITY_SQL,
+          row -> {
+            String schemaName = cell(row, 1);
+            if (schemaName == null || !schemaPredicate.test(schemaName)) {
+              return;
+            }
+            monitor.count();
+            printer.printRecord(
+                cell(row, 0),
+                schemaName,
+                cell(row, 2),
+                cell(row, 3),
+                cell(row, 4),
+                cell(row, 5),
+                toBoolean(cell(row, 6)),
+                cell(row, 7),
+                cell(row, 8));
+          });
     }
     return null;
+  }
+
+  /** Maps the {@code YES}/{@code NO} of the information schema onto a boolean literal. */
+  @CheckForNull
+  private static String toBoolean(@CheckForNull String value) {
+    if (value == null) {
+      return null;
+    }
+    if ("YES".equalsIgnoreCase(value)) {
+      return "true";
+    }
+    if ("NO".equalsIgnoreCase(value)) {
+      return "false";
+    }
+    return value;
   }
 }

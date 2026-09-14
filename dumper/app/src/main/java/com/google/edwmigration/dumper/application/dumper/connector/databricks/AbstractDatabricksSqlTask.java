@@ -22,9 +22,12 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskCategory;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -43,6 +46,9 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
   private static final Logger logger = LoggerFactory.getLogger(AbstractDatabricksSqlTask.class);
 
   protected static final CSVFormat FORMAT = CSVFormat.DEFAULT;
+
+  /** Placeholder in a statement template, replaced with the escaped name of one catalog. */
+  protected static final String CATALOG = "$catalog";
 
   protected final Predicate<String> catalogPredicate;
   protected final Predicate<String> schemaPredicate;
@@ -113,5 +119,131 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
       }
     }
     return ImmutableList.copyOf(result);
+  }
+
+  /** Receives one result row at a time. Unlike a {@code Consumer} it may write I/O. */
+  interface RowHandler {
+    void accept(@Nonnull List<String> row) throws IOException;
+  }
+
+  /**
+   * Runs {@code sql}, and if it fails runs {@code compatibilitySql} instead.
+   *
+   * <p>The primary statements use {@code unix_millis()} so that timestamps come back as epoch
+   * milliseconds. That function is missing on older Databricks runtimes, hence the plain-column
+   * variant. The fallback only runs if the primary failed before emitting a row, because otherwise
+   * re-running the query would write the already-emitted rows a second time.
+   *
+   * @throws SQLException with the original failure if both statements fail.
+   */
+  protected void executeWithCompatibilityFallback(
+      @Nonnull DatabricksHandle handle,
+      @Nonnull String sql,
+      @CheckForNull String compatibilitySql,
+      @Nonnull RowHandler handler)
+      throws SQLException {
+    RowCounter counter = new RowCounter(handler);
+    try {
+      DatabricksSqlHelper.executeBulkQueryOrThrow(handle, sql, counter);
+    } catch (SQLException e) {
+      if (compatibilitySql == null || counter.rows > 0) {
+        throw e;
+      }
+      logger.info("Retrying '{}' without unix_millis() after: {}", getTargetPath(), e.getMessage());
+      try {
+        DatabricksSqlHelper.executeBulkQueryOrThrow(handle, compatibilitySql, counter);
+      } catch (SQLException retried) {
+        e.addSuppressed(retried);
+        throw e;
+      }
+    }
+  }
+
+  /** Reads one catalog, given its name already escaped for interpolation into a statement. */
+  interface CatalogAction {
+    void accept(@Nonnull String escapedCatalog) throws SQLException, IOException;
+  }
+
+  /**
+   * Runs {@code action} once per matching catalog.
+   *
+   * <p>A catalog the caller cannot read must not cost the other catalogs their output, so a failed
+   * catalog is recorded and the walk continues. If every catalog failed the first failure is
+   * rethrown: without that, an entirely unreadable metastore would look like an empty one and the
+   * tier behind this one would never run.
+   *
+   * @throws SQLException if the catalogs cannot be listed, or if none of them could be read.
+   * @throws IOException if writing the output failed, which is never worth continuing past.
+   */
+  protected void forEachCatalog(@Nonnull DatabricksHandle handle, @Nonnull CatalogAction action)
+      throws SQLException, IOException {
+    List<String> catalogs = fetchMatchingCatalogs(handle);
+    SQLException failure = null;
+    int failed = 0;
+    for (String catalogName : catalogs) {
+      try {
+        action.accept(DatabricksSqlHelper.escapeIdentifier(catalogName));
+      } catch (SQLException e) {
+        failed++;
+        if (failure == null) {
+          failure = e;
+        } else {
+          failure.addSuppressed(e);
+        }
+        logger.warn(
+            "Failed to read catalog '{}' for '{}': {}",
+            catalogName,
+            getTargetPath(),
+            e.getMessage());
+      }
+    }
+    if (failure != null && failed == catalogs.size()) {
+      throw failure;
+    }
+  }
+
+  /** Runs a statement template once per matching catalog, substituting {@link #CATALOG}. */
+  protected void executePerCatalog(
+      @Nonnull DatabricksHandle handle,
+      @Nonnull String sqlTemplate,
+      @CheckForNull String compatibilitySqlTemplate,
+      @Nonnull RowHandler handler)
+      throws SQLException, IOException {
+    forEachCatalog(
+        handle,
+        escapedCatalog ->
+            executeWithCompatibilityFallback(
+                handle,
+                sqlTemplate.replace(CATALOG, escapedCatalog),
+                compatibilitySqlTemplate == null
+                    ? null
+                    : compatibilitySqlTemplate.replace(CATALOG, escapedCatalog),
+                handler));
+  }
+
+  /**
+   * Adapts a {@link RowHandler} to the helper's consumer, counting what it has emitted.
+   *
+   * <p>The consumer contract cannot declare {@code IOException}, so a write failure travels as an
+   * {@link UncheckedIOException}.
+   */
+  private static final class RowCounter implements Consumer<List<String>> {
+
+    private final RowHandler handler;
+    private long rows;
+
+    RowCounter(RowHandler handler) {
+      this.handler = handler;
+    }
+
+    @Override
+    public void accept(List<String> row) {
+      try {
+        handler.accept(row);
+      } catch (IOException e) {
+        throw new UncheckedIOException("Failed to write a record of the dump", e);
+      }
+      rows++;
+    }
   }
 }

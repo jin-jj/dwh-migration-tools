@@ -16,20 +16,14 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
-import static org.apache.commons.lang3.StringUtils.join;
-
 import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMonitor;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TableConstraintsFormat;
-import java.io.IOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.function.Predicate;
-import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -41,8 +35,6 @@ class DatabricksSystemSqlTableConstraintsTask extends AbstractDatabricksSystemSq
 
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksSystemSqlTableConstraintsTask.class);
-
-  private static final String FOREIGN_KEY = "FOREIGN KEY";
 
   /**
    * One row per constrained column, ordered so that the columns of a constraint arrive together.
@@ -97,7 +89,7 @@ class DatabricksSystemSqlTableConstraintsTask extends AbstractDatabricksSystemSq
         RecordProgressMonitor monitor =
             new RecordProgressMonitor(
                 "Writing table constraints from system tables to " + getTargetPath())) {
-      ConstraintWriter constraints = new ConstraintWriter(printer, monitor);
+      DatabricksConstraintWriter constraints = new DatabricksConstraintWriter(printer, monitor);
       executeWithCompatibilityFallback(
           databricksHandle,
           SQL,
@@ -117,99 +109,5 @@ class DatabricksSystemSqlTableConstraintsTask extends AbstractDatabricksSystemSq
       constraints.finish();
     }
     return null;
-  }
-
-  /**
-   * Collapses the rows of one constraint into a single record.
-   *
-   * <p>The query orders its rows by constraint, so a record can be emitted as soon as a row for a
-   * different constraint arrives; nothing but the constraint being read is held in memory.
-   */
-  private static final class ConstraintWriter {
-
-    private final CSVPrinter printer;
-    private final RecordProgressMonitor monitor;
-    private final List<String> columns = new ArrayList<>();
-    private final List<String> parentColumns = new ArrayList<>();
-    private String catalog;
-    private String schema;
-    private String table;
-    private String name;
-    private String type;
-    private String parentTable;
-    private boolean open;
-
-    ConstraintWriter(CSVPrinter printer, RecordProgressMonitor monitor) {
-      this.printer = printer;
-      this.monitor = monitor;
-    }
-
-    void accept(@Nonnull List<String> row) throws IOException {
-      String rowCatalog = cell(row, 0);
-      String rowSchema = cell(row, 1);
-      String rowTable = cell(row, 2);
-      String rowName = cell(row, 3);
-      if (!open || !isSameConstraint(rowCatalog, rowSchema, rowTable, rowName)) {
-        finish();
-        this.catalog = rowCatalog;
-        this.schema = rowSchema;
-        this.table = rowTable;
-        this.name = rowName;
-        this.type = cell(row, 4);
-        this.parentTable = null;
-        this.open = true;
-      }
-      addColumn(columns, cell(row, 5));
-      if (parentTable == null) {
-        this.parentTable = cell(row, 6);
-      }
-      addColumn(parentColumns, cell(row, 7));
-    }
-
-    void finish() throws IOException {
-      if (!open) {
-        return;
-      }
-      monitor.count();
-      printer.printRecord(catalog, schema, table, name, type, describe());
-      columns.clear();
-      parentColumns.clear();
-      this.open = false;
-    }
-
-    private boolean isSameConstraint(
-        @CheckForNull String rowCatalog,
-        @CheckForNull String rowSchema,
-        @CheckForNull String rowTable,
-        @CheckForNull String rowName) {
-      return equal(catalog, rowCatalog)
-          && equal(schema, rowSchema)
-          && equal(table, rowTable)
-          && equal(name, rowName);
-    }
-
-    /** Renders a foreign key as {@code child -> parent(column)}, anything else as its columns. */
-    private String describe() {
-      String childColumns = join(columns, ", ");
-      if (!FOREIGN_KEY.equals(type) || (parentTable == null && parentColumns.isEmpty())) {
-        return childColumns;
-      }
-      return childColumns
-          + " -> "
-          + (parentTable == null ? "" : parentTable)
-          + "("
-          + join(parentColumns, ", ")
-          + ")";
-    }
-
-    private static void addColumn(List<String> target, @CheckForNull String column) {
-      if (column != null && !target.contains(column)) {
-        target.add(column);
-      }
-    }
-
-    private static boolean equal(@CheckForNull String left, @CheckForNull String right) {
-      return left == null ? right == null : left.equals(right);
-    }
   }
 }
