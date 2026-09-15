@@ -24,7 +24,6 @@ import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDu
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -35,8 +34,8 @@ class DatabricksSqlCatalogsTask extends AbstractDatabricksSqlTask implements Cat
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksSqlCatalogsTask.class);
 
-  DatabricksSqlCatalogsTask(@Nonnull Predicate<String> catalogPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate);
+  DatabricksSqlCatalogsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -55,7 +54,7 @@ class DatabricksSqlCatalogsTask extends AbstractDatabricksSqlTask implements Cat
           continue;
         }
         String catalogName = row.get(0);
-        if (catalogName == null || !catalogPredicate.test(catalogName)) {
+        if (catalogName == null || !filter.matchesCatalog(catalogName)) {
           continue;
         }
         monitor.count();

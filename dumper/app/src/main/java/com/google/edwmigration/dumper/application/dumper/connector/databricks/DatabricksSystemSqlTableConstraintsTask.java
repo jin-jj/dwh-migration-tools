@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TableConstraintsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -64,19 +63,20 @@ class DatabricksSystemSqlTableConstraintsTask extends AbstractDatabricksSystemSq
           + "ON rc.unique_constraint_catalog = pk_kcu.constraint_catalog "
           + "AND rc.unique_constraint_schema = pk_kcu.constraint_schema "
           + "AND rc.unique_constraint_name = pk_kcu.constraint_name "
-          + "AND kcu.position_in_unique_constraint = pk_kcu.ordinal_position "
-          + "ORDER BY tc.table_catalog, tc.table_schema, tc.table_name, tc.constraint_name, "
+          + "AND kcu.position_in_unique_constraint = pk_kcu.ordinal_position"
+          + WHERE
+          + " ORDER BY tc.table_catalog, tc.table_schema, tc.table_name, tc.constraint_name, "
           + "kcu.ordinal_position";
 
   /** Names the constraints without their columns, for metastores where the joins are rejected. */
   private static final String COMPATIBILITY_SQL =
       "SELECT table_catalog, table_schema, table_name, constraint_name, constraint_type "
-          + "FROM system.information_schema.table_constraints "
-          + "ORDER BY table_catalog, table_schema, table_name, constraint_name";
+          + "FROM system.information_schema.table_constraints"
+          + WHERE
+          + " ORDER BY table_catalog, table_schema, table_name, constraint_name";
 
-  DatabricksSystemSqlTableConstraintsTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksSystemSqlTableConstraintsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -92,15 +92,15 @@ class DatabricksSystemSqlTableConstraintsTask extends AbstractDatabricksSystemSq
       DatabricksConstraintWriter constraints = new DatabricksConstraintWriter(printer, monitor);
       executeWithCompatibilityFallback(
           databricksHandle,
-          SQL,
-          COMPATIBILITY_SQL,
+          withFilter(SQL, "tc.table_catalog", "tc.table_schema"),
+          withFilter(COMPATIBILITY_SQL, "table_catalog", "table_schema"),
           row -> {
             String catalog = cell(row, 0);
             String schema = cell(row, 1);
             if (catalog == null
                 || schema == null
-                || !catalogPredicate.test(catalog)
-                || !schemaPredicate.test(schema)
+                || !filter.matchesCatalog(catalog)
+                || !filter.matchesSchema(schema)
                 || databricksHandle.isCatalogInaccessible(catalog)) {
               return;
             }

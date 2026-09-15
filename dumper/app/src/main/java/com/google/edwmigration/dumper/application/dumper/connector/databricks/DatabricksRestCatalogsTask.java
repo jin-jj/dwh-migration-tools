@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.CatalogsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -34,8 +33,8 @@ class DatabricksRestCatalogsTask extends AbstractDatabricksRestTask implements C
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksRestCatalogsTask.class);
 
-  DatabricksRestCatalogsTask(@Nonnull Predicate<String> catalogPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate);
+  DatabricksRestCatalogsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -51,7 +50,7 @@ class DatabricksRestCatalogsTask extends AbstractDatabricksRestTask implements C
           databricksHandle,
           catalog -> {
             String name = catalog.getName();
-            if (name == null || !catalogPredicate.test(name)) {
+            if (name == null || !filter.matchesCatalog(name)) {
               return;
             }
             monitor.count();

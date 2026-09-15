@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
@@ -45,18 +44,21 @@ class DatabricksSqlColumnsTask extends AbstractDatabricksSqlTask implements Colu
           + "partition_index "
           + "FROM "
           + CATALOG
-          + ".information_schema.columns ORDER BY table_schema, table_name, ordinal_position";
+          + ".information_schema.columns"
+          + WHERE
+          + " ORDER BY table_schema, table_name, ordinal_position";
 
   private static final String COMPATIBILITY_SQL =
       "SELECT table_catalog, table_schema, table_name, ordinal_position, column_name, "
           + "data_type, is_nullable, comment, partition_index "
           + "FROM "
           + CATALOG
-          + ".information_schema.columns ORDER BY table_schema, table_name, ordinal_position";
+          + ".information_schema.columns"
+          + WHERE
+          + " ORDER BY table_schema, table_name, ordinal_position";
 
-  DatabricksSqlColumnsTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksSqlColumnsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -70,11 +72,11 @@ class DatabricksSqlColumnsTask extends AbstractDatabricksSqlTask implements Colu
             new RecordProgressMonitor("Writing columns to " + getTargetPath())) {
       executePerCatalog(
           databricksHandle,
-          SQL,
-          COMPATIBILITY_SQL,
+          withFilter(SQL, /* catalogColumn= */ null, "table_schema"),
+          withFilter(COMPATIBILITY_SQL, /* catalogColumn= */ null, "table_schema"),
           row -> {
             String schemaName = cell(row, 1);
-            if (schemaName == null || !schemaPredicate.test(schemaName)) {
+            if (schemaName == null || !filter.matchesSchema(schemaName)) {
               return;
             }
             monitor.count();

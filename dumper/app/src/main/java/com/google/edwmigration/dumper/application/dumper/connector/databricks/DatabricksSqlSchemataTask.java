@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -39,17 +38,20 @@ class DatabricksSqlSchemataTask extends AbstractDatabricksSqlTask implements Sch
           + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
           + "FROM "
           + CATALOG
-          + ".information_schema.schemata ORDER BY schema_name";
+          + ".information_schema.schemata"
+          + WHERE
+          + " ORDER BY schema_name";
 
   private static final String COMPATIBILITY_SQL =
       "SELECT catalog_name, schema_name, comment, schema_owner, created, last_altered "
           + "FROM "
           + CATALOG
-          + ".information_schema.schemata ORDER BY schema_name";
+          + ".information_schema.schemata"
+          + WHERE
+          + " ORDER BY schema_name";
 
-  DatabricksSqlSchemataTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksSqlSchemataTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -63,11 +65,11 @@ class DatabricksSqlSchemataTask extends AbstractDatabricksSqlTask implements Sch
             new RecordProgressMonitor("Writing schemata to " + getTargetPath())) {
       executePerCatalog(
           databricksHandle,
-          SQL,
-          COMPATIBILITY_SQL,
+          withFilter(SQL, /* catalogColumn= */ null, "schema_name"),
+          withFilter(COMPATIBILITY_SQL, /* catalogColumn= */ null, "schema_name"),
           row -> {
             String schemaName = cell(row, 1);
-            if (schemaName == null || !schemaPredicate.test(schemaName)) {
+            if (schemaName == null || !filter.matchesSchema(schemaName)) {
               return;
             }
             monitor.count();

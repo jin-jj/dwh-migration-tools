@@ -32,7 +32,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -45,8 +44,8 @@ class DatabricksHiveMetastoreSchemataTask extends AbstractDatabricksHiveMetastor
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksHiveMetastoreSchemataTask.class);
 
-  DatabricksHiveMetastoreSchemataTask(@Nonnull Predicate<String> schemaPredicate) {
-    super(HMS_ZIP_ENTRY_NAME, schemaPredicate);
+  DatabricksHiveMetastoreSchemataTask(@Nonnull DatabricksFilter filter) {
+    super(HMS_ZIP_ENTRY_NAME, filter);
   }
 
   @Override

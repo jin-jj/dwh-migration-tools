@@ -17,7 +17,6 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import com.google.edwmigration.dumper.application.dumper.task.TaskCategory;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,16 +32,8 @@ abstract class AbstractDatabricksSystemSqlTask extends AbstractDatabricksSqlTask
   private static final Logger logger =
       LoggerFactory.getLogger(AbstractDatabricksSystemSqlTask.class);
 
-  AbstractDatabricksSystemSqlTask(
-      @Nonnull String targetPath,
-      @Nonnull Predicate<String> catalogPredicate,
-      @Nonnull Predicate<String> schemaPredicate) {
-    super(targetPath, catalogPredicate, schemaPredicate);
-  }
-
-  AbstractDatabricksSystemSqlTask(
-      @Nonnull String targetPath, @Nonnull Predicate<String> catalogPredicate) {
-    super(targetPath, catalogPredicate);
+  AbstractDatabricksSystemSqlTask(@Nonnull String targetPath, @Nonnull DatabricksFilter filter) {
+    super(targetPath, filter);
   }
 
   @Nonnull

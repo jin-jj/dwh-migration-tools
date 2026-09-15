@@ -44,7 +44,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVFormat;
 import org.slf4j.Logger;
@@ -75,23 +74,11 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
           .setSerializationInclusion(JsonInclude.Include.NON_NULL)
           .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-  protected final Predicate<String> catalogPredicate;
-  protected final Predicate<String> schemaPredicate;
+  protected final DatabricksFilter filter;
 
-  AbstractDatabricksRestTask(
-      @Nonnull String targetPath,
-      @Nonnull Predicate<String> catalogPredicate,
-      @Nonnull Predicate<String> schemaPredicate) {
+  AbstractDatabricksRestTask(@Nonnull String targetPath, @Nonnull DatabricksFilter filter) {
     super(targetPath);
-    this.catalogPredicate =
-        Preconditions.checkNotNull(catalogPredicate, "Catalog predicate was null.");
-    this.schemaPredicate =
-        Preconditions.checkNotNull(schemaPredicate, "Schema predicate was null.");
-  }
-
-  AbstractDatabricksRestTask(
-      @Nonnull String targetPath, @Nonnull Predicate<String> catalogPredicate) {
-    this(targetPath, catalogPredicate, schema -> true);
+    this.filter = Preconditions.checkNotNull(filter, "Filter was null.");
   }
 
   @Nonnull
@@ -206,7 +193,7 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
         catalog -> {
           String name = catalog.getName();
           if (name != null
-              && catalogPredicate.test(name)
+              && filter.matchesCatalog(name)
               && !HIVE_METASTORE.equalsIgnoreCase(name)) {
             names.add(name);
           }
@@ -224,7 +211,7 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
         catalogName,
         schema -> {
           String name = schema.getName();
-          if (name != null && schemaPredicate.test(name)) {
+          if (name != null && filter.matchesSchema(name)) {
             names.add(name);
           }
         });

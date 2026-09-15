@@ -28,7 +28,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.apache.commons.lang3.StringUtils;
@@ -45,27 +44,29 @@ class DatabricksSystemSqlFunctionsTask extends AbstractDatabricksSystemSqlTask
   private static final String PARAMETERS_SQL =
       "SELECT specific_catalog, specific_schema, specific_name, parameter_name, "
           + "coalesce(full_data_type, data_type) AS data_type "
-          + "FROM system.information_schema.parameters "
-          + "ORDER BY specific_catalog, specific_schema, specific_name, ordinal_position";
+          + "FROM system.information_schema.parameters"
+          + WHERE
+          + " ORDER BY specific_catalog, specific_schema, specific_name, ordinal_position";
 
   private static final String SQL =
       "SELECT routine_catalog, routine_schema, routine_name, "
           + "coalesce(full_data_type, data_type) AS data_type, "
           + "routine_definition, external_language, comment, created_by "
-          + "FROM system.information_schema.routines "
-          + "ORDER BY routine_catalog, routine_schema, routine_name";
+          + "FROM system.information_schema.routines"
+          + WHERE
+          + " ORDER BY routine_catalog, routine_schema, routine_name";
 
   /** Older runtimes have no {@code comment} or {@code created_by} on this view. */
   private static final String COMPATIBILITY_SQL =
       "SELECT routine_catalog, routine_schema, routine_name, "
           + "coalesce(full_data_type, data_type) AS data_type, "
           + "routine_definition, external_language "
-          + "FROM system.information_schema.routines "
-          + "ORDER BY routine_catalog, routine_schema, routine_name";
+          + "FROM system.information_schema.routines"
+          + WHERE
+          + " ORDER BY routine_catalog, routine_schema, routine_name";
 
-  DatabricksSystemSqlFunctionsTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksSystemSqlFunctionsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -81,15 +82,15 @@ class DatabricksSystemSqlFunctionsTask extends AbstractDatabricksSystemSqlTask
       Map<String, List<String>> parametersByFunction = fetchParameters(databricksHandle);
       executeWithCompatibilityFallback(
           databricksHandle,
-          SQL,
-          COMPATIBILITY_SQL,
+          withFilter(SQL, "routine_catalog", "routine_schema"),
+          withFilter(COMPATIBILITY_SQL, "routine_catalog", "routine_schema"),
           row -> {
             String catalogName = cell(row, 0);
             String schemaName = cell(row, 1);
             if (catalogName == null
                 || schemaName == null
-                || !catalogPredicate.test(catalogName)
-                || !schemaPredicate.test(schemaName)
+                || !filter.matchesCatalog(catalogName)
+                || !filter.matchesSchema(schemaName)
                 || databricksHandle.isCatalogInaccessible(catalogName)) {
               return;
             }
@@ -116,12 +117,12 @@ class DatabricksSystemSqlFunctionsTask extends AbstractDatabricksSystemSqlTask
    * <p>Parameters are an enrichment: if the view cannot be read the functions themselves are still
    * worth dumping, so a failure here is logged rather than propagated.
    */
-  private static Map<String, List<String>> fetchParameters(@Nonnull DatabricksHandle handle) {
+  private Map<String, List<String>> fetchParameters(@Nonnull DatabricksHandle handle) {
     Map<String, List<String>> parametersByFunction = new HashMap<>();
     try {
       DatabricksSqlHelper.executeBulkQueryOrThrow(
           handle,
-          PARAMETERS_SQL,
+          withFilter(PARAMETERS_SQL, "specific_catalog", "specific_schema"),
           row -> {
             String catalogName = cell(row, 0);
             String schemaName = cell(row, 1);

@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ViewsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -36,12 +35,12 @@ class DatabricksSystemSqlViewsTask extends AbstractDatabricksSystemSqlTask imple
 
   private static final String SQL =
       "SELECT table_catalog, table_schema, table_name, view_definition "
-          + "FROM system.information_schema.views "
-          + "ORDER BY table_catalog, table_schema, table_name";
+          + "FROM system.information_schema.views"
+          + WHERE
+          + " ORDER BY table_catalog, table_schema, table_name";
 
-  DatabricksSystemSqlViewsTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksSystemSqlViewsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -55,7 +54,7 @@ class DatabricksSystemSqlViewsTask extends AbstractDatabricksSystemSqlTask imple
             new RecordProgressMonitor("Writing views from system tables to " + getTargetPath())) {
       executeWithCompatibilityFallback(
           databricksHandle,
-          SQL,
+          withFilter(SQL, "table_catalog", "table_schema"),
           // This statement uses no runtime-dependent functions, so it has no fallback variant.
           /* compatibilitySql= */ null,
           row -> {
@@ -63,8 +62,8 @@ class DatabricksSystemSqlViewsTask extends AbstractDatabricksSystemSqlTask imple
             String schemaName = cell(row, 1);
             if (catalogName == null
                 || schemaName == null
-                || !catalogPredicate.test(catalogName)
-                || !schemaPredicate.test(schemaName)
+                || !filter.matchesCatalog(catalogName)
+                || !filter.matchesSchema(schemaName)
                 || databricksHandle.isCatalogInaccessible(catalogName)) {
               return;
             }

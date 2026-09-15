@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -34,9 +33,8 @@ class DatabricksRestSchemataTask extends AbstractDatabricksRestTask implements S
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksRestSchemataTask.class);
 
-  DatabricksRestSchemataTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksRestSchemataTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -54,7 +52,7 @@ class DatabricksRestSchemataTask extends AbstractDatabricksRestTask implements S
             catalogName,
             schema -> {
               String name = schema.getName();
-              if (name == null || !schemaPredicate.test(name)) {
+              if (name == null || !filter.matchesSchema(name)) {
                 return;
               }
               monitor.count();

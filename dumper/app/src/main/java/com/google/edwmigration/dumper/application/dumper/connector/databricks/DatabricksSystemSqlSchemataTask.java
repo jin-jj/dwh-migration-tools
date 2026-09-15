@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -39,15 +38,18 @@ class DatabricksSystemSqlSchemataTask extends AbstractDatabricksSystemSqlTask
   private static final String SQL =
       "SELECT catalog_name, schema_name, comment, schema_owner, "
           + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
-          + "FROM system.information_schema.schemata ORDER BY catalog_name, schema_name";
+          + "FROM system.information_schema.schemata"
+          + WHERE
+          + " ORDER BY catalog_name, schema_name";
 
   private static final String COMPATIBILITY_SQL =
       "SELECT catalog_name, schema_name, comment, schema_owner, created, last_altered "
-          + "FROM system.information_schema.schemata ORDER BY catalog_name, schema_name";
+          + "FROM system.information_schema.schemata"
+          + WHERE
+          + " ORDER BY catalog_name, schema_name";
 
-  DatabricksSystemSqlSchemataTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksSystemSqlSchemataTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -62,15 +64,15 @@ class DatabricksSystemSqlSchemataTask extends AbstractDatabricksSystemSqlTask
                 "Writing schemata from system tables to " + getTargetPath())) {
       executeWithCompatibilityFallback(
           databricksHandle,
-          SQL,
-          COMPATIBILITY_SQL,
+          withFilter(SQL, "catalog_name", "schema_name"),
+          withFilter(COMPATIBILITY_SQL, "catalog_name", "schema_name"),
           row -> {
             String catalogName = cell(row, 0);
             String schemaName = cell(row, 1);
             if (catalogName == null
                 || schemaName == null
-                || !catalogPredicate.test(catalogName)
-                || !schemaPredicate.test(schemaName)
+                || !filter.matchesCatalog(catalogName)
+                || !filter.matchesSchema(schemaName)
                 || databricksHandle.isCatalogInaccessible(catalogName)) {
               return;
             }

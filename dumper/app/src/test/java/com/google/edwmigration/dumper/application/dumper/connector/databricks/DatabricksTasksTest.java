@@ -20,14 +20,17 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.databricks.sdk.WorkspaceClient;
+import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
+import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.task.MemoryByteSink;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import java.io.IOException;
@@ -43,6 +46,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.mockito.ArgumentCaptor;
 
 @RunWith(JUnit4.class)
 public class DatabricksTasksTest {
@@ -82,6 +86,66 @@ public class DatabricksTasksTest {
         .thenReturn(response);
   }
 
+  private static final ImmutableList<String> NO_NAMES = ImmutableList.of();
+
+  /** Returns a filter that accepts every catalog except {@code excluded}. */
+  private static DatabricksFilter excluding(String excluded) {
+    return new DatabricksFilter(ImmutableList.of(), ImmutableList.of(), ImmutableList.of(excluded));
+  }
+
+  /**
+   * The filter exists to stop the warehouse producing rows the dump would discard, so it has to
+   * reach the statement and not only the row handler. A metastore-wide scan that is sorted cannot
+   * stream, so an unrestricted statement makes the warehouse materialise every catalog before the
+   * first byte of a one-catalog dump is shipped.
+   */
+  @Test
+  public void systemTablesTask_withAFilter_restrictsTheStatement() throws Exception {
+    mockSqlQuery("system.information_schema.tables", Collections.emptyList());
+    DatabricksFilter filter =
+        new DatabricksFilter(
+            ImmutableList.of("Main"), ImmutableList.of("Sales"), ImmutableList.of("system"));
+
+    new DatabricksSystemSqlTablesTask(filter).doRun(context, new MemoryByteSink(), handle);
+
+    ArgumentCaptor<ExecuteStatementRequest> request =
+        ArgumentCaptor.forClass(ExecuteStatementRequest.class);
+    verify(statementAPI).executeStatement(request.capture());
+    String sql = request.getValue().getStatement();
+    assertTrue(sql, sql.contains(filter.whereClause("table_catalog", "table_schema")));
+    assertTrue(
+        "The restriction has to precede the sort, or the sort still reads everything: " + sql,
+        sql.indexOf(" WHERE ") < sql.indexOf(" ORDER BY "));
+  }
+
+  /**
+   * The per-catalog tier issues one statement per catalog, so the catalog is already fixed and
+   * naming it again in the statement would be redundant.
+   */
+  @Test
+  public void perCatalogTablesTask_withAFilter_restrictsOnlyTheSchema() throws Exception {
+    mockSqlQuery("SHOW CATALOGS", Collections.singletonList(Collections.singletonList("main")));
+    mockSqlQuery(".information_schema.tables", Collections.emptyList());
+    DatabricksFilter filter =
+        new DatabricksFilter(ImmutableList.of("main"), ImmutableList.of("sales"), NO_NAMES);
+
+    new DatabricksSqlTablesTask(filter).doRun(context, new MemoryByteSink(), handle);
+
+    ArgumentCaptor<ExecuteStatementRequest> request =
+        ArgumentCaptor.forClass(ExecuteStatementRequest.class);
+    verify(statementAPI, org.mockito.Mockito.atLeastOnce()).executeStatement(request.capture());
+    String sql = null;
+    for (ExecuteStatementRequest candidate : request.getAllValues()) {
+      if (candidate.getStatement().contains(".information_schema.tables")) {
+        sql = candidate.getStatement();
+      }
+    }
+    assertTrue("No per-catalog statement was issued", sql != null);
+    assertTrue(sql, sql.contains("lower(table_schema) IN ('sales')"));
+    assertTrue(
+        "The catalog is already scoped by the loop: " + sql, !sql.contains("table_catalog)"));
+  }
+
   private static List<String> readLines(MemoryByteSink sink) throws IOException {
     String content = sink.openStream().toString();
     if (content.isEmpty()) {
@@ -102,8 +166,7 @@ public class DatabricksTasksTest {
             Arrays.asList("Comment", "Production data"),
             Arrays.asList("Owner", "alice@example.com")));
 
-    DatabricksSqlCatalogsTask task =
-        new DatabricksSqlCatalogsTask(c -> !c.equalsIgnoreCase("samples"));
+    DatabricksSqlCatalogsTask task = new DatabricksSqlCatalogsTask(excluding("samples"));
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -128,7 +191,7 @@ public class DatabricksTasksTest {
                 "1600000000000",
                 "1700000000000")));
 
-    DatabricksSqlSchemataTask task = new DatabricksSqlSchemataTask(c -> true, s -> true);
+    DatabricksSqlSchemataTask task = new DatabricksSqlSchemataTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -159,7 +222,7 @@ public class DatabricksTasksTest {
                 "1200",
                 "2200")));
 
-    DatabricksSqlTablesTask task = new DatabricksSqlTablesTask(c -> true, s -> true);
+    DatabricksSqlTablesTask task = new DatabricksSqlTablesTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -201,7 +264,7 @@ public class DatabricksTasksTest {
                 "",
                 "")));
 
-    DatabricksSqlColumnsTask task = new DatabricksSqlColumnsTask(c -> true, s -> true);
+    DatabricksSqlColumnsTask task = new DatabricksSqlColumnsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -225,7 +288,7 @@ public class DatabricksTasksTest {
         Collections.singletonList(
             Arrays.asList("my_catalog", "my_schema", "v_orders", "SELECT * FROM orders")));
 
-    DatabricksSqlViewsTask task = new DatabricksSqlViewsTask(c -> true, s -> true);
+    DatabricksSqlViewsTask task = new DatabricksSqlViewsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -262,7 +325,7 @@ public class DatabricksTasksTest {
                 null)));
 
     DatabricksSqlTableConstraintsTask task =
-        new DatabricksSqlTableConstraintsTask(c -> true, s -> true);
+        new DatabricksSqlTableConstraintsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -297,7 +360,7 @@ public class DatabricksTasksTest {
                 "adds one",
                 "eve")));
 
-    DatabricksSqlFunctionsTask task = new DatabricksSqlFunctionsTask(c -> true, s -> true);
+    DatabricksSqlFunctionsTask task = new DatabricksSqlFunctionsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -322,7 +385,8 @@ public class DatabricksTasksTest {
             Arrays.asList("Comment", "legacy sales data"),
             Arrays.asList("Owner", "alice@example.com")));
 
-    DatabricksHiveMetastoreSchemataTask task = new DatabricksHiveMetastoreSchemataTask(s -> true);
+    DatabricksHiveMetastoreSchemataTask task =
+        new DatabricksHiveMetastoreSchemataTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -348,7 +412,8 @@ public class DatabricksTasksTest {
   public void hiveMetastoreTablesTask_writesExpectedCsv() throws Exception {
     mockHiveMetastoreSchema();
 
-    DatabricksHiveMetastoreTablesTask task = new DatabricksHiveMetastoreTablesTask(s -> true);
+    DatabricksHiveMetastoreTablesTask task =
+        new DatabricksHiveMetastoreTablesTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -370,7 +435,8 @@ public class DatabricksTasksTest {
   public void hiveMetastoreColumnsTask_writesExpectedCsv() throws Exception {
     mockHiveMetastoreSchema();
 
-    DatabricksHiveMetastoreColumnsTask task = new DatabricksHiveMetastoreColumnsTask(s -> true);
+    DatabricksHiveMetastoreColumnsTask task =
+        new DatabricksHiveMetastoreColumnsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -393,7 +459,8 @@ public class DatabricksTasksTest {
   public void hiveMetastoreViewsTask_writesExpectedCsv() throws Exception {
     mockHiveMetastoreSchema();
 
-    DatabricksHiveMetastoreViewsTask task = new DatabricksHiveMetastoreViewsTask(s -> true);
+    DatabricksHiveMetastoreViewsTask task =
+        new DatabricksHiveMetastoreViewsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -470,7 +537,7 @@ public class DatabricksTasksTest {
                 "1700000000000")));
 
     DatabricksSystemSqlCatalogsTask task =
-        new DatabricksSystemSqlCatalogsTask(c -> !c.equalsIgnoreCase("samples"));
+        new DatabricksSystemSqlCatalogsTask(excluding("samples"));
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -495,7 +562,7 @@ public class DatabricksTasksTest {
                 "1700000000000")));
 
     DatabricksSystemSqlSchemataTask task =
-        new DatabricksSystemSqlSchemataTask(c -> true, s -> true);
+        new DatabricksSystemSqlSchemataTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -524,7 +591,7 @@ public class DatabricksTasksTest {
                 "1200",
                 "2200")));
 
-    DatabricksSystemSqlTablesTask task = new DatabricksSystemSqlTablesTask(c -> true, s -> true);
+    DatabricksSystemSqlTablesTask task = new DatabricksSystemSqlTablesTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -564,7 +631,8 @@ public class DatabricksTasksTest {
                 "",
                 "")));
 
-    DatabricksSystemSqlColumnsTask task = new DatabricksSystemSqlColumnsTask(c -> true, s -> true);
+    DatabricksSystemSqlColumnsTask task =
+        new DatabricksSystemSqlColumnsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -586,7 +654,7 @@ public class DatabricksTasksTest {
         Collections.singletonList(
             Arrays.asList("my_catalog", "my_schema", "v_orders", "SELECT * FROM orders")));
 
-    DatabricksSystemSqlViewsTask task = new DatabricksSystemSqlViewsTask(c -> true, s -> true);
+    DatabricksSystemSqlViewsTask task = new DatabricksSystemSqlViewsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -632,7 +700,7 @@ public class DatabricksTasksTest {
                 null)));
 
     DatabricksSystemSqlTableConstraintsTask task =
-        new DatabricksSystemSqlTableConstraintsTask(c -> true, s -> true);
+        new DatabricksSystemSqlTableConstraintsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -668,7 +736,7 @@ public class DatabricksTasksTest {
                 "eve")));
 
     DatabricksSystemSqlFunctionsTask task =
-        new DatabricksSystemSqlFunctionsTask(c -> true, s -> true);
+        new DatabricksSystemSqlFunctionsTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
     task.doRun(context, sink, handle);
 
@@ -695,7 +763,7 @@ public class DatabricksTasksTest {
 
     when(statementAPI.executeStatement(any())).thenReturn(response);
 
-    DatabricksSystemSqlTablesTask task = new DatabricksSystemSqlTablesTask(c -> true, s -> true);
+    DatabricksSystemSqlTablesTask task = new DatabricksSystemSqlTablesTask(DatabricksFilter.all());
     MemoryByteSink sink = new MemoryByteSink();
 
     try {
@@ -715,7 +783,7 @@ public class DatabricksTasksTest {
         Arrays.asList(
             Collections.singletonList("accessible_catalog"), Collections.singletonList("dmishyn")));
 
-    DatabricksSqlTablesTask task = new DatabricksSqlTablesTask(c -> true, s -> true);
+    DatabricksSqlTablesTask task = new DatabricksSqlTablesTask(DatabricksFilter.all());
     List<String> catalogs = task.fetchMatchingCatalogs(handle);
 
     assertEquals(1, catalogs.size());

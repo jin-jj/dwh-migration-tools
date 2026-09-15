@@ -25,7 +25,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ViewsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -45,8 +44,8 @@ class DatabricksHiveMetastoreViewsTask extends AbstractDatabricksHiveMetastoreTa
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksHiveMetastoreViewsTask.class);
 
-  DatabricksHiveMetastoreViewsTask(@Nonnull Predicate<String> schemaPredicate) {
-    super(HMS_ZIP_ENTRY_NAME, schemaPredicate);
+  DatabricksHiveMetastoreViewsTask(@Nonnull DatabricksFilter filter) {
+    super(HMS_ZIP_ENTRY_NAME, filter);
   }
 
   @Override

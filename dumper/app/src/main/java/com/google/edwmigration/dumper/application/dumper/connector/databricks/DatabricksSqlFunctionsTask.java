@@ -29,7 +29,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Predicate;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
@@ -46,8 +45,9 @@ class DatabricksSqlFunctionsTask extends AbstractDatabricksSqlTask implements Fu
           + "coalesce(full_data_type, data_type) AS data_type "
           + "FROM "
           + CATALOG
-          + ".information_schema.parameters "
-          + "ORDER BY specific_schema, specific_name, ordinal_position";
+          + ".information_schema.parameters"
+          + WHERE
+          + " ORDER BY specific_schema, specific_name, ordinal_position";
 
   private static final String SQL =
       "SELECT routine_catalog, routine_schema, routine_name, "
@@ -55,8 +55,9 @@ class DatabricksSqlFunctionsTask extends AbstractDatabricksSqlTask implements Fu
           + "routine_definition, external_language, comment, created_by "
           + "FROM "
           + CATALOG
-          + ".information_schema.routines "
-          + "ORDER BY routine_schema, routine_name";
+          + ".information_schema.routines"
+          + WHERE
+          + " ORDER BY routine_schema, routine_name";
 
   /** {@code comment} and {@code created_by} are absent from older runtimes. */
   private static final String COMPATIBILITY_SQL =
@@ -65,12 +66,12 @@ class DatabricksSqlFunctionsTask extends AbstractDatabricksSqlTask implements Fu
           + "routine_definition, external_language "
           + "FROM "
           + CATALOG
-          + ".information_schema.routines "
-          + "ORDER BY routine_schema, routine_name";
+          + ".information_schema.routines"
+          + WHERE
+          + " ORDER BY routine_schema, routine_name";
 
-  DatabricksSqlFunctionsTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksSqlFunctionsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -89,11 +90,13 @@ class DatabricksSqlFunctionsTask extends AbstractDatabricksSqlTask implements Fu
                 fetchParameters(databricksHandle, escapedCatalog);
             executeWithCompatibilityFallback(
                 databricksHandle,
-                SQL.replace(CATALOG, escapedCatalog),
-                COMPATIBILITY_SQL.replace(CATALOG, escapedCatalog),
+                withFilter(SQL, /* catalogColumn= */ null, "routine_schema")
+                    .replace(CATALOG, escapedCatalog),
+                withFilter(COMPATIBILITY_SQL, /* catalogColumn= */ null, "routine_schema")
+                    .replace(CATALOG, escapedCatalog),
                 row -> {
                   String schemaName = cell(row, 1);
-                  if (schemaName == null || !schemaPredicate.test(schemaName)) {
+                  if (schemaName == null || !filter.matchesSchema(schemaName)) {
                     return;
                   }
                   monitor.count();
@@ -126,7 +129,8 @@ class DatabricksSqlFunctionsTask extends AbstractDatabricksSqlTask implements Fu
     try {
       DatabricksSqlHelper.executeBulkQueryOrThrow(
           handle,
-          PARAMETERS_SQL.replace(CATALOG, escapedCatalog),
+          withFilter(PARAMETERS_SQL, /* catalogColumn= */ null, "specific_schema")
+              .replace(CATALOG, escapedCatalog),
           row -> {
             String parameter = describeParameter(cell(row, 2), cell(row, 3));
             if (parameter != null) {

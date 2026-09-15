@@ -19,6 +19,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksConfig;
 import com.google.auto.service.AutoService;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
@@ -36,8 +37,6 @@ import com.google.edwmigration.dumper.application.dumper.task.Task;
 import com.google.edwmigration.dumper.plugin.ext.jdk.annotation.Description;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat;
 import java.util.List;
-import java.util.Locale;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -159,92 +158,78 @@ public class DatabricksConnector extends AbstractConnector
     out.add(new DumpMetadataTask(arguments, FORMAT_NAME));
     out.add(new FormatTask(FORMAT_NAME));
 
-    Predicate<String> catalogPredicate = nameFilter(arguments.getDatabases());
-    if (arguments.getDatabases().isEmpty()) {
-      catalogPredicate =
-          catalogPredicate.and(
-              name ->
-                  !name.equalsIgnoreCase(DatabricksCatalogNames.SAMPLES)
-                      && !name.equalsIgnoreCase(DatabricksCatalogNames.SYSTEM));
-    }
-    boolean skipHive =
-        Boolean.parseBoolean(
-            arguments.getDefinitionOrDefault(DatabricksConnectorProperty.SKIP_HIVE_METASTORE));
-    if (skipHive) {
-      catalogPredicate =
-          catalogPredicate.and(
-              name -> !name.equalsIgnoreCase(DatabricksCatalogNames.HIVE_METASTORE));
-    }
-    Predicate<String> schemaPredicate = nameFilter(arguments.getSchemata());
-
+    DatabricksFilter filter = createFilter(arguments);
     DatabricksInput strategy = resolveStrategy(arguments);
 
     out.addAll(
         strategy.tasks(
-            new DatabricksSystemSqlCatalogsTask(catalogPredicate),
-            new DatabricksSqlCatalogsTask(catalogPredicate),
-            new DatabricksRestCatalogsTask(catalogPredicate)));
+            new DatabricksSystemSqlCatalogsTask(filter),
+            new DatabricksSqlCatalogsTask(filter),
+            new DatabricksRestCatalogsTask(filter)));
     out.addAll(
         strategy.tasks(
-            new DatabricksSystemSqlSchemataTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlSchemataTask(catalogPredicate, schemaPredicate),
-            new DatabricksRestSchemataTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSystemSqlSchemataTask(filter),
+            new DatabricksSqlSchemataTask(filter),
+            new DatabricksRestSchemataTask(filter)));
     out.addAll(
         strategy.tasks(
-            new DatabricksSystemSqlTablesTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlTablesTask(catalogPredicate, schemaPredicate),
-            new DatabricksRestTablesTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSystemSqlTablesTask(filter),
+            new DatabricksSqlTablesTask(filter),
+            new DatabricksRestTablesTask(filter)));
     out.addAll(
         strategy.tasks(
-            new DatabricksSystemSqlColumnsTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlColumnsTask(catalogPredicate, schemaPredicate),
-            new DatabricksRestColumnsTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSystemSqlColumnsTask(filter),
+            new DatabricksSqlColumnsTask(filter),
+            new DatabricksRestColumnsTask(filter)));
     out.addAll(
         strategy.tasks(
-            new DatabricksSystemSqlViewsTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlViewsTask(catalogPredicate, schemaPredicate),
-            new DatabricksRestViewsTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSystemSqlViewsTask(filter),
+            new DatabricksSqlViewsTask(filter),
+            new DatabricksRestViewsTask(filter)));
     out.addAll(
         strategy.tasks(
-            new DatabricksSystemSqlTableConstraintsTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlTableConstraintsTask(catalogPredicate, schemaPredicate),
-            new DatabricksRestTableConstraintsTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSystemSqlTableConstraintsTask(filter),
+            new DatabricksSqlTableConstraintsTask(filter),
+            new DatabricksRestTableConstraintsTask(filter)));
     out.addAll(
         strategy.tasks(
-            new DatabricksSystemSqlFunctionsTask(catalogPredicate, schemaPredicate),
-            new DatabricksSqlFunctionsTask(catalogPredicate, schemaPredicate),
-            new DatabricksRestFunctionsTask(catalogPredicate, schemaPredicate)));
+            new DatabricksSystemSqlFunctionsTask(filter),
+            new DatabricksSqlFunctionsTask(filter),
+            new DatabricksRestFunctionsTask(filter)));
 
-    // The predicate already folds case and already accounts for --skip-hive-metastore.
-    if (catalogPredicate.test(DatabricksCatalogNames.HIVE_METASTORE)) {
+    // The filter already folds case and already accounts for --skip-hive-metastore.
+    if (filter.matchesCatalog(DatabricksCatalogNames.HIVE_METASTORE)) {
       out.add(new DatabricksHiveMetastoreCatalogsTask());
-      out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
-      out.add(new DatabricksHiveMetastoreTablesTask(schemaPredicate));
-      out.add(new DatabricksHiveMetastoreColumnsTask(schemaPredicate));
-      out.add(new DatabricksHiveMetastoreViewsTask(schemaPredicate));
+      out.add(new DatabricksHiveMetastoreSchemataTask(filter));
+      out.add(new DatabricksHiveMetastoreTablesTask(filter));
+      out.add(new DatabricksHiveMetastoreColumnsTask(filter));
+      out.add(new DatabricksHiveMetastoreViewsTask(filter));
     }
   }
 
   /**
-   * Returns a filter accepting exactly {@code names}, or everything if none were given.
+   * Returns the catalogs and schemas this run should dump.
    *
-   * <p>Databricks identifiers are case-insensitive, so {@code --database MAIN} has to select a
-   * catalog named {@code main}. The shared {@link ConnectorArguments#getDatabasePredicate()}
-   * compares with {@code equals}, which would instead match nothing and dump empty files without
-   * reporting a problem.
+   * <p>Two catalogs are dropped unless the user names them explicitly. {@code system} holds the
+   * metastore's own observability tables rather than customer data, and it is large; {@code
+   * samples} holds the demonstration datasets Databricks ships with every workspace. Neither
+   * belongs in a migration assessment, and both would otherwise dominate the dump.
    */
   @Nonnull
-  private static Predicate<String> nameFilter(@Nonnull List<String> names) {
-    Preconditions.checkNotNull(names, "Names were null.");
-    if (names.isEmpty()) {
-      return name -> true;
+  @VisibleForTesting
+  static DatabricksFilter createFilter(@Nonnull ConnectorArguments arguments) {
+    Preconditions.checkNotNull(arguments, "Arguments were null.");
+    ImmutableSet.Builder<String> excluded = ImmutableSet.builder();
+    if (arguments.getDatabases().isEmpty()) {
+      excluded.add(DatabricksCatalogNames.SAMPLES);
+      excluded.add(DatabricksCatalogNames.SYSTEM);
     }
-    ImmutableSet.Builder<String> builder = ImmutableSet.builder();
-    for (String name : names) {
-      builder.add(name.toLowerCase(Locale.ROOT));
+    if (Boolean.parseBoolean(
+        arguments.getDefinitionOrDefault(DatabricksConnectorProperty.SKIP_HIVE_METASTORE))) {
+      excluded.add(DatabricksCatalogNames.HIVE_METASTORE);
     }
-    ImmutableSet<String> wanted = builder.build();
-    return name -> name != null && wanted.contains(name.toLowerCase(Locale.ROOT));
+    return new DatabricksFilter(
+        arguments.getDatabases(), arguments.getSchemata(), excluded.build());
   }
 
   @Nonnull

@@ -28,7 +28,6 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
-import java.util.function.Predicate;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVFormat;
@@ -50,23 +49,42 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
   /** Placeholder in a statement template, replaced with the escaped name of one catalog. */
   protected static final String CATALOG = "$catalog";
 
-  protected final Predicate<String> catalogPredicate;
-  protected final Predicate<String> schemaPredicate;
+  /** Placeholder in a statement template, replaced with the generated {@code WHERE} clause. */
+  protected static final String WHERE = DatabricksFilter.WHERE;
 
-  AbstractDatabricksSqlTask(
-      @Nonnull String targetPath,
-      @Nonnull Predicate<String> catalogPredicate,
-      @Nonnull Predicate<String> schemaPredicate) {
+  protected final DatabricksFilter filter;
+
+  AbstractDatabricksSqlTask(@Nonnull String targetPath, @Nonnull DatabricksFilter filter) {
     super(targetPath);
-    this.catalogPredicate =
-        Preconditions.checkNotNull(catalogPredicate, "Catalog predicate cannot be null.");
-    this.schemaPredicate =
-        Preconditions.checkNotNull(schemaPredicate, "Schema predicate cannot be null.");
+    this.filter = Preconditions.checkNotNull(filter, "Filter cannot be null.");
   }
 
-  AbstractDatabricksSqlTask(
-      @Nonnull String targetPath, @Nonnull Predicate<String> catalogPredicate) {
-    this(targetPath, catalogPredicate, s -> true);
+  /**
+   * Substitutes the {@code WHERE} clause for the requested catalogs and schemas into {@code
+   * sqlTemplate}, which must contain {@link DatabricksFilter#WHERE} at the point the clause
+   * belongs.
+   *
+   * <p>Pushing the restriction into the statement is what keeps a narrow dump cheap. Without it the
+   * warehouse reads and sorts every row in the metastore before the first one is shipped, because
+   * the statements are ordered and an ordered result cannot be streamed until it is complete.
+   *
+   * @param catalogColumn the column holding the catalog name, or null if the statement is already
+   *     scoped to one catalog.
+   * @param schemaColumn the column holding the schema name, or null if the statement has none.
+   */
+  @Nonnull
+  protected String withFilter(
+      @Nonnull String sqlTemplate,
+      @CheckForNull String catalogColumn,
+      @CheckForNull String schemaColumn) {
+    Preconditions.checkNotNull(sqlTemplate, "SQL template was null.");
+    Preconditions.checkArgument(
+        sqlTemplate.contains(DatabricksFilter.WHERE),
+        "SQL template has no '%s' placeholder: %s",
+        DatabricksFilter.WHERE,
+        sqlTemplate);
+    return sqlTemplate.replace(
+        DatabricksFilter.WHERE, filter.whereClause(catalogColumn, schemaColumn));
   }
 
   @Nonnull
@@ -111,7 +129,7 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
       if (!row.isEmpty()) {
         String cat = row.get(0);
         if (cat != null
-            && catalogPredicate.test(cat)
+            && filter.matchesCatalog(cat)
             && !cat.equalsIgnoreCase(HIVE_METASTORE)
             && !handle.isCatalogInaccessible(cat)) {
           result.add(cat);

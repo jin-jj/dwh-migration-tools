@@ -43,7 +43,7 @@ class DatabricksHiveMetastoreCatalogsTask extends AbstractDatabricksHiveMetastor
       LoggerFactory.getLogger(DatabricksHiveMetastoreCatalogsTask.class);
 
   DatabricksHiveMetastoreCatalogsTask() {
-    super(HMS_ZIP_ENTRY_NAME, schema -> true);
+    super(HMS_ZIP_ENTRY_NAME, DatabricksFilter.all());
   }
 
   @Override

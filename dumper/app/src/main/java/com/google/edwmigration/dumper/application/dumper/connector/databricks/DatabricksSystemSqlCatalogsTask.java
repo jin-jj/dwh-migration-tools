@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.CatalogsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -39,14 +38,18 @@ class DatabricksSystemSqlCatalogsTask extends AbstractDatabricksSystemSqlTask
   private static final String SQL =
       "SELECT catalog_name, comment, catalog_owner, "
           + "unix_millis(created) AS created, unix_millis(last_altered) AS last_altered "
-          + "FROM system.information_schema.catalogs ORDER BY catalog_name";
+          + "FROM system.information_schema.catalogs"
+          + WHERE
+          + " ORDER BY catalog_name";
 
   private static final String COMPATIBILITY_SQL =
       "SELECT catalog_name, comment, catalog_owner, created, last_altered "
-          + "FROM system.information_schema.catalogs ORDER BY catalog_name";
+          + "FROM system.information_schema.catalogs"
+          + WHERE
+          + " ORDER BY catalog_name";
 
-  DatabricksSystemSqlCatalogsTask(@Nonnull Predicate<String> catalogPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate);
+  DatabricksSystemSqlCatalogsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -61,12 +64,12 @@ class DatabricksSystemSqlCatalogsTask extends AbstractDatabricksSystemSqlTask
                 "Writing catalogs from system tables to " + getTargetPath())) {
       executeWithCompatibilityFallback(
           databricksHandle,
-          SQL,
-          COMPATIBILITY_SQL,
+          withFilter(SQL, "catalog_name", /* schemaColumn= */ null),
+          withFilter(COMPATIBILITY_SQL, "catalog_name", /* schemaColumn= */ null),
           row -> {
             String catalogName = cell(row, 0);
             if (catalogName == null
-                || !catalogPredicate.test(catalogName)
+                || !filter.matchesCatalog(catalogName)
                 || databricksHandle.isCatalogInaccessible(catalogName)) {
               return;
             }

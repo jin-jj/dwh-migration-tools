@@ -320,10 +320,10 @@ public class DatabricksConnectorTest {
             .findFirst()
             .orElseThrow(() -> new AssertionError("No REST schemata task was added."));
 
-    assertTrue("Should match the catalog as spelled", task.catalogPredicate.test("MyCatalog"));
-    assertTrue("Should match the lower-cased catalog", task.catalogPredicate.test("mycatalog"));
-    assertTrue("Should match the upper-cased catalog", task.catalogPredicate.test("MYCATALOG"));
-    assertFalse("Should not match an unrelated catalog", task.catalogPredicate.test("other"));
+    assertTrue("Should match the catalog as spelled", task.filter.matchesCatalog("MyCatalog"));
+    assertTrue("Should match the lower-cased catalog", task.filter.matchesCatalog("mycatalog"));
+    assertTrue("Should match the upper-cased catalog", task.filter.matchesCatalog("MYCATALOG"));
+    assertFalse("Should not match an unrelated catalog", task.filter.matchesCatalog("other"));
   }
 
   @Test

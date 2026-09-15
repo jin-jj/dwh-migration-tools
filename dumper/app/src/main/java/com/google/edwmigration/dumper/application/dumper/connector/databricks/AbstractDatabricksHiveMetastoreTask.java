@@ -30,7 +30,6 @@ import java.io.UncheckedIOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVFormat;
 import org.slf4j.Logger;
@@ -51,13 +50,12 @@ abstract class AbstractDatabricksHiveMetastoreTask extends AbstractTask<Void> {
 
   protected static final CSVFormat FORMAT = CSVFormat.DEFAULT;
 
-  protected final Predicate<String> schemaPredicate;
+  protected final DatabricksFilter filter;
 
   AbstractDatabricksHiveMetastoreTask(
-      @Nonnull String targetPath, @Nonnull Predicate<String> schemaPredicate) {
+      @Nonnull String targetPath, @Nonnull DatabricksFilter filter) {
     super(targetPath);
-    this.schemaPredicate =
-        Preconditions.checkNotNull(schemaPredicate, "Schema predicate was null.");
+    this.filter = Preconditions.checkNotNull(filter, "Filter was null.");
   }
 
   @Nonnull
@@ -150,7 +148,7 @@ abstract class AbstractDatabricksHiveMetastoreTask extends AbstractTask<Void> {
         continue;
       }
       String name = row.get(0);
-      if (name != null && schemaPredicate.test(name)) {
+      if (name != null && filter.matchesSchema(name)) {
         names.add(name);
       }
     }

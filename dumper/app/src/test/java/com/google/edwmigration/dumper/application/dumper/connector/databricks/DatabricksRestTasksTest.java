@@ -44,6 +44,7 @@ import com.databricks.sdk.service.catalog.TableInfo;
 import com.databricks.sdk.service.catalog.TableType;
 import com.databricks.sdk.service.catalog.TablesAPI;
 import com.databricks.sdk.service.catalog.TablesService;
+import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.task.MemoryByteSink;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import java.io.IOException;
@@ -179,9 +180,17 @@ public class DatabricksRestTasksTest {
     return Arrays.asList(content.split("\\r?\\n"));
   }
 
+  /**
+   * Restricts the walk to {@code main.sales}, and separately excludes a catalog, so that both the
+   * inclusion and the exclusion halves of the filter are covered.
+   */
+  private static DatabricksFilter scopedFilter() {
+    return new DatabricksFilter(
+        ImmutableList.of(MAIN), ImmutableList.of(SALES), ImmutableList.of(EXCLUDED));
+  }
+
   private DatabricksRestTablesTask tablesTask() {
-    return new DatabricksRestTablesTask(
-        catalog -> !catalog.equals(EXCLUDED), schema -> !schema.equals("information_schema"));
+    return new DatabricksRestTablesTask(scopedFilter());
   }
 
   @Test
@@ -216,7 +225,7 @@ public class DatabricksRestTasksTest {
   @Test
   public void columnsTask_writesOneRecordPerColumn() throws Exception {
     MemoryByteSink sink = new MemoryByteSink();
-    new DatabricksRestColumnsTask(catalog -> true, schema -> true).doRun(context, sink, handle);
+    new DatabricksRestColumnsTask(DatabricksFilter.all()).doRun(context, sink, handle);
 
     List<String> lines = readLines(sink);
     assertEquals(3, lines.size());
@@ -232,7 +241,7 @@ public class DatabricksRestTasksTest {
   @Test
   public void viewsTask_writesOnlyViews() throws Exception {
     MemoryByteSink sink = new MemoryByteSink();
-    new DatabricksRestViewsTask(catalog -> true, schema -> true).doRun(context, sink, handle);
+    new DatabricksRestViewsTask(DatabricksFilter.all()).doRun(context, sink, handle);
 
     List<String> lines = readLines(sink);
     assertEquals(2, lines.size());
@@ -244,9 +253,9 @@ public class DatabricksRestTasksTest {
   @Test
   public void tasksSharingAHandle_walkTheMetastoreOnce() throws Exception {
     tablesTask().doRun(context, new MemoryByteSink(), handle);
-    new DatabricksRestColumnsTask(catalog -> true, schema -> true)
+    new DatabricksRestColumnsTask(DatabricksFilter.all())
         .doRun(context, new MemoryByteSink(), handle);
-    new DatabricksRestViewsTask(catalog -> true, schema -> true)
+    new DatabricksRestViewsTask(DatabricksFilter.all())
         .doRun(context, new MemoryByteSink(), handle);
 
     verify(tablesService, times(1)).list(any(ListTablesRequest.class));

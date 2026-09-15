@@ -23,7 +23,6 @@ import com.google.edwmigration.dumper.plugin.ext.jdk.progress.RecordProgressMoni
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnsFormat;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import org.apache.commons.csv.CSVPrinter;
@@ -41,18 +40,19 @@ class DatabricksSystemSqlColumnsTask extends AbstractDatabricksSystemSqlTask
       "SELECT table_catalog, table_schema, table_name, ordinal_position, column_name, "
           + "coalesce(full_data_type, data_type) AS data_type, "
           + "is_nullable, comment, partition_index "
-          + "FROM system.information_schema.columns "
-          + "ORDER BY table_catalog, table_schema, table_name, ordinal_position";
+          + "FROM system.information_schema.columns"
+          + WHERE
+          + " ORDER BY table_catalog, table_schema, table_name, ordinal_position";
 
   private static final String COMPATIBILITY_SQL =
       "SELECT table_catalog, table_schema, table_name, ordinal_position, column_name, "
           + "data_type, is_nullable, comment, partition_index "
-          + "FROM system.information_schema.columns "
-          + "ORDER BY table_catalog, table_schema, table_name, ordinal_position";
+          + "FROM system.information_schema.columns"
+          + WHERE
+          + " ORDER BY table_catalog, table_schema, table_name, ordinal_position";
 
-  DatabricksSystemSqlColumnsTask(
-      @Nonnull Predicate<String> catalogPredicate, @Nonnull Predicate<String> schemaPredicate) {
-    super(ZIP_ENTRY_NAME, catalogPredicate, schemaPredicate);
+  DatabricksSystemSqlColumnsTask(@Nonnull DatabricksFilter filter) {
+    super(ZIP_ENTRY_NAME, filter);
   }
 
   @Override
@@ -66,15 +66,15 @@ class DatabricksSystemSqlColumnsTask extends AbstractDatabricksSystemSqlTask
             new RecordProgressMonitor("Writing columns from system tables to " + getTargetPath())) {
       executeWithCompatibilityFallback(
           databricksHandle,
-          SQL,
-          COMPATIBILITY_SQL,
+          withFilter(SQL, "table_catalog", "table_schema"),
+          withFilter(COMPATIBILITY_SQL, "table_catalog", "table_schema"),
           row -> {
             String catalogName = cell(row, 0);
             String schemaName = cell(row, 1);
             if (catalogName == null
                 || schemaName == null
-                || !catalogPredicate.test(catalogName)
-                || !schemaPredicate.test(schemaName)
+                || !filter.matchesCatalog(catalogName)
+                || !filter.matchesSchema(schemaName)
                 || databricksHandle.isCatalogInaccessible(catalogName)) {
               return;
             }
