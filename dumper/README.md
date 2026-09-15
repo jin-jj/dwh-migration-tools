@@ -72,6 +72,31 @@ Dump all Unity Catalog metadata, skipping legacy Hive Metastore:
 ./bin/dwh-dumper --connector databricks --url https://<workspace-host> --warehouse <warehouse-id> -Ddatabricks.skip-hive-metastore=true
 ```
 
+#### Permissions
+
+> **A principal that lacks a privilege sees fewer objects, not an error.** Every extraction path filters silently, so a dump taken with incomplete grants succeeds and looks exactly like a dump of a smaller workspace. Check the grants before trusting a small result.
+
+For the SQL paths (the default), the principal needs **`CAN_USE`** on the SQL warehouse — set through the warehouse's Permissions UI or the permissions API; there is no `GRANT ... ON WAREHOUSE` statement — plus, per catalog you want dumped:
+
+```sql
+GRANT USE CATALOG ON CATALOG `<catalog>`            TO `<principal>`;
+GRANT USE SCHEMA  ON SCHEMA  `<catalog>`.`<schema>` TO `<principal>`;
+GRANT SELECT      ON SCHEMA  `<catalog>`.`<schema>` TO `<principal>`;
+```
+
+`SELECT` is needed for the objects to appear at all: `information_schema` is privilege-aware and omits rows for objects the caller cannot read. No grant on `information_schema` itself is required.
+
+For `rest-only`, no warehouse is needed, but the same Unity Catalog privileges apply — `tables/list` returns only tables the caller owns or has `SELECT` on, and `functions/list` only those it owns or can `EXECUTE`. The principal must also exist in the workspace, and the workspace must be attached to a Unity Catalog metastore.
+
+The legacy `hive_metastore` catalog uses legacy table ACLs rather than Unity Catalog privileges. `READ_METADATA` is enough and is metadata-only:
+
+```sql
+GRANT USAGE         ON SCHEMA `hive_metastore`.`<database>` TO `<principal>`;
+GRANT READ_METADATA ON SCHEMA `hive_metastore`.`<database>` TO `<principal>`;
+```
+
+Do not grant `ANY FILE`; it is not needed here and bypasses table ACLs.
+
 #### Connector properties
 
 | Property | Default | Meaning |
