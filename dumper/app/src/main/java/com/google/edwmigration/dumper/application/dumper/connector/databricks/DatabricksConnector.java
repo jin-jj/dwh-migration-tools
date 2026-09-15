@@ -20,6 +20,7 @@ import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksConfig;
 import com.google.auto.service.AutoService;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
 import com.google.edwmigration.dumper.application.dumper.MetadataDumperUsageException;
 import com.google.edwmigration.dumper.application.dumper.annotations.RespectsInput;
@@ -35,6 +36,7 @@ import com.google.edwmigration.dumper.application.dumper.task.Task;
 import com.google.edwmigration.dumper.plugin.ext.jdk.annotation.Description;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
@@ -157,7 +159,7 @@ public class DatabricksConnector extends AbstractConnector
     out.add(new DumpMetadataTask(arguments, FORMAT_NAME));
     out.add(new FormatTask(FORMAT_NAME));
 
-    Predicate<String> catalogPredicate = arguments.getDatabasePredicate();
+    Predicate<String> catalogPredicate = nameFilter(arguments.getDatabases());
     if (arguments.getDatabases().isEmpty()) {
       catalogPredicate =
           catalogPredicate.and(
@@ -173,7 +175,7 @@ public class DatabricksConnector extends AbstractConnector
           catalogPredicate.and(
               name -> !name.equalsIgnoreCase(DatabricksCatalogNames.HIVE_METASTORE));
     }
-    Predicate<String> schemaPredicate = arguments.getSchemaPredicate();
+    Predicate<String> schemaPredicate = nameFilter(arguments.getSchemata());
 
     DatabricksInput strategy = resolveStrategy(arguments);
 
@@ -213,18 +215,36 @@ public class DatabricksConnector extends AbstractConnector
             new DatabricksSqlFunctionsTask(catalogPredicate, schemaPredicate),
             new DatabricksRestFunctionsTask(catalogPredicate, schemaPredicate)));
 
-    boolean includesHiveMetastore =
-        !skipHive
-            && (catalogPredicate.test(DatabricksCatalogNames.HIVE_METASTORE)
-                || arguments.getDatabases().stream()
-                    .anyMatch(d -> d.equalsIgnoreCase(DatabricksCatalogNames.HIVE_METASTORE)));
-    if (includesHiveMetastore) {
+    // The predicate already folds case and already accounts for --skip-hive-metastore.
+    if (catalogPredicate.test(DatabricksCatalogNames.HIVE_METASTORE)) {
       out.add(new DatabricksHiveMetastoreCatalogsTask());
       out.add(new DatabricksHiveMetastoreSchemataTask(schemaPredicate));
       out.add(new DatabricksHiveMetastoreTablesTask(schemaPredicate));
       out.add(new DatabricksHiveMetastoreColumnsTask(schemaPredicate));
       out.add(new DatabricksHiveMetastoreViewsTask(schemaPredicate));
     }
+  }
+
+  /**
+   * Returns a filter accepting exactly {@code names}, or everything if none were given.
+   *
+   * <p>Databricks identifiers are case-insensitive, so {@code --database MAIN} has to select a
+   * catalog named {@code main}. The shared {@link ConnectorArguments#getDatabasePredicate()}
+   * compares with {@code equals}, which would instead match nothing and dump empty files without
+   * reporting a problem.
+   */
+  @Nonnull
+  private static Predicate<String> nameFilter(@Nonnull List<String> names) {
+    Preconditions.checkNotNull(names, "Names were null.");
+    if (names.isEmpty()) {
+      return name -> true;
+    }
+    ImmutableSet.Builder<String> builder = ImmutableSet.builder();
+    for (String name : names) {
+      builder.add(name.toLowerCase(Locale.ROOT));
+    }
+    ImmutableSet<String> wanted = builder.build();
+    return name -> name != null && wanted.contains(name.toLowerCase(Locale.ROOT));
   }
 
   @Nonnull

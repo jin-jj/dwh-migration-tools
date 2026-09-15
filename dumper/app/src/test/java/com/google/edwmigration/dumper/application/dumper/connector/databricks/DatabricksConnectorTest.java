@@ -273,6 +273,59 @@ public class DatabricksConnectorTest {
     assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreViewsTask));
   }
 
+  /**
+   * Guards the removal of a bespoke workaround.
+   *
+   * <p>{@code hive_metastore} used to be case-folded by a dedicated {@code equalsIgnoreCase} scan
+   * of the raw arguments, bolted on beside the case-sensitive predicate. That made this one catalog
+   * work while every other catalog stayed broken. The workaround is gone, so this asserts the
+   * general fix covers what the special case used to.
+   */
+  @Test
+  public void addTasksTo_withDifferentlyCasedDatabase_stillMatches() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector", "databricks",
+            "--url", "https://dbc-test.cloud.databricks.com",
+            "--warehouse", "warehouse123",
+            "--database", "HIVE_Metastore");
+    List<Task<?>> tasks = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+
+    assertEquals(SETUP_TASKS + DATASETS * 3 + HIVE_METASTORE_TASKS, tasks.size());
+    assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
+  }
+
+  /**
+   * Databricks identifiers are case-insensitive, so the filter handed to the tasks has to be too.
+   *
+   * <p>The shared {@code getDatabasePredicate()} compares with {@code equals}, so before the fix
+   * {@code --database MyCatalog} selected nothing at all and the dump quietly wrote empty files.
+   */
+  @Test
+  public void addTasksTo_withDifferentlyCasedDatabase_passesAFoldingFilter() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector", "databricks",
+            "--url", "https://dbc-test.cloud.databricks.com",
+            "--warehouse", "warehouse123",
+            "--database", "MyCatalog");
+    List<Task<?>> tasks = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+
+    DatabricksRestSchemataTask task =
+        tasks.stream()
+            .filter(t -> t instanceof DatabricksRestSchemataTask)
+            .map(t -> (DatabricksRestSchemataTask) t)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("No REST schemata task was added."));
+
+    assertTrue("Should match the catalog as spelled", task.catalogPredicate.test("MyCatalog"));
+    assertTrue("Should match the lower-cased catalog", task.catalogPredicate.test("mycatalog"));
+    assertTrue("Should match the upper-cased catalog", task.catalogPredicate.test("MYCATALOG"));
+    assertFalse("Should not match an unrelated catalog", task.catalogPredicate.test("other"));
+  }
+
   @Test
   public void addTasksTo_withSkipHiveMetastoreProperty_addsOnlyUcTasks() throws Exception {
     ConnectorArguments arguments =
