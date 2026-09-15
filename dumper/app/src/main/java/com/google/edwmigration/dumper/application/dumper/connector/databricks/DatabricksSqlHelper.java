@@ -16,6 +16,7 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import com.databricks.sdk.service.sql.CancelExecutionRequest;
 import com.databricks.sdk.service.sql.Disposition;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ExternalLink;
@@ -478,7 +479,10 @@ final class DatabricksSqlHelper {
 
   private static void cancelQuietly(DatabricksHandle handle, String statementId) {
     try {
-      handle.getClient().statementExecution().cancelExecution(statementId);
+      handle
+          .getClient()
+          .statementExecution()
+          .cancelExecution(new CancelExecutionRequest().setStatementId(statementId));
     } catch (Exception e) {
       logger.debug("Failed to cancel statement '{}': {}", statementId, e.getMessage());
     }
