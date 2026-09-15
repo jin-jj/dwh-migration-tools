@@ -45,7 +45,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import javax.annotation.Nonnull;
-import org.apache.commons.csv.CSVFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,8 +59,6 @@ import org.slf4j.LoggerFactory;
 abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
 
   private static final Logger logger = LoggerFactory.getLogger(AbstractDatabricksRestTask.class);
-
-  protected static final CSVFormat FORMAT = CSVFormat.DEFAULT;
 
   /**
    * Serializes the cached table listing.

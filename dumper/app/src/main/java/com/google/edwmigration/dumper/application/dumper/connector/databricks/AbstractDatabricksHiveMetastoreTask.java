@@ -31,7 +31,6 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import javax.annotation.Nonnull;
-import org.apache.commons.csv.CSVFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,8 +46,6 @@ abstract class AbstractDatabricksHiveMetastoreTask extends AbstractTask<Void> {
 
   private static final Logger logger =
       LoggerFactory.getLogger(AbstractDatabricksHiveMetastoreTask.class);
-
-  protected static final CSVFormat FORMAT = CSVFormat.DEFAULT;
 
   protected final DatabricksFilter filter;
 

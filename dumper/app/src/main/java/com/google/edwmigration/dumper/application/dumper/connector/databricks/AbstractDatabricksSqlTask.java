@@ -30,7 +30,6 @@ import java.util.List;
 import java.util.function.Consumer;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
-import org.apache.commons.csv.CSVFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,8 +42,6 @@ import org.slf4j.LoggerFactory;
 abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
 
   private static final Logger logger = LoggerFactory.getLogger(AbstractDatabricksSqlTask.class);
-
-  protected static final CSVFormat FORMAT = CSVFormat.DEFAULT;
 
   /** Placeholder in a statement template, replaced with the escaped name of one catalog. */
   protected static final String CATALOG = "$catalog";

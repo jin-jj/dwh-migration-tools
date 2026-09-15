@@ -31,6 +31,7 @@ import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
 import com.google.common.collect.ImmutableList;
+import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.MemoryByteSink;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import java.io.IOException;
@@ -144,6 +145,44 @@ public class DatabricksTasksTest {
     assertTrue(sql, sql.contains("lower(table_schema) IN ('sales')"));
     assertTrue(
         "The catalog is already scoped by the loop: " + sql, !sql.contains("table_catalog)"));
+  }
+
+  /**
+   * Every connector writes the dialect declared by {@link AbstractTask#FORMAT}. These tasks used to
+   * redeclare their own {@code FORMAT}, which shadowed it and silently gave the Databricks dump
+   * CRLF line endings and no escape character while every other dump used LF and a backslash.
+   *
+   * <p>The other tests here split on either line ending, so nothing caught it. This one does not.
+   */
+  @Test
+  public void systemTablesTask_writesTheConnectorWideCsvDialect() throws Exception {
+    mockSqlQuery(
+        "system.information_schema.tables",
+        Collections.singletonList(
+            Arrays.asList(
+                "my_catalog",
+                "my_schema",
+                "orders",
+                "MANAGED",
+                "DELTA",
+                "s3://warehouse/orders",
+                "orders table",
+                "charlie",
+                "1200",
+                "2200")));
+    MemoryByteSink sink = new MemoryByteSink();
+
+    new DatabricksSystemSqlTablesTask(DatabricksFilter.all()).doRun(context, sink, handle);
+
+    String content = sink.openStream().toString();
+    String separator = AbstractTask.FORMAT.getRecordSeparator();
+    assertEquals(
+        "Record count is wrong for separator " + separator.replace("\n", "\\n"),
+        2,
+        content.split(java.util.regex.Pattern.quote(separator), -1).length - 1);
+    assertTrue(
+        "The dump must not carry a separator the rest of the connectors do not use",
+        !separator.contains("\r") == !content.contains("\r"));
   }
 
   private static List<String> readLines(MemoryByteSink sink) throws IOException {
