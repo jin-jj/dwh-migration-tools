@@ -69,6 +69,23 @@ public interface DatabricksMetadataDumpFormat {
     }
   }
 
+  /**
+   * The verbatim Unity Catalog {@code TableInfo} objects, one JSON document per line.
+   *
+   * <p>The CSV outputs are a projection: they keep the fields the assessment needs and drop the
+   * rest. This entry keeps everything the REST API returned, including the fields no CSV has a
+   * column for, so that a consumer that wants more than the assessment does not have to re-walk the
+   * metastore. It is written only when the REST tier runs, because it is the only tier that has a
+   * {@code TableInfo} to write.
+   *
+   * <p>The listing honours {@code --database} and {@code --schema}, and excludes {@code
+   * hive_metastore}, which is not a Unity Catalog securable.
+   */
+  interface RawTablesFormat {
+
+    String ZIP_ENTRY_NAME = "tables-raw.jsonl";
+  }
+
   interface ColumnsFormat {
 
     String ZIP_ENTRY_NAME = "columns.csv";

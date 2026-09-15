@@ -80,5 +80,13 @@ Dump all Unity Catalog metadata, skipping legacy Hive Metastore:
 | `databricks.skip-hive-metastore` | `false` | Skip the legacy `hive_metastore` catalog. |
 | `databricks.rest.requests-per-second` | `20` | Ceiling on the request rate of the REST tier. |
 
+#### Output
+
+The dump contains one CSV per dataset: `catalogs.csv`, `schemata.csv`, `tables.csv`, `columns.csv`, `views.csv`, `table_constraints.csv` and `functions.csv`. Whichever tier succeeds writes the same file, so the columns do not depend on how the metadata was read.
+
+The legacy `hive_metastore` catalog is dumped alongside, into `catalogs-hms.csv`, `schemata-hms.csv`, `tables-hms.csv`, `columns-hms.csv` and `views-hms.csv`. It is kept separate because it is read by scraping `SHOW TABLE EXTENDED` rather than by querying an information schema, and the two sources do not agree field for field.
+
+When the REST tier runs, the dump also contains `tables-raw.jsonl`: the Unity Catalog `TableInfo` objects verbatim, one JSON document per line. The CSVs are a projection of these, so the raw entry carries what they drop — the column array, Delta table properties and features, `type_json`, and the securable kind — for consumers that want more than the assessment does. It costs nothing, because the REST tier walks the metastore once and shares the result; it is absent from dumps that never reach the REST tier, because no other tier has these objects to publish.
+
 [BQMS]: https://cloud.google.com/bigquery/docs/migration-intro
 

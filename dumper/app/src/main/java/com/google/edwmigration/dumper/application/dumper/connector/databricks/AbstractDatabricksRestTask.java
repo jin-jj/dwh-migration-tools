@@ -145,6 +145,10 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
    * <p>{@code /tables/list} returns the full column array inline, so callers that need columns do
    * not have to issue a per-table get. Callers that do not need columns should pass {@code false}
    * for {@code includeColumns} to keep the responses small.
+   *
+   * <p>Table properties are requested. No CSV output has a column for them, but they carry the
+   * Delta protocol versions and table features, which are among the few things the REST API can see
+   * and SQL cannot, and they are republished verbatim in {@code tables-raw.jsonl}.
    */
   protected void forEachTable(
       @Nonnull DatabricksHandle handle,
@@ -167,7 +171,6 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
                           .setCatalogName(catalogName)
                           .setSchemaName(schemaName)
                           .setOmitColumns(!includeColumns)
-                          .setOmitProperties(true)
                           .setMaxResults(PAGE_SIZE)
                           .setPageToken(pageToken));
           return new Page<>(response.getTables(), response.getNextPageToken());
@@ -227,13 +230,23 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
       @Nonnull DatabricksHandle handle,
       @Nonnull DatabricksRestHelper.ItemConsumer<TableInfo> consumer)
       throws IOException {
-    Path listing = handle.tableListing(file -> writeTableListing(handle, file));
+    Path listing = tableListing(handle);
     try (BufferedReader reader = Files.newBufferedReader(listing, StandardCharsets.UTF_8)) {
       String line;
       while ((line = reader.readLine()) != null) {
         consumer.accept(MAPPER.readValue(line, TableInfo.class));
       }
     }
+  }
+
+  /**
+   * Returns the file holding the shared table listing, walking the metastore if no task has yet.
+   *
+   * <p>The file is one JSON document per line, each the serialized form of a {@link TableInfo}.
+   */
+  @Nonnull
+  protected Path tableListing(@Nonnull DatabricksHandle handle) throws IOException {
+    return handle.tableListing(file -> writeTableListing(handle, file));
   }
 
   /**

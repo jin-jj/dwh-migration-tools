@@ -46,6 +46,9 @@ public class DatabricksConnectorTest {
   /** catalogs, schemata, tables, columns and views, dumped separately for the legacy metastore. */
   private static final int HIVE_METASTORE_TASKS = 5;
 
+  /** The raw table listing, which only the REST tier can produce. */
+  private static final int REST_ONLY_TASKS = 1;
+
   private final DatabricksConnector connector = new DatabricksConnector();
 
   @Test
@@ -125,7 +128,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    assertEquals(SETUP_TASKS + DATASETS * 3 + HIVE_METASTORE_TASKS, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3 + REST_ONLY_TASKS + HIVE_METASTORE_TASKS, tasks.size());
     assertTrue(tasks.get(0) instanceof DumpMetadataTask);
     assertTrue(tasks.get(1) instanceof FormatTask);
     assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
@@ -149,11 +152,12 @@ public class DatabricksConnectorTest {
     assertTrue(tasks.get(20) instanceof DatabricksSystemSqlFunctionsTask);
     assertTrue(tasks.get(21) instanceof DatabricksSqlFunctionsTask);
     assertTrue(tasks.get(22) instanceof DatabricksRestFunctionsTask);
-    assertTrue(tasks.get(23) instanceof DatabricksHiveMetastoreCatalogsTask);
-    assertTrue(tasks.get(24) instanceof DatabricksHiveMetastoreSchemataTask);
-    assertTrue(tasks.get(25) instanceof DatabricksHiveMetastoreTablesTask);
-    assertTrue(tasks.get(26) instanceof DatabricksHiveMetastoreColumnsTask);
-    assertTrue(tasks.get(27) instanceof DatabricksHiveMetastoreViewsTask);
+    assertTrue(tasks.get(23) instanceof DatabricksRestRawTablesTask);
+    assertTrue(tasks.get(24) instanceof DatabricksHiveMetastoreCatalogsTask);
+    assertTrue(tasks.get(25) instanceof DatabricksHiveMetastoreSchemataTask);
+    assertTrue(tasks.get(26) instanceof DatabricksHiveMetastoreTablesTask);
+    assertTrue(tasks.get(27) instanceof DatabricksHiveMetastoreColumnsTask);
+    assertTrue(tasks.get(28) instanceof DatabricksHiveMetastoreViewsTask);
 
     // The first tier of each dataset is unconditional; the two fallback tiers behind it are gated
     // on their predecessors having failed.
@@ -177,7 +181,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    assertEquals(SETUP_TASKS + DATASETS * 3, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3 + REST_ONLY_TASKS, tasks.size());
     assertTrue(tasks.get(0) instanceof DumpMetadataTask);
     assertTrue(tasks.get(1) instanceof FormatTask);
     assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
@@ -266,7 +270,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    assertEquals(SETUP_TASKS + DATASETS * 3 + HIVE_METASTORE_TASKS, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3 + REST_ONLY_TASKS + HIVE_METASTORE_TASKS, tasks.size());
     assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreSchemataTask));
     assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
     assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreColumnsTask));
@@ -292,7 +296,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    assertEquals(SETUP_TASKS + DATASETS * 3 + HIVE_METASTORE_TASKS, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3 + REST_ONLY_TASKS + HIVE_METASTORE_TASKS, tasks.size());
     assertTrue(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
   }
 
@@ -340,7 +344,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    assertEquals(SETUP_TASKS + DATASETS * 3, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS * 3 + REST_ONLY_TASKS, tasks.size());
     assertTrue(tasks.get(2) instanceof DatabricksSystemSqlCatalogsTask);
     assertTrue(tasks.get(3) instanceof DatabricksSqlCatalogsTask);
     assertFalse(tasks.stream().anyMatch(t -> t instanceof DatabricksHiveMetastoreTablesTask));
@@ -359,7 +363,7 @@ public class DatabricksConnectorTest {
     List<Task<?>> tasks = new ArrayList<>();
     connector.addTasksTo(tasks, arguments);
 
-    assertEquals(SETUP_TASKS + DATASETS, tasks.size());
+    assertEquals(SETUP_TASKS + DATASETS + REST_ONLY_TASKS, tasks.size());
     assertTrue(tasks.get(2) instanceof DatabricksRestCatalogsTask);
     assertTrue(tasks.get(3) instanceof DatabricksRestSchemataTask);
     assertTrue(tasks.get(4) instanceof DatabricksRestTablesTask);
@@ -367,6 +371,7 @@ public class DatabricksConnectorTest {
     assertTrue(tasks.get(6) instanceof DatabricksRestViewsTask);
     assertTrue(tasks.get(7) instanceof DatabricksRestTableConstraintsTask);
     assertTrue(tasks.get(8) instanceof DatabricksRestFunctionsTask);
+    assertTrue(tasks.get(9) instanceof DatabricksRestRawTablesTask);
     assertFalse(tasks.stream().anyMatch(t -> t instanceof AbstractDatabricksSqlTask));
     // The REST tier never runs behind another tier, so it must not be gated on anything.
     assertEquals(0, tasks.get(2).getConditions().length);
@@ -393,5 +398,88 @@ public class DatabricksConnectorTest {
             DatabricksConnector.DatabricksConnectorProperty.REST_REQUESTS_PER_SECOND,
             DatabricksConnector.DatabricksConnectorProperty.SKIP_HIVE_METASTORE),
         ImmutableList.copyOf(connector.getPropertyConstants()));
+  }
+
+  /**
+   * The raw listing is worth nothing if it costs a metastore walk on a healthy run.
+   *
+   * <p>It shares the REST tier's walk, so as long as it is gated on the same condition as the other
+   * REST tasks it is free. Ungated, it would walk the whole metastore over the REST API on every
+   * dump, including the overwhelming majority where the SQL tiers succeed and no other REST task
+   * runs at all.
+   */
+  @Test
+  public void addTasksTo_defaultArguments_gatesTheRawListingBehindBothSqlTiers() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector", "databricks",
+            "--url", "https://dbc-test.cloud.databricks.com",
+            "--warehouse", "warehouse123");
+    List<Task<?>> tasks = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+
+    Task<?> rawTables = onlyTaskOfType(tasks, DatabricksRestRawTablesTask.class);
+    Task<?> restTables = onlyTaskOfType(tasks, DatabricksRestTablesTask.class);
+    assertEquals(
+        "The raw listing should be gated exactly as the REST tables task is",
+        ImmutableList.copyOf(restTables.getConditions()).size(),
+        ImmutableList.copyOf(rawTables.getConditions()).size());
+    assertTrue(rawTables.getConditions().length > 0);
+
+    // The SQL tiers must not be gated twice over by the second call that adds the raw listing.
+    Task<?> systemTables = onlyTaskOfType(tasks, DatabricksSystemSqlTablesTask.class);
+    Task<?> catalogTables = onlyTaskOfType(tasks, DatabricksSqlTablesTask.class);
+    assertEquals(0, systemTables.getConditions().length);
+    assertEquals(1, catalogTables.getConditions().length);
+  }
+
+  @Test
+  public void addTasksTo_restOnlyStrategy_addsTheRawListingUngated() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector",
+            "databricks",
+            "--url",
+            "https://dbc-test.cloud.databricks.com",
+            "-Ddatabricks.skip-hive-metastore=true",
+            "-Ddatabricks.metadata.strategy=rest-only");
+    List<Task<?>> tasks = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+
+    assertEquals(
+        0, onlyTaskOfType(tasks, DatabricksRestRawTablesTask.class).getConditions().length);
+  }
+
+  @Test
+  public void addTasksTo_strategiesThatNeverReachRest_omitTheRawListing() throws Exception {
+    for (String strategy : new String[] {"system-only", "catalog-only", "system-then-catalog"}) {
+      ConnectorArguments arguments =
+          new ConnectorArguments(
+              "--connector",
+              "databricks",
+              "--url",
+              "https://dbc-test.cloud.databricks.com",
+              "--warehouse",
+              "warehouse123",
+              "-Ddatabricks.skip-hive-metastore=true",
+              "-Ddatabricks.metadata.strategy=" + strategy);
+      List<Task<?>> tasks = new ArrayList<>();
+      connector.addTasksTo(tasks, arguments);
+
+      assertFalse(
+          strategy + " should not produce a raw listing",
+          tasks.stream().anyMatch(t -> t instanceof DatabricksRestRawTablesTask));
+    }
+  }
+
+  private static Task<?> onlyTaskOfType(List<Task<?>> tasks, Class<?> type) {
+    List<Task<?>> found = new ArrayList<>();
+    for (Task<?> task : tasks) {
+      if (type.isInstance(task)) {
+        found.add(task);
+      }
+    }
+    assertEquals("Expected exactly one " + type.getSimpleName(), 1, found.size());
+    return found.get(0);
   }
 }

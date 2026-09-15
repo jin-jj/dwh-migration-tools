@@ -171,11 +171,9 @@ public class DatabricksConnector extends AbstractConnector
             new DatabricksSystemSqlSchemataTask(filter),
             new DatabricksSqlSchemataTask(filter),
             new DatabricksRestSchemataTask(filter)));
-    out.addAll(
-        strategy.tasks(
-            new DatabricksSystemSqlTablesTask(filter),
-            new DatabricksSqlTablesTask(filter),
-            new DatabricksRestTablesTask(filter)));
+    DatabricksSystemSqlTablesTask systemTables = new DatabricksSystemSqlTablesTask(filter);
+    DatabricksSqlTablesTask catalogTables = new DatabricksSqlTablesTask(filter);
+    out.addAll(strategy.tasks(systemTables, catalogTables, new DatabricksRestTablesTask(filter)));
     out.addAll(
         strategy.tasks(
             new DatabricksSystemSqlColumnsTask(filter),
@@ -196,6 +194,13 @@ public class DatabricksConnector extends AbstractConnector
             new DatabricksSystemSqlFunctionsTask(filter),
             new DatabricksSqlFunctionsTask(filter),
             new DatabricksRestFunctionsTask(filter)));
+
+    // Only the REST tier has raw API objects to publish, and it shares its metastore walk with the
+    // REST tasks above, so this is gated on exactly the condition they are: it must not provoke a
+    // walk of its own on a run where SQL already succeeded.
+    out.addAll(
+        strategy.restTierTasks(
+            systemTables, catalogTables, new DatabricksRestRawTablesTask(filter)));
 
     // The filter already folds case and already accounts for --skip-hive-metastore.
     if (filter.matchesCatalog(DatabricksCatalogNames.HIVE_METASTORE)) {

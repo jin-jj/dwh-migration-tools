@@ -54,6 +54,13 @@ enum DatabricksInput {
           catalogTask.onlyIfFailed(systemTask),
           restTask.onlyIfAllFailed(systemTask, catalogTask));
     }
+
+    @Override
+    @Nonnull
+    ImmutableList<Task<?>> restTierTasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
+      return ImmutableList.of(restTask.onlyIfAllFailed(systemTask, catalogTask));
+    }
   },
   /** Try the system schema, then per-catalog schemas. Never touch the REST API. */
   SYSTEM_THEN_CATALOG {
@@ -62,6 +69,13 @@ enum DatabricksInput {
     ImmutableList<Task<?>> tasks(
         AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
       return ImmutableList.of(systemTask, catalogTask.onlyIfFailed(systemTask));
+    }
+
+    @Override
+    @Nonnull
+    ImmutableList<Task<?>> restTierTasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
+      return ImmutableList.of();
     }
   },
   /** Query per-catalog information schemas only. */
@@ -72,6 +86,13 @@ enum DatabricksInput {
         AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
       return ImmutableList.of(catalogTask);
     }
+
+    @Override
+    @Nonnull
+    ImmutableList<Task<?>> restTierTasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
+      return ImmutableList.of();
+    }
   },
   /** Query the system information schema only. */
   SYSTEM_ONLY {
@@ -81,12 +102,26 @@ enum DatabricksInput {
         AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
       return ImmutableList.of(systemTask);
     }
+
+    @Override
+    @Nonnull
+    ImmutableList<Task<?>> restTierTasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
+      return ImmutableList.of();
+    }
   },
   /** Use the Unity Catalog REST API only. Does not need a SQL warehouse. */
   REST_ONLY {
     @Override
     @Nonnull
     ImmutableList<Task<?>> tasks(
+        AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
+      return ImmutableList.of(restTask);
+    }
+
+    @Override
+    @Nonnull
+    ImmutableList<Task<?>> restTierTasks(
         AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask) {
       return ImmutableList.of(restTask);
     }
@@ -99,6 +134,19 @@ enum DatabricksInput {
 
   @Nonnull
   abstract ImmutableList<Task<?>> tasks(
+      AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask);
+
+  /**
+   * Returns the tasks for an output only the REST tier can produce.
+   *
+   * <p>This is {@link #tasks} minus the SQL tiers: the strategies that never reach the REST tier
+   * return nothing, and the ones that do return the REST task under the same condition it would
+   * carry in {@link #tasks}. The gating has to be stated once per strategy rather than derived,
+   * because the conditions are recorded on the task, so asking {@link #tasks} a second time would
+   * gate the SQL tasks twice over.
+   */
+  @Nonnull
+  abstract ImmutableList<Task<?>> restTierTasks(
       AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask);
 
   @Nonnull

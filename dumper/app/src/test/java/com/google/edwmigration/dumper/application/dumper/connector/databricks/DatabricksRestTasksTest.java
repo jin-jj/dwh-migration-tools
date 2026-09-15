@@ -44,6 +44,8 @@ import com.databricks.sdk.service.catalog.TableInfo;
 import com.databricks.sdk.service.catalog.TableType;
 import com.databricks.sdk.service.catalog.TablesAPI;
 import com.databricks.sdk.service.catalog.TablesService;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.task.MemoryByteSink;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
@@ -259,6 +261,66 @@ public class DatabricksRestTasksTest {
         .doRun(context, new MemoryByteSink(), handle);
 
     verify(tablesService, times(1)).list(any(ListTablesRequest.class));
+  }
+
+  @Test
+  public void rawTablesTask_writesOneJsonDocumentPerTable() throws Exception {
+    MemoryByteSink sink = new MemoryByteSink();
+    new DatabricksRestRawTablesTask(scopedFilter()).doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+
+    ObjectMapper mapper =
+        new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    TableInfo first = mapper.readValue(lines.get(0), TableInfo.class);
+    assertEquals(orders().getFullName(), first.getFullName());
+    assertEquals(orders().getTableType(), first.getTableType());
+    assertEquals(
+        mapper.readValue(lines.get(1), TableInfo.class).getFullName(),
+        orderSummary().getFullName());
+  }
+
+  /**
+   * The reason the raw entry exists: the CSV projection drops fields the API returned.
+   *
+   * <p>Columns are the cheapest thing to point at, since {@code tables.csv} has no column for them
+   * at all, and a consumer reading only the CSVs would have to join two files to recover what one
+   * line of this entry already carries.
+   */
+  @Test
+  public void rawTablesTask_keepsFieldsTheCsvProjectionDrops() throws Exception {
+    MemoryByteSink sink = new MemoryByteSink();
+    new DatabricksRestRawTablesTask(scopedFilter()).doRun(context, sink, handle);
+
+    TableInfo table =
+        new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            .readValue(readLines(sink).get(0), TableInfo.class);
+    assertEquals(orders().getColumns().size(), table.getColumns().size());
+    assertEquals("order_id", table.getColumns().iterator().next().getName());
+  }
+
+  /** The raw entry has to be free: it republishes the walk, it must not provoke another. */
+  @Test
+  public void rawTablesTask_reusesTheWalkOfTheOtherRestTasks() throws Exception {
+    tablesTask().doRun(context, new MemoryByteSink(), handle);
+    new DatabricksRestRawTablesTask(scopedFilter()).doRun(context, new MemoryByteSink(), handle);
+
+    verify(tablesService, times(1)).list(any(ListTablesRequest.class));
+  }
+
+  /**
+   * Table properties are the headline of what REST can see and SQL cannot, so the walk must not ask
+   * the API to omit them.
+   */
+  @Test
+  public void metastoreWalk_requestsTableProperties() throws Exception {
+    tablesTask().doRun(context, new MemoryByteSink(), handle);
+
+    ArgumentCaptor<ListTablesRequest> requests = ArgumentCaptor.forClass(ListTablesRequest.class);
+    verify(tablesService, times(1)).list(requests.capture());
+    assertFalse(Boolean.TRUE.equals(requests.getValue().getOmitProperties()));
   }
 
   @Test
