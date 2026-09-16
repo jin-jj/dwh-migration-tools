@@ -135,6 +135,15 @@ public class DatabricksConnector extends AbstractConnector
 
   @Override
   public void validate(@Nonnull ConnectorArguments arguments) {
+    if (arguments.isAssessment()) {
+      // This connector produces none of the assessment file set, so accepting the flag would
+      // yield a dump that is described as an assessment but cannot be ingested as one.
+      throw new MetadataDumperUsageException(
+          "--assessment is not supported by the '"
+              + getName()
+              + "' connector, which dumps metadata for migration purposes only. Re-run without"
+              + " --assessment.");
+    }
     Preconditions.checkArgument(arguments.hasUri(), "--url param is required");
     Preconditions.checkArgument(
         !resolveStrategy(arguments).requiresWarehouse()

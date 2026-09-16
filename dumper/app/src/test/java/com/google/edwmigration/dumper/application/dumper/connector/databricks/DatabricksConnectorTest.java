@@ -20,9 +20,11 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
+import com.google.edwmigration.dumper.application.dumper.MetadataDumperUsageException;
 import com.google.edwmigration.dumper.application.dumper.connector.Connector;
 import com.google.edwmigration.dumper.application.dumper.task.DumpMetadataTask;
 import com.google.edwmigration.dumper.application.dumper.task.FormatTask;
@@ -116,6 +118,57 @@ public class DatabricksConnectorTest {
             "--url", "https://dbc-test.cloud.databricks.com",
             "--warehouse", "warehouse123");
     connector.validate(arguments);
+  }
+
+  @Test
+  public void validate_assessment_isRejectedAndSaysWhy() throws Exception {
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector",
+            "databricks",
+            "--url",
+            "https://dbc-test.cloud.databricks.com",
+            "--warehouse",
+            "warehouse123",
+            "--assessment");
+
+    try {
+      connector.validate(arguments);
+      fail("--assessment must not be accepted by the databricks connector.");
+    } catch (MetadataDumperUsageException e) {
+      // A bare rejection would leave the user guessing, so the message has to say what the
+      // connector is for and how to proceed.
+      assertTrue(e.getMessage(), e.getMessage().contains("--assessment"));
+      assertTrue(e.getMessage(), e.getMessage().contains("migration"));
+    }
+  }
+
+  @Test
+  public void validate_assessment_isRejectedByEveryVariant() throws Exception {
+    // The variants inherit validate(), so this guards against one of them overriding it later and
+    // quietly reopening the hole.
+    for (DatabricksConnector variant :
+        ImmutableList.of(
+            new DatabricksConnector(),
+            new DatabricksSqlConnector(),
+            new DatabricksSystemMetadataConnector(),
+            new DatabricksCatalogMetadataConnector())) {
+      ConnectorArguments arguments =
+          new ConnectorArguments(
+              "--connector",
+              variant.getName(),
+              "--url",
+              "https://dbc-test.cloud.databricks.com",
+              "--warehouse",
+              "warehouse123",
+              "--assessment");
+      try {
+        variant.validate(arguments);
+        fail("--assessment must not be accepted by '" + variant.getName() + "'.");
+      } catch (MetadataDumperUsageException e) {
+        assertTrue(e.getMessage(), e.getMessage().contains(variant.getName()));
+      }
+    }
   }
 
   @Test

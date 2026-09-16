@@ -105,6 +105,10 @@ Do not grant `ANY FILE`; it is not needed here and bypasses table ACLs.
 | `databricks.skip-hive-metastore` | `false` | Skip the legacy `hive_metastore` catalog. |
 | `databricks.rest.requests-per-second` | `20` | Ceiling on the request rate of the REST tier. |
 
+#### `--assessment` is not accepted
+
+The connector rejects `--assessment` rather than ignoring it. This connector dumps metadata for migration purposes only and produces none of the assessment file set, so accepting the flag would yield a dump that is labelled as an assessment but cannot be ingested as one — a worse outcome than a clear refusal at startup.
+
 #### Output
 
 The dump contains one CSV per dataset: `catalogs.csv`, `schemata.csv`, `tables.csv`, `columns.csv`, `views.csv`, `table_constraints.csv` and `functions.csv`. Whichever tier succeeds writes the same file, so the columns do not depend on how the metadata was read.
