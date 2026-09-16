@@ -312,15 +312,18 @@ public class DatabricksRestTasksTest {
 
   /**
    * Table properties are the headline of what REST can see and SQL cannot, so the walk must not ask
-   * the API to omit them.
+   * the API to omit them. Similarly, {@code include_browse=true} must be set so that catalogs,
+   * schemas, and tables visible via the Unity Catalog {@code BROWSE} privilege are included rather
+   * than silently dropped.
    */
   @Test
-  public void metastoreWalk_requestsTableProperties() throws Exception {
+  public void metastoreWalk_requestsTablePropertiesAndBrowseVisibility() throws Exception {
     tablesTask().doRun(context, new MemoryByteSink(), handle);
 
     ArgumentCaptor<ListTablesRequest> requests = ArgumentCaptor.forClass(ListTablesRequest.class);
     verify(tablesService, times(1)).list(requests.capture());
     assertFalse(Boolean.TRUE.equals(requests.getValue().getOmitProperties()));
+    assertTrue(Boolean.TRUE.equals(requests.getValue().getIncludeBrowse()));
   }
 
   @Test

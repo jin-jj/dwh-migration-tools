@@ -65,6 +65,7 @@ class DatabricksRestFunctionsTask extends AbstractDatabricksRestTask implements 
                             new ListFunctionsRequest()
                                 .setCatalogName(catalogName)
                                 .setSchemaName(schemaName)
+                                .setIncludeBrowse(true)
                                 .setMaxResults(DatabricksRestHelper.PAGE_SIZE)
                                 .setPageToken(pageToken));
                 return new Page<>(response.getFunctions(), response.getNextPageToken());

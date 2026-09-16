@@ -88,7 +88,7 @@ GRANT USE SCHEMA  ON SCHEMA  `<catalog>`.`<schema>` TO `<principal>`;
 GRANT SELECT      ON SCHEMA  `<catalog>`.`<schema>` TO `<principal>`;
 ```
 
-For `rest-only`, no warehouse is needed, but the same Unity Catalog privileges apply — `tables/list` returns only tables the caller owns or has `SELECT` on, and `functions/list` only those it owns or can `EXECUTE`. The principal must also exist in the workspace, and the workspace must be attached to a Unity Catalog metastore.
+For `rest-only`, no warehouse is needed. The connector passes `include_browse=true` on Unity Catalog REST list requests so that objects visible via `BROWSE` (or Metastore Admin metadata visibility) are included alongside objects where the caller is the owner or holds `USE CATALOG` + `USE SCHEMA` + `SELECT` (tables) / `EXECUTE` (functions). The principal must also exist in the workspace, and the workspace must be attached to a Unity Catalog metastore.
 
 The legacy `hive_metastore` catalog uses legacy table ACLs rather than Unity Catalog privileges. `READ_METADATA` is enough and is metadata-only:
 

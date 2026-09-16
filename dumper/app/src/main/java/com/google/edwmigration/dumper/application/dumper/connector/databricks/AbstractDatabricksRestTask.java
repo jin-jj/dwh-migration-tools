@@ -108,7 +108,11 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
                   .getClient()
                   .catalogs()
                   .impl()
-                  .list(new ListCatalogsRequest().setMaxResults(PAGE_SIZE).setPageToken(pageToken));
+                  .list(
+                      new ListCatalogsRequest()
+                          .setIncludeBrowse(true)
+                          .setMaxResults(PAGE_SIZE)
+                          .setPageToken(pageToken));
           return new Page<>(response.getCatalogs(), response.getNextPageToken());
         },
         consumer);
@@ -132,6 +136,7 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
                   .list(
                       new ListSchemasRequest()
                           .setCatalogName(catalogName)
+                          .setIncludeBrowse(true)
                           .setMaxResults(PAGE_SIZE)
                           .setPageToken(pageToken));
           return new Page<>(response.getSchemas(), response.getNextPageToken());
@@ -170,6 +175,7 @@ abstract class AbstractDatabricksRestTask extends AbstractTask<Void> {
                       new ListTablesRequest()
                           .setCatalogName(catalogName)
                           .setSchemaName(schemaName)
+                          .setIncludeBrowse(true)
                           .setOmitColumns(!includeColumns)
                           .setMaxResults(PAGE_SIZE)
                           .setPageToken(pageToken));
