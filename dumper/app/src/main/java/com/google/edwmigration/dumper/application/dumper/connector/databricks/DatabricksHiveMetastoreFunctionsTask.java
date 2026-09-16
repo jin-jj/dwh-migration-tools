@@ -40,16 +40,20 @@ import org.slf4j.LoggerFactory;
 /**
  * Dumps user-defined functions from the legacy {@code hive_metastore} catalog.
  *
- * <p>Far less is knowable here than in Unity Catalog. A Unity Catalog function is described by
- * {@code information_schema.routines}, which carries its return type, parameters, body, language,
- * comment and owner. {@code hive_metastore} has no information schema, and its functions are Hive
- * UDFs: Java classes registered with {@code CREATE FUNCTION ... AS '<class>' USING JAR}. Such a
- * function has no SQL body, and its return type and parameter list are resolved reflectively at
- * each call site rather than recorded in the metastore.
+ * <p>Functions in {@code hive_metastore} fall into two broad categories:
  *
- * <p>What is obtainable is the name and the implementing class, which is the part that matters for
- * a migration: the class identifies the code that has to be ported. The remaining columns are
- * written empty rather than filled with plausible-looking values.
+ * <ul>
+ *   <li><b>SQL functions:</b> Functions defined with {@code CREATE FUNCTION ... RETURN ...}. For
+ *       these, {@code DESCRIBE FUNCTION EXTENDED} outputs structured fields including {@code
+ *       Input:}, {@code Returns:}, {@code Body:}, {@code Comment:}, and {@code Owner:}.
+ *   <li><b>Hive UDFs:</b> External Java classes registered with {@code CREATE FUNCTION ... AS
+ *       '<class>' USING JAR}. These report {@code Class:} (the implementing class) and {@code
+ *       Usage:}, but resolve their parameter types and return type reflectively per call site.
+ * </ul>
+ *
+ * <p>This task issues {@code DESCRIBE FUNCTION EXTENDED} for each user function and parses
+ * whichever metadata fields are returned. If a function cannot be described (e.g. warehouse
+ * failure), the function name is still recorded with empty details.
  */
 class DatabricksHiveMetastoreFunctionsTask extends AbstractDatabricksHiveMetastoreTask
     implements FunctionsFormat {
@@ -57,11 +61,26 @@ class DatabricksHiveMetastoreFunctionsTask extends AbstractDatabricksHiveMetasto
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksHiveMetastoreFunctionsTask.class);
 
-  /** The label {@code DESCRIBE FUNCTION EXTENDED} uses for the implementing class. */
-  private static final String CLASS_LABEL = "Class:";
+  private static final String SQL_LANGUAGE = "SQL";
+  private static final String JAVA_LANGUAGE = "JAVA";
+  private static final String NOT_AVAILABLE = "N/A.";
 
-  /** Set when a class name was found, to record that the function is externally implemented. */
-  private static final String EXTERNAL_LANGUAGE = "JAVA";
+  private static final ImmutableList<String> KNOWN_LABELS =
+      ImmutableList.of(
+          "Function",
+          "Type",
+          "Input",
+          "Returns",
+          "Comment",
+          "Deterministic",
+          "Data Access",
+          "Configs",
+          "Owner",
+          "Create Time",
+          "Body",
+          "Class",
+          "Usage",
+          "Extended Usage");
 
   DatabricksHiveMetastoreFunctionsTask(@Nonnull DatabricksFilter filter) {
     super(HMS_ZIP_ENTRY_NAME, filter);
@@ -83,20 +102,18 @@ class DatabricksHiveMetastoreFunctionsTask extends AbstractDatabricksHiveMetasto
       forEachSchemaFunction(
           databricksHandle,
           (schemaName, functionName) -> {
-            String className = findImplementingClass(databricksHandle, schemaName, functionName);
+            FunctionDescription desc = describeFunction(databricksHandle, schemaName, functionName);
             monitor.count();
             printer.printRecord(
                 HIVE_METASTORE,
                 schemaName,
                 functionName,
-                // A Hive UDF resolves its signature per call site, so neither of these is recorded.
-                /* dataType= */ null,
-                /* inputParams= */ null,
-                className,
-                className == null ? null : EXTERNAL_LANGUAGE,
-                // DESCRIBE FUNCTION reports neither for a Hive UDF.
-                /* comment= */ null,
-                /* owner= */ null);
+                desc == null ? null : desc.getDataType(),
+                desc == null ? null : desc.getInputParams(),
+                desc == null ? null : desc.getRoutineDefinition(),
+                desc == null ? null : desc.getRoutineLanguage(),
+                desc == null ? null : desc.getComment(),
+                desc == null ? null : desc.getOwner());
           });
     }
     return null;
@@ -164,18 +181,14 @@ class DatabricksHiveMetastoreFunctionsTask extends AbstractDatabricksHiveMetasto
   }
 
   /**
-   * Returns the implementing class of one function, or null if it could not be determined.
+   * Describes one function via {@code DESCRIBE FUNCTION EXTENDED}, returning parsed metadata.
    *
-   * <p>There is no bulk form of this: {@code SHOW FUNCTIONS} has no {@code EXTENDED} variant and
-   * the legacy metastore has no information schema, so one statement per function is the floor.
-   * Function counts in a Hive Metastore are typically small enough for that to be affordable.
-   *
-   * <p>A function that cannot be described still produces a row. The name alone is worth recording,
-   * and a describe can fail for reasons that say nothing about the function's existence — the
-   * warehouse may be unable to load the JAR behind it.
+   * <p>A function that cannot be described still produces a row with empty details. The name alone
+   * is worth recording, and a describe can fail for reasons that say nothing about the function's
+   * existence — for example, if the warehouse is unable to load an external JAR.
    */
   @CheckForNull
-  private static String findImplementingClass(
+  private static FunctionDescription describeFunction(
       @Nonnull DatabricksHandle handle, @Nonnull String schemaName, @Nonnull String functionName) {
     List<List<String>> rows = new ArrayList<>();
     try {
@@ -192,20 +205,149 @@ class DatabricksHiveMetastoreFunctionsTask extends AbstractDatabricksHiveMetasto
           "Failed to describe hive_metastore.{}.{}: {}", schemaName, functionName, e.getMessage());
       return null;
     }
-    // The result is one column of free text, one line per row.
+    return parseDescription(rows);
+  }
+
+  /**
+   * Parses the multi-line text output of {@code DESCRIBE FUNCTION EXTENDED}.
+   *
+   * <p>Each row returned by Databricks SQL represents a single line of free-form text.
+   */
+  @Nonnull
+  static FunctionDescription parseDescription(@Nonnull List<List<String>> rows) {
+    java.util.Map<String, String> fields = new java.util.HashMap<>();
+    String currentField = null;
+    StringBuilder currentContent = new StringBuilder();
+
     for (List<String> row : rows) {
       if (row.isEmpty() || row.get(0) == null) {
         continue;
       }
-      String line = row.get(0).trim();
-      if (line.startsWith(CLASS_LABEL)) {
-        String className = line.substring(CLASS_LABEL.length()).trim();
-        if (!className.isEmpty()) {
-          return className;
+      String line = row.get(0);
+      String trimmed = line.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+
+      String matchedLabel = matchLabel(trimmed);
+      if (matchedLabel != null) {
+        if (currentField != null && currentContent.length() > 0) {
+          fields.put(currentField, currentContent.toString().trim());
+          currentContent.setLength(0);
         }
+        currentField = matchedLabel;
+        int colon = trimmed.indexOf(':');
+        String remainder = trimmed.substring(colon + 1).trim();
+        if (!remainder.isEmpty()) {
+          currentContent.append(remainder);
+        }
+      } else if (currentField != null) {
+        if (currentContent.length() > 0) {
+          currentContent.append("\n");
+        }
+        currentContent.append(trimmed);
+      }
+    }
+    if (currentField != null && currentContent.length() > 0) {
+      fields.put(currentField, currentContent.toString().trim());
+    }
+
+    String dataType = fields.get("Returns");
+    String inputParams = fields.get("Input");
+    String body = fields.get("Body");
+    String className = fields.get("Class");
+    String comment = fields.get("Comment");
+    String owner = fields.get("Owner");
+
+    String routineDefinition = null;
+    String routineLanguage = null;
+    if (body != null && !body.isEmpty()) {
+      routineDefinition = body;
+      routineLanguage = SQL_LANGUAGE;
+    } else if (className != null && !className.isEmpty()) {
+      routineDefinition = className;
+      routineLanguage = JAVA_LANGUAGE;
+    }
+
+    if (comment == null || comment.isEmpty()) {
+      String usage = fields.get("Usage");
+      if (usage != null && !usage.isEmpty() && !NOT_AVAILABLE.equalsIgnoreCase(usage)) {
+        comment = usage;
+      }
+    }
+
+    return new FunctionDescription(
+        dataType, inputParams, routineDefinition, routineLanguage, comment, owner);
+  }
+
+  @CheckForNull
+  private static String matchLabel(@Nonnull String trimmedLine) {
+    int colon = trimmedLine.indexOf(':');
+    if (colon < 0) {
+      return null;
+    }
+    String candidate = trimmedLine.substring(0, colon).trim();
+    for (String label : KNOWN_LABELS) {
+      if (label.equalsIgnoreCase(candidate)) {
+        return label;
       }
     }
     return null;
+  }
+
+  /** Parsed details of a function from {@code DESCRIBE FUNCTION EXTENDED}. */
+  static class FunctionDescription {
+    private final String dataType;
+    private final String inputParams;
+    private final String routineDefinition;
+    private final String routineLanguage;
+    private final String comment;
+    private final String owner;
+
+    FunctionDescription(
+        @CheckForNull String dataType,
+        @CheckForNull String inputParams,
+        @CheckForNull String routineDefinition,
+        @CheckForNull String routineLanguage,
+        @CheckForNull String comment,
+        @CheckForNull String owner) {
+      this.dataType = dataType;
+      this.inputParams = inputParams;
+      this.routineDefinition = routineDefinition;
+      this.routineLanguage = routineLanguage;
+      this.comment = comment;
+      this.owner = owner;
+    }
+
+    @CheckForNull
+    String getDataType() {
+      return dataType;
+    }
+
+    @CheckForNull
+    String getInputParams() {
+      return inputParams;
+    }
+
+    @CheckForNull
+    String getRoutineDefinition() {
+      return routineDefinition;
+    }
+
+    @CheckForNull
+    String getRoutineLanguage() {
+      return routineLanguage;
+    }
+
+    @CheckForNull
+    String getComment() {
+      return comment;
+    }
+
+    @CheckForNull
+    String getOwner() {
+      return owner;
+    }
   }
 
   /** Receives one function name at a time, together with the schema holding it. */

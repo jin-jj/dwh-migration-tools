@@ -542,6 +542,56 @@ public class DatabricksTasksTest {
   }
 
   @Test
+  public void hiveMetastoreFunctionsTask_parsesSqlFunctionMetadata() throws Exception {
+    mockSqlQuery(
+        "SHOW SCHEMAS IN hive_metastore",
+        Collections.singletonList(Collections.singletonList("hms_schema")));
+    mockSqlQuery(
+        "SHOW USER FUNCTIONS IN `hms_schema`",
+        Arrays.asList(
+            Collections.singletonList("hms_schema.dice"),
+            Collections.singletonList("hms_schema.discount_calc")));
+    mockSqlQuery(
+        "DESCRIBE FUNCTION EXTENDED `hms_schema`.`dice`",
+        Arrays.asList(
+            Collections.singletonList(" Function:      hms_schema.dice"),
+            Collections.singletonList(" Type:          SCALAR"),
+            Collections.singletonList(" Input:         n INT"),
+            Collections.singletonList(" Returns:       INT"),
+            Collections.singletonList(" Comment:       An n-sided dice"),
+            Collections.singletonList(" Deterministic: false"),
+            Collections.singletonList(" Owner:         alice@example.com"),
+            Collections.singletonList(" Body:          floor((rand() * n) + 1)")));
+    mockSqlQuery(
+        "DESCRIBE FUNCTION EXTENDED `hms_schema`.`discount_calc`",
+        Arrays.asList(
+            Collections.singletonList("Function: hms_schema.discount_calc"),
+            Collections.singletonList("Input: amount double, discount_pct double"),
+            Collections.singletonList("Returns: DOUBLE"),
+            Collections.singletonList("Comment: Computes discounted price"),
+            Collections.singletonList("Owner: bob@example.com"),
+            Collections.singletonList("Body: GREATEST("),
+            Collections.singletonList("  0.0,"),
+            Collections.singletonList("  amount * (1.0 - discount_pct / 100.0))")));
+
+    MemoryByteSink sink = new MemoryByteSink();
+    new DatabricksHiveMetastoreFunctionsTask(DatabricksFilter.all()).doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(5, lines.size());
+    assertEquals(
+        "hive_metastore,hms_schema,dice,INT,n INT,floor((rand() * n) + 1),SQL,An n-sided dice,alice@example.com",
+        lines.get(1));
+    assertEquals(
+        "hive_metastore,hms_schema,discount_calc,DOUBLE,\"amount double, discount_pct double\",\"GREATEST(",
+        lines.get(2));
+    assertEquals("0.0,", lines.get(3));
+    assertEquals(
+        "amount * (1.0 - discount_pct / 100.0))\",SQL,Computes discounted price,bob@example.com",
+        lines.get(4));
+  }
+
+  @Test
   public void hiveMetastoreFunctionsTask_listsOnlyUserFunctions() throws Exception {
     mockSqlQuery(
         "SHOW SCHEMAS IN hive_metastore",
