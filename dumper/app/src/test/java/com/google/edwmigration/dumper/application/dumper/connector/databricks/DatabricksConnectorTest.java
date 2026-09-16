@@ -45,8 +45,11 @@ public class DatabricksConnectorTest {
   /** catalogs, schemata, tables, columns, views, table constraints and functions. */
   private static final int DATASETS = 7;
 
-  /** catalogs, schemata, tables, columns and views, dumped separately for the legacy metastore. */
-  private static final int HIVE_METASTORE_TASKS = 5;
+  /**
+   * catalogs, schemata, tables, columns, views and functions, dumped separately for the legacy
+   * metastore.
+   */
+  private static final int HIVE_METASTORE_TASKS = 6;
 
   /** The raw table listing, which only the REST tier can produce. */
   private static final int REST_ONLY_TASKS = 1;

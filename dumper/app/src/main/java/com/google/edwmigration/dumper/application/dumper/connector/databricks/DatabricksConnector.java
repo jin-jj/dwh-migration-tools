@@ -218,6 +218,7 @@ public class DatabricksConnector extends AbstractConnector
       out.add(new DatabricksHiveMetastoreTablesTask(filter));
       out.add(new DatabricksHiveMetastoreColumnsTask(filter));
       out.add(new DatabricksHiveMetastoreViewsTask(filter));
+      out.add(new DatabricksHiveMetastoreFunctionsTask(filter));
     }
   }
 

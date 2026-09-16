@@ -134,6 +134,7 @@ public interface DatabricksMetadataDumpFormat {
   interface FunctionsFormat {
 
     String ZIP_ENTRY_NAME = "functions.csv";
+    String HMS_ZIP_ENTRY_NAME = "functions-hms.csv";
 
     enum Header {
       FunctionCatalog,

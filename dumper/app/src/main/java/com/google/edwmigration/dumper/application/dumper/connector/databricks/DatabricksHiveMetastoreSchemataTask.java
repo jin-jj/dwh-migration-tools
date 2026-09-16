@@ -18,7 +18,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksCatalogNames.HIVE_METASTORE;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.escapeIdentifier;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.executeQueryOrThrow;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.executeQueryInCatalogOrThrow;
 
 import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
@@ -28,6 +28,7 @@ import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDu
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -86,12 +87,16 @@ class DatabricksHiveMetastoreSchemataTask extends AbstractDatabricksHiveMetastor
   private static Map<String, String> describeSchema(
       @Nonnull DatabricksHandle handle, @Nonnull String schemaName) {
     Map<String, String> description = new LinkedHashMap<>();
-    List<List<String>> rows;
+    List<List<String>> rows = new ArrayList<>();
     try {
-      rows =
-          executeQueryOrThrow(
-              handle,
-              "DESCRIBE SCHEMA EXTENDED " + HIVE_METASTORE + "." + escapeIdentifier(schemaName));
+      // Scoped by the request's catalog rather than written as hive_metastore.<schema>, for the
+      // same reason as the table walk. A failure here is swallowed below, so getting this wrong
+      // would not fail the task -- it would quietly empty the comment and owner of every schema.
+      executeQueryInCatalogOrThrow(
+          handle,
+          HIVE_METASTORE,
+          "DESCRIBE SCHEMA EXTENDED " + escapeIdentifier(schemaName),
+          rows::add);
     } catch (SQLException e) {
       logger.warn("Failed to describe hive_metastore.{}: {}", schemaName, e.getMessage());
       return description;

@@ -422,7 +422,7 @@ public class DatabricksTasksTest {
         "SHOW SCHEMAS IN hive_metastore",
         Collections.singletonList(Collections.singletonList("hms_schema")));
     mockSqlQuery(
-        "DESCRIBE SCHEMA EXTENDED hive_metastore.`hms_schema`",
+        "DESCRIBE SCHEMA EXTENDED `hms_schema`",
         Arrays.asList(
             Arrays.asList("Database Name", "hms_schema"),
             Arrays.asList("Comment", "legacy sales data"),
@@ -502,6 +502,92 @@ public class DatabricksTasksTest {
     assertFalse(
         "The schema must not be catalog-qualified: " + walk.getStatement(),
         walk.getStatement().contains("hive_metastore."));
+  }
+
+  @Test
+  public void hiveMetastoreFunctionsTask_writesNameAndImplementingClass() throws Exception {
+    mockSqlQuery(
+        "SHOW SCHEMAS IN hive_metastore",
+        Collections.singletonList(Collections.singletonList("hms_schema")));
+    // The listing qualifies the name; the task must not treat the prefix as part of it.
+    mockSqlQuery(
+        "SHOW USER FUNCTIONS IN `hms_schema`",
+        Arrays.asList(
+            Collections.singletonList("hms_schema.my_udf"),
+            Collections.singletonList("hive_metastore.hms_schema.other_udf")));
+    mockSqlQuery(
+        "DESCRIBE FUNCTION EXTENDED `hms_schema`.`my_udf`",
+        Arrays.asList(
+            Collections.singletonList("Function: hms_schema.my_udf"),
+            Collections.singletonList("Class: com.example.MyUdf"),
+            Collections.singletonList("Usage: N/A.")));
+    mockSqlQuery(
+        "DESCRIBE FUNCTION EXTENDED `hms_schema`.`other_udf`",
+        Arrays.asList(
+            Collections.singletonList("Function: hms_schema.other_udf"),
+            Collections.singletonList("Class: com.example.OtherUdf")));
+
+    MemoryByteSink sink = new MemoryByteSink();
+    new DatabricksHiveMetastoreFunctionsTask(DatabricksFilter.all()).doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(3, lines.size());
+    assertEquals(
+        "FunctionCatalog,FunctionSchema,FunctionName,DataType,InputParams,RoutineDefinition,"
+            + "RoutineLanguage,Comment,Owner",
+        lines.get(0));
+    // A Hive UDF records no signature, body, comment or owner, so those columns stay empty.
+    assertEquals("hive_metastore,hms_schema,my_udf,,,com.example.MyUdf,JAVA,,", lines.get(1));
+    assertEquals("hive_metastore,hms_schema,other_udf,,,com.example.OtherUdf,JAVA,,", lines.get(2));
+  }
+
+  @Test
+  public void hiveMetastoreFunctionsTask_listsOnlyUserFunctions() throws Exception {
+    mockSqlQuery(
+        "SHOW SCHEMAS IN hive_metastore",
+        Collections.singletonList(Collections.singletonList("hms_schema")));
+    mockSqlQuery("SHOW USER FUNCTIONS IN `hms_schema`", Collections.emptyList());
+
+    new DatabricksHiveMetastoreFunctionsTask(DatabricksFilter.all())
+        .doRun(context, new MemoryByteSink(), handle);
+
+    ArgumentCaptor<ExecuteStatementRequest> captor =
+        ArgumentCaptor.forClass(ExecuteStatementRequest.class);
+    verify(statementAPI, atLeastOnce()).executeStatement(captor.capture());
+
+    boolean listed = false;
+    for (ExecuteStatementRequest request : captor.getAllValues()) {
+      String sql = request.getStatement();
+      if (sql.contains("FUNCTIONS")) {
+        listed = true;
+        // Without the USER keyword the default is ALL, which returns several hundred built-ins.
+        assertTrue(sql, sql.contains("SHOW USER FUNCTIONS"));
+        assertEquals("hive_metastore", request.getCatalog());
+      }
+    }
+    assertTrue("The task never listed functions.", listed);
+  }
+
+  @Test
+  public void hiveMetastoreFunctionsTask_keepsTheNameWhenDescribeFails() throws Exception {
+    mockSqlQuery(
+        "SHOW SCHEMAS IN hive_metastore",
+        Collections.singletonList(Collections.singletonList("hms_schema")));
+    mockSqlQuery(
+        "SHOW USER FUNCTIONS IN `hms_schema`",
+        Collections.singletonList(Collections.singletonList("hms_schema.broken_udf")));
+    // A warehouse that cannot load the UDF's JAR fails the DESCRIBE, but the function still exists
+    // and must still be reported, with the class column left empty.
+    mockSqlFailure(
+        "DESCRIBE FUNCTION EXTENDED `hms_schema`.`broken_udf`",
+        "Cannot load class com.example.BrokenUdf.");
+
+    MemoryByteSink sink = new MemoryByteSink();
+    new DatabricksHiveMetastoreFunctionsTask(DatabricksFilter.all()).doRun(context, sink, handle);
+
+    List<String> lines = readLines(sink);
+    assertEquals(2, lines.size());
+    assertEquals("hive_metastore,hms_schema,broken_udf,,,,,,", lines.get(1));
   }
 
   @Test
