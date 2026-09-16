@@ -18,7 +18,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksCatalogNames.HIVE_METASTORE;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.escapeIdentifier;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.executeBulkQueryOrThrow;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.executeBulkQueryInCatalogOrThrow;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.executeQueryOrThrow;
 
 import com.google.common.base.Preconditions;
@@ -95,14 +95,13 @@ abstract class AbstractDatabricksHiveMetastoreTask extends AbstractTask<Void> {
     int failures = 0;
     SQLException lastFailure = null;
     for (String schemaName : schemaNames) {
-      String sql =
-          "SHOW TABLE EXTENDED IN "
-              + HIVE_METASTORE
-              + "."
-              + escapeIdentifier(schemaName)
-              + " LIKE '*'";
+      // Referencing the schema as hive_metastore.<schema> is rejected by this command with
+      // CROSS_CATALOG_SCHEMA_REFERENCE_NOT_SUPPORTED, so the catalog travels on the request and the
+      // schema is named on its own.
+      String sql = "SHOW TABLE EXTENDED IN " + escapeIdentifier(schemaName) + " LIKE '*'";
       try {
-        executeBulkQueryOrThrow(handle, sql, row -> describe(schemaName, row, consumer));
+        executeBulkQueryInCatalogOrThrow(
+            handle, HIVE_METASTORE, sql, row -> describe(schemaName, row, consumer));
       } catch (SQLException e) {
         failures++;
         lastFailure = e;

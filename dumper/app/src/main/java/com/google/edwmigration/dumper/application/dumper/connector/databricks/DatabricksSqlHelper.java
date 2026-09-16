@@ -27,6 +27,7 @@ import com.databricks.sdk.service.sql.StatementState;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.ByteStreams;
 import java.io.IOException;
@@ -104,7 +105,26 @@ final class DatabricksSqlHelper {
       @Nonnull String sql,
       @Nonnull Consumer<List<String>> rowConsumer)
       throws SQLException {
-    execute(handle, sql, Disposition.INLINE, Format.JSON_ARRAY, rowConsumer);
+    execute(handle, sql, null, Disposition.INLINE, Format.JSON_ARRAY, rowConsumer);
+  }
+
+  /**
+   * Executes a statement with the inline transport, resolving names against {@code catalog}.
+   *
+   * <p>Some commands refuse a cross-catalog schema reference: {@code SHOW TABLE EXTENDED IN
+   * hive_metastore.sales} fails with {@code CROSS_CATALOG_SCHEMA_REFERENCE_NOT_SUPPORTED} and
+   * directs the caller to run {@code USE CATALOG} first. Statements are independent of one another,
+   * so a preceding {@code USE CATALOG} statement would not carry over; the request's own catalog
+   * field is the durable equivalent.
+   */
+  static void executeQueryInCatalogOrThrow(
+      @Nonnull DatabricksHandle handle,
+      @Nonnull String catalog,
+      @Nonnull String sql,
+      @Nonnull Consumer<List<String>> rowConsumer)
+      throws SQLException {
+    Preconditions.checkNotNull(catalog, "Catalog was null.");
+    execute(handle, sql, catalog, Disposition.INLINE, Format.JSON_ARRAY, rowConsumer);
   }
 
   /**
@@ -120,12 +140,28 @@ final class DatabricksSqlHelper {
       @Nonnull String sql,
       @Nonnull Consumer<List<String>> rowConsumer)
       throws SQLException {
-    execute(handle, sql, Disposition.EXTERNAL_LINKS, Format.JSON_ARRAY, rowConsumer);
+    execute(handle, sql, null, Disposition.EXTERNAL_LINKS, Format.JSON_ARRAY, rowConsumer);
+  }
+
+  /**
+   * Executes a bulk statement resolving names against {@code catalog}.
+   *
+   * @see #executeQueryInCatalogOrThrow for why the catalog travels on the request.
+   */
+  static void executeBulkQueryInCatalogOrThrow(
+      @Nonnull DatabricksHandle handle,
+      @Nonnull String catalog,
+      @Nonnull String sql,
+      @Nonnull Consumer<List<String>> rowConsumer)
+      throws SQLException {
+    Preconditions.checkNotNull(catalog, "Catalog was null.");
+    execute(handle, sql, catalog, Disposition.EXTERNAL_LINKS, Format.JSON_ARRAY, rowConsumer);
   }
 
   private static void execute(
       @Nonnull DatabricksHandle handle,
       @Nonnull String sql,
+      @CheckForNull String catalog,
       @Nonnull Disposition disposition,
       @Nonnull Format format,
       @Nonnull Consumer<List<String>> rowConsumer)
@@ -141,6 +177,9 @@ final class DatabricksSqlHelper {
             .setDisposition(disposition)
             .setFormat(format)
             .setWaitTimeout(WAIT_TIMEOUT);
+    if (catalog != null) {
+      request.setCatalog(catalog);
+    }
 
     StatementResponse response = submit(handle, request, sql);
     String statementId = response.getStatementId();

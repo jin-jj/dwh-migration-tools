@@ -18,8 +18,10 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -473,6 +475,36 @@ public class DatabricksTasksTest {
   }
 
   @Test
+  public void hiveMetastoreTablesTask_scopesTheCatalogOnTheRequestNotTheStatement()
+      throws Exception {
+    mockHiveMetastoreSchema();
+
+    new DatabricksHiveMetastoreTablesTask(DatabricksFilter.all())
+        .doRun(context, new MemoryByteSink(), handle);
+
+    ArgumentCaptor<ExecuteStatementRequest> captor =
+        ArgumentCaptor.forClass(ExecuteStatementRequest.class);
+    verify(statementAPI, atLeastOnce()).executeStatement(captor.capture());
+
+    ExecuteStatementRequest walk = null;
+    for (ExecuteStatementRequest request : captor.getAllValues()) {
+      if (request.getStatement().contains("SHOW TABLE EXTENDED")) {
+        walk = request;
+      }
+    }
+    assertNotNull("The task never issued SHOW TABLE EXTENDED.", walk);
+
+    // Databricks rejects `SHOW TABLE EXTENDED IN hive_metastore.<schema>` outright with
+    // CROSS_CATALOG_SCHEMA_REFERENCE_NOT_SUPPORTED, so the catalog has to reach the server as
+    // request context instead. A separate `USE CATALOG` statement would not do: statements are
+    // independent, and the setting would be gone by the time this one ran.
+    assertEquals("hive_metastore", walk.getCatalog());
+    assertFalse(
+        "The schema must not be catalog-qualified: " + walk.getStatement(),
+        walk.getStatement().contains("hive_metastore."));
+  }
+
+  @Test
   public void hiveMetastoreColumnsTask_writesExpectedCsv() throws Exception {
     mockHiveMetastoreSchema();
 
@@ -519,7 +551,7 @@ public class DatabricksTasksTest {
         "SHOW SCHEMAS IN hive_metastore",
         Collections.singletonList(Collections.singletonList("hms_schema")));
     mockSqlQuery(
-        "SHOW TABLE EXTENDED IN hive_metastore.`hms_schema`",
+        "SHOW TABLE EXTENDED IN `hms_schema`",
         Arrays.asList(
             Arrays.asList(
                 "hms_schema",
