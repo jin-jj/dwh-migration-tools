@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.zip.GZIPInputStream;
+import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -71,6 +72,7 @@ final class DatabricksSqlHelper {
   private static final int HTTP_READ_TIMEOUT_MILLIS = 300_000;
   private static final String WAIT_TIMEOUT = "30s";
   private static final String PERMISSION_DENIED_MARKER = "USE CATALOG on Catalog '";
+  private static final String INSUFFICIENT_PRIVILEGE_SQLSTATE = "42501";
   private static final String RETRY_AFTER = "Retry-After";
   private static final byte[] GZIP_MAGIC = {(byte) 0x1f, (byte) 0x8b};
 
@@ -222,6 +224,25 @@ final class DatabricksSqlHelper {
             : "Unknown error";
     markInaccessibleCatalog(handle, errMsg);
     throw new SQLException("Databricks SQL query failed with state " + state + ": " + errMsg);
+  }
+
+  /**
+   * Returns whether a failure was a privilege refusal.
+   *
+   * <p>Keyed on the SQLSTATE rather than the prose. {@code 42501} is the SQL standard's
+   * insufficient-privilege class, so it survives a rewording of the message that {@link
+   * #markInaccessibleCatalog} parses.
+   */
+  static boolean isInsufficientPrivilege(@CheckForNull Throwable e) {
+    for (Throwable current = e; current != null; current = current.getCause()) {
+      String message = current.getMessage();
+      if (message != null
+          && (message.contains(INSUFFICIENT_PRIVILEGE_SQLSTATE)
+              || message.contains(PERMISSION_DENIED_MARKER))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

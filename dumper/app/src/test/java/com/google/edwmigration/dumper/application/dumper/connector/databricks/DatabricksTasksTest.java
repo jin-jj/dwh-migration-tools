@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -26,6 +27,7 @@ import static org.mockito.Mockito.when;
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ResultData;
+import com.databricks.sdk.service.sql.ServiceError;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
@@ -827,5 +829,47 @@ public class DatabricksTasksTest {
 
     assertEquals(1, catalogs.size());
     assertEquals("accessible_catalog", catalogs.get(0));
+  }
+
+  private void mockSqlFailure(String expectedSqlSubstring, String errorMessage) {
+    StatementResponse response = new StatementResponse();
+    response.setStatementId("stmt-fail-" + Math.abs(expectedSqlSubstring.hashCode()));
+    response.setStatus(
+        new StatementStatus()
+            .setState(StatementState.FAILED)
+            .setError(new ServiceError().setMessage(errorMessage)));
+
+    when(statementAPI.executeStatement(
+            org.mockito.ArgumentMatchers.argThat(
+                req ->
+                    req != null
+                        && req.getStatement() != null
+                        && req.getStatement().contains(expectedSqlSubstring))))
+        .thenReturn(response);
+  }
+
+  /**
+   * One refused catalog must not cost the others their output, and must be remembered.
+   *
+   * <p>The refusal here is deliberately <em>reworded</em>: it carries the SQLSTATE but not the "USE
+   * CATALOG on Catalog '<i>x</i>'" phrasing that the message parser reads. The catalog can still be
+   * marked, because the loop already knows which catalog it was reading — which is the point of
+   * marking it there rather than parsing the name back out of English prose.
+   */
+  @Test
+  public void perCatalogTier_whenOneCatalogIsRefused_marksItAndKeepsTheRest() throws Exception {
+    mockSqlQuery(
+        "SHOW CATALOGS",
+        Arrays.asList(Collections.singletonList("good"), Collections.singletonList("mingjial")));
+    mockSqlQuery(
+        "`good`", Collections.singletonList(Arrays.asList("good", "sales", "orders", "MANAGED")));
+    mockSqlFailure("`mingjial`", "Permission denied for this principal. SQLSTATE: 42501");
+
+    DatabricksSqlTablesTask task = new DatabricksSqlTablesTask(DatabricksFilter.all());
+    task.doRun(context, new MemoryByteSink(), handle);
+
+    assertTrue(
+        "The refused catalog should be remembered", handle.isCatalogInaccessible("mingjial"));
+    assertFalse("A readable catalog should not be marked", handle.isCatalogInaccessible("good"));
   }
 }

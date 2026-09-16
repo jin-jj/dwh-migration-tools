@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -111,32 +112,68 @@ public class DatabricksSqlHelperTest {
     assertEquals(Collections.singletonList("row2"), rows.get(1));
   }
 
-  @Test
-  public void executeQueryOrThrow_whenFailed_throwsSQLExceptionAndMarksCatalogInaccessible() {
+  /**
+   * The exact refusal a live workspace returned for {@code SELECT … FROM
+   * mingjial.information_schema.tables}.
+   *
+   * <p>Note the trailing {@code . SQLSTATE: 42501}, which the earlier fixture for this test did not
+   * have: the name parser reads to the next quote, so a suffix after the closing quote must not
+   * disturb it.
+   */
+  private static final String REAL_REFUSAL =
+      "[INSUFFICIENT_PERMISSIONS] Insufficient privileges:\n"
+          + "User does not have USE CATALOG on Catalog 'mingjial'. SQLSTATE: 42501";
+
+  private static DatabricksHandle handleFailingWith(String message) {
     WorkspaceClient client = mock(WorkspaceClient.class);
     StatementExecutionAPI statementAPI = mock(StatementExecutionAPI.class);
     when(client.statementExecution()).thenReturn(statementAPI);
 
     StatementResponse response = new StatementResponse();
     response.setStatementId("stmt-fail");
-    StatementStatus status = new StatementStatus().setState(StatementState.FAILED);
-    ServiceError error =
-        new ServiceError()
-            .setMessage(
-                "[INSUFFICIENT_PERMISSIONS] Insufficient privileges:\n"
-                    + "User does not have USE CATALOG on Catalog 'dmishyn'");
-    status.setError(error);
-    response.setStatus(status);
-
+    response.setStatus(
+        new StatementStatus()
+            .setState(StatementState.FAILED)
+            .setError(new ServiceError().setMessage(message)));
     when(statementAPI.executeStatement(any(ExecuteStatementRequest.class))).thenReturn(response);
 
-    DatabricksHandle handle = new DatabricksHandle(client, "wh-1");
+    return new DatabricksHandle(client, "wh-1");
+  }
+
+  @Test
+  public void executeQueryOrThrow_whenFailed_throwsSQLExceptionAndMarksCatalogInaccessible() {
+    DatabricksHandle handle = handleFailingWith(REAL_REFUSAL);
 
     assertThrows(
         SQLException.class,
         () ->
             DatabricksSqlHelper.executeQueryOrThrow(
-                handle, "SELECT 1 FROM dmishyn.information_schema.tables"));
-    assertTrue(handle.isCatalogInaccessible("dmishyn"));
+                handle, "SELECT 1 FROM mingjial.information_schema.tables"));
+    assertTrue(handle.isCatalogInaccessible("mingjial"));
+  }
+
+  @Test
+  public void isInsufficientPrivilege_recognizesTheRealRefusal() {
+    assertTrue(DatabricksSqlHelper.isInsufficientPrivilege(new SQLException(REAL_REFUSAL)));
+  }
+
+  /**
+   * The name parser reads English prose, which Databricks may reword at any time. The SQLSTATE is
+   * standardised, so a refusal stays recognisable even when the sentence around it changes — which
+   * is what lets the per-catalog loop mark the catalog it already knows it was reading.
+   */
+  @Test
+  public void isInsufficientPrivilege_recognizesArewordedRefusalBySqlstate() {
+    assertTrue(
+        DatabricksSqlHelper.isInsufficientPrivilege(
+            new SQLException("Permission denied on catalog mingjial. SQLSTATE: 42501")));
+  }
+
+  @Test
+  public void isInsufficientPrivilege_ignoresUnrelatedFailures() {
+    assertFalse(
+        DatabricksSqlHelper.isInsufficientPrivilege(
+            new SQLException("[TABLE_OR_VIEW_NOT_FOUND] … SQLSTATE: 42P01")));
+    assertFalse(DatabricksSqlHelper.isInsufficientPrivilege(null));
   }
 }

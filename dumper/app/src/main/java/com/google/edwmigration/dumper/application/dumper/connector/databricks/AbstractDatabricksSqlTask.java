@@ -200,6 +200,11 @@ abstract class AbstractDatabricksSqlTask extends AbstractTask<Void> {
         action.accept(DatabricksSqlHelper.escapeIdentifier(catalogName));
       } catch (SQLException e) {
         failed++;
+        // The loop knows which catalog it was reading, so a refusal here does not depend on
+        // recovering the name from the message text.
+        if (DatabricksSqlHelper.isInsufficientPrivilege(e)) {
+          handle.markCatalogInaccessible(catalogName);
+        }
         if (failure == null) {
           failure = e;
         } else {
