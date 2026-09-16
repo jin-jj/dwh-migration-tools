@@ -76,15 +76,17 @@ Dump all Unity Catalog metadata, skipping legacy Hive Metastore:
 
 > **A principal that lacks a privilege sees fewer objects, not an error.** Every extraction path filters silently, so a dump taken with incomplete grants succeeds and looks exactly like a dump of a smaller workspace. Check the grants before trusting a small result.
 
-For the SQL paths (the default), the principal needs **`CAN_USE`** on the SQL warehouse — set through the warehouse's Permissions UI or the permissions API; there is no `GRANT ... ON WAREHOUSE` statement — plus, per catalog you want dumped:
+For the SQL paths (the default), the principal needs **`CAN_USE`** on the SQL warehouse — set through the warehouse's Permissions UI or the permissions API; there is no `GRANT ... ON WAREHOUSE` statement.
+
+Unlike operational system tables (`system.query.history`, `system.access.audit`), `information_schema` views require **no explicit `SELECT` grant on `information_schema` itself**. Instead, they implement automatic row-level filtering governed by Unity Catalog privileges on the underlying objects:
+* **Tier 1 (`system.information_schema`, the default):** SQL name resolution checks traversal only on `system`. A **Metastore Admin** can read metadata for all catalogs across the metastore automatically, even on user-created catalogs where the admin has not explicitly granted themselves `USE CATALOG`.
+* **Tier 2 (`<catalog>.information_schema` fallback) and non-admin principals:** SQL name resolution checks explicit traversal on each target catalog first. If `USE CATALOG` is missing on a catalog, `<catalog>.information_schema` fails immediately with `SQLSTATE: 42501` (which the connector catches, warns on, and skips). For non-admin principals (or when using `catalog-only`), grant per catalog:
 
 ```sql
 GRANT USE CATALOG ON CATALOG `<catalog>`            TO `<principal>`;
 GRANT USE SCHEMA  ON SCHEMA  `<catalog>`.`<schema>` TO `<principal>`;
 GRANT SELECT      ON SCHEMA  `<catalog>`.`<schema>` TO `<principal>`;
 ```
-
-`SELECT` is needed for the objects to appear at all: `information_schema` is privilege-aware and omits rows for objects the caller cannot read. No grant on `information_schema` itself is required.
 
 For `rest-only`, no warehouse is needed, but the same Unity Catalog privileges apply — `tables/list` returns only tables the caller owns or has `SELECT` on, and `functions/list` only those it owns or can `EXECUTE`. The principal must also exist in the workspace, and the workspace must be attached to a Unity Catalog metastore.
 
