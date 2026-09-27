@@ -92,6 +92,11 @@ final class DatabricksHiveMetastoreParser {
     final String owner;
     final String createdAt;
     final String updatedAt;
+    final String serdeLibrary;
+    final String inputFormat;
+    final String outputFormat;
+    final String storageProperties;
+    final String tableProperties;
     @CheckForNull final String viewDefinition;
     final ImmutableList<ParsedColumn> columns;
     final ImmutableList<ParsedTableConstraint> constraints;
@@ -107,6 +112,11 @@ final class DatabricksHiveMetastoreParser {
         String owner,
         String createdAt,
         String updatedAt,
+        String serdeLibrary,
+        String inputFormat,
+        String outputFormat,
+        String storageProperties,
+        String tableProperties,
         @CheckForNull String viewDefinition,
         ImmutableList<ParsedColumn> columns,
         ImmutableList<ParsedTableConstraint> constraints) {
@@ -120,6 +130,11 @@ final class DatabricksHiveMetastoreParser {
       this.owner = owner;
       this.createdAt = createdAt;
       this.updatedAt = updatedAt;
+      this.serdeLibrary = serdeLibrary;
+      this.inputFormat = inputFormat;
+      this.outputFormat = outputFormat;
+      this.storageProperties = storageProperties;
+      this.tableProperties = tableProperties;
       this.viewDefinition = viewDefinition;
       this.columns = columns;
       this.constraints = constraints;
@@ -178,6 +193,11 @@ final class DatabricksHiveMetastoreParser {
     String comment = "";
     String owner = "";
     String createdTime = "";
+    String serdeLibrary = "";
+    String inputFormat = "";
+    String outputFormat = "";
+    String storageProperties = "";
+    String tableProperties = "";
     String viewText = null;
     List<String> partitionCols = new ArrayList<>();
     List<ParsedColumn> rawCols = new ArrayList<>();
@@ -235,7 +255,16 @@ final class DatabricksHiveMetastoreParser {
             createdTime = val;
           } else if ("Partition Columns".equalsIgnoreCase(key)) {
             partitionCols = parsePartitionColumnsList(val);
+          } else if ("Serde Library".equalsIgnoreCase(key)) {
+            serdeLibrary = val;
+          } else if ("InputFormat".equalsIgnoreCase(key)) {
+            inputFormat = val;
+          } else if ("OutputFormat".equalsIgnoreCase(key)) {
+            outputFormat = val;
+          } else if ("Storage Properties".equalsIgnoreCase(key)) {
+            storageProperties = val;
           } else if ("Table Properties".equalsIgnoreCase(key)) {
+            tableProperties = val;
             parseDeltaCheckConstraintsFromProperties(val, constraints);
           } else if ("Table Constraints".equalsIgnoreCase(key)) {
             parseTableConstraintsList(val, constraints);
@@ -286,6 +315,11 @@ final class DatabricksHiveMetastoreParser {
         owner,
         createdTime,
         "",
+        serdeLibrary,
+        inputFormat,
+        outputFormat,
+        storageProperties,
+        tableProperties,
         viewText,
         finalCols.build(),
         ImmutableList.copyOf(constraints));

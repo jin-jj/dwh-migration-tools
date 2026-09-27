@@ -48,6 +48,14 @@ interface DatabricksHiveMetastoreDumpFormat {
     UpdatedAt
   }
 
+  /**
+   * Columns of {@code tables.csv}.
+   *
+   * <p>The last five columns are copied verbatim from {@code SHOW TABLE EXTENDED}, with properties
+   * in the {@code [key=value, ...]} form. The SerDe and formats describe the storage only for Hive
+   * compatible tables; for other tables, such as Delta tables, the metastore records placeholders
+   * such as {@code SequenceFileInputFormat}.
+   */
   enum TablesHeader {
     TableCatalog,
     TableSchema,
@@ -58,7 +66,12 @@ interface DatabricksHiveMetastoreDumpFormat {
     Comment,
     Owner,
     CreatedAt,
-    UpdatedAt
+    UpdatedAt,
+    SerdeLibrary,
+    InputFormat,
+    OutputFormat,
+    StorageProperties,
+    TableProperties
   }
 
   enum ColumnsHeader {

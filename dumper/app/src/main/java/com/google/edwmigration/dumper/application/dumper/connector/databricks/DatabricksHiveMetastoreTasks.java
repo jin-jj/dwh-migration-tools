@@ -144,9 +144,16 @@ final class DatabricksHiveMetastoreTasks {
           String rowSchema = row.size() > 1 ? cellOrEmpty(row, 0) : schema;
           String rowTable = row.size() > 1 ? cellOrEmpty(row, 1) : "";
           String infoBlob = row.size() > 3 ? cell(row, 3) : cell(row, row.size() - 1);
-          builder.add(
+          ParsedTableExtended table =
               DatabricksHiveMetastoreParser.parseShowTableExtended(
-                  rowSchema.isEmpty() ? schema : rowSchema, rowTable, infoBlob));
+                  rowSchema.isEmpty() ? schema : rowSchema, rowTable, infoBlob);
+          if (table.columns.isEmpty() && !"VIEW".equalsIgnoreCase(table.tableType)) {
+            logger.warn(
+                "Table {} has no columns in SHOW TABLE EXTENDED. Its storage may be unreadable,"
+                    + " in which case its CreatedAt is the time of this query.",
+                quoteTableName(table));
+          }
+          builder.add(table);
         }
       }
       return builder.build();
@@ -439,7 +446,12 @@ final class DatabricksHiveMetastoreTasks {
               tbl.comment,
               tbl.owner,
               tbl.createdAt,
-              tbl.updatedAt);
+              tbl.updatedAt,
+              tbl.serdeLibrary,
+              tbl.inputFormat,
+              tbl.outputFormat,
+              tbl.storageProperties,
+              tbl.tableProperties);
         }
       }
       return null;

@@ -30,6 +30,10 @@ public class DatabricksHiveMetastoreParserTest {
 
   @Test
   public void parseShowTableExtended_parsesAttributesColumnsAndConstraints() {
+    String tableProperties =
+        "[delta.checkpoint.writeStatsAsJson=false, "
+            + "delta.constraints.valid_event_type=event_type IN ('click', 'view', 'purchase'), "
+            + "delta.enableDeletionVectors=true]";
     String blob =
         "Catalog: hive_metastore\n"
             + "Database: legacy_db\n"
@@ -39,9 +43,9 @@ public class DatabricksHiveMetastoreParserTest {
             + "Type: EXTERNAL\n"
             + "Provider: parquet\n"
             + "Comment: Legacy events\n"
-            + "Table Properties: [delta.checkpoint.writeStatsAsJson=false, "
-            + "delta.constraints.valid_event_type=event_type IN ('click', 'view', 'purchase'), "
-            + "delta.enableDeletionVectors=true]\n"
+            + "Table Properties: "
+            + tableProperties
+            + "\n"
             + "Location: s3://legacy-bucket/events\n"
             + "Partition Columns: [`dt`, `country`]\n"
             + "Schema: root\n"
@@ -58,6 +62,7 @@ public class DatabricksHiveMetastoreParserTest {
     assertEquals("EXTERNAL", parsed.tableType);
     assertEquals("PARQUET", parsed.dataSourceFormat);
     assertEquals("s3://legacy-bucket/events", parsed.storageLocation);
+    assertEquals(tableProperties, parsed.tableProperties);
     assertEquals(4, parsed.columns.size());
     assertEquals("NO", parsed.columns.get(0).isNullable);
     assertEquals("", parsed.columns.get(0).partitionIndex);
@@ -68,6 +73,53 @@ public class DatabricksHiveMetastoreParserTest {
     assertEquals("CHECK", parsed.constraints.get(0).constraintType);
     assertEquals(
         "event_type IN ('click', 'view', 'purchase')", parsed.constraints.get(0).constraintDetails);
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsHiveStorageDescriptor() {
+    String serdeLibrary = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe";
+    String inputFormat = "org.apache.hadoop.mapred.TextInputFormat";
+    String outputFormat = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat";
+    String storageProperties = "[field.delim=,, serialization.format=,]";
+    String tableProperties = "[transient_lastDdlTime=1790541380]";
+    String blob =
+        "Catalog: hive_metastore\n"
+            + "Database: legacy_db\n"
+            + "Table: csv_events\n"
+            + "Type: EXTERNAL\n"
+            + "Provider: hive\n"
+            + "Table Properties: "
+            + tableProperties
+            + "\n"
+            + "Location: dbfs:/mnt/legacy/csv_events\n"
+            + "Serde Library: "
+            + serdeLibrary
+            + "\n"
+            + "InputFormat: "
+            + inputFormat
+            + "\n"
+            + "OutputFormat: "
+            + outputFormat
+            + "\n"
+            + "Storage Properties: "
+            + storageProperties
+            + "\n"
+            + "Partition Provider: Catalog\n"
+            + "Schema: root\n"
+            + " |-- id: integer (nullable = true)\n"
+            + " |-- name: string (nullable = true)\n";
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended("legacy_db", "csv_events", blob);
+
+    assertEquals("HIVE", parsed.dataSourceFormat);
+    assertEquals(serdeLibrary, parsed.serdeLibrary);
+    assertEquals(inputFormat, parsed.inputFormat);
+    assertEquals(outputFormat, parsed.outputFormat);
+    assertEquals(storageProperties, parsed.storageProperties);
+    assertEquals(tableProperties, parsed.tableProperties);
+    assertEquals(2, parsed.columns.size());
+    assertEquals(0, parsed.constraints.size());
   }
 
   @Test

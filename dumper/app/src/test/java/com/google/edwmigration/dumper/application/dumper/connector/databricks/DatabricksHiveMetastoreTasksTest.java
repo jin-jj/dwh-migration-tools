@@ -42,9 +42,11 @@ import com.google.common.io.Files;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.DdlsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.FunctionDdlsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.SchemataHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TablesHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreFunctionDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreSchemataTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTablesTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.HiveMetastoreSessionCache;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import java.io.File;
@@ -202,6 +204,63 @@ public class DatabricksHiveMetastoreTasksTest {
     assertEquals("alice", records.get(0).get(SchemataHeader.Owner));
     assertEquals("locked", records.get(1).get(SchemataHeader.SchemaName));
     assertEquals("", records.get(1).get(SchemataHeader.Owner));
+  }
+
+  @Test
+  public void tablesTask_writesHiveStorageColumns() throws Exception {
+    String serdeLibrary = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe";
+    String inputFormat = "org.apache.hadoop.mapred.TextInputFormat";
+    String outputFormat = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat";
+    String storageProperties = "[field.delim=,, serialization.format=,]";
+    String tableProperties = "[transient_lastDdlTime=1790541380]";
+    String information =
+        "Catalog: hive_metastore\n"
+            + "Database: legacy\n"
+            + "Table: csv_events\n"
+            + "Type: EXTERNAL\n"
+            + "Provider: hive\n"
+            + "Table Properties: "
+            + tableProperties
+            + "\n"
+            + "Serde Library: "
+            + serdeLibrary
+            + "\n"
+            + "InputFormat: "
+            + inputFormat
+            + "\n"
+            + "OutputFormat: "
+            + outputFormat
+            + "\n"
+            + "Storage Properties: "
+            + storageProperties
+            + "\n"
+            + "Schema: root\n"
+            + " |-- id: integer (nullable = true)\n";
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                succeededRows(
+                    ImmutableList.of(
+                        ImmutableList.of(SCHEMA, "csv_events", "false", information)))));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreTablesTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    CSVRecord record = records.get(0);
+    assertEquals("csv_events", record.get(TablesHeader.TableName));
+    assertEquals(serdeLibrary, record.get(TablesHeader.SerdeLibrary));
+    assertEquals(inputFormat, record.get(TablesHeader.InputFormat));
+    assertEquals(outputFormat, record.get(TablesHeader.OutputFormat));
+    assertEquals(storageProperties, record.get(TablesHeader.StorageProperties));
+    assertEquals(tableProperties, record.get(TablesHeader.TableProperties));
   }
 
   @Test
