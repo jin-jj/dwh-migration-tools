@@ -19,6 +19,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cell;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.collect.ImmutableList;
@@ -121,7 +122,7 @@ final class DatabricksHiveMetastoreTasks {
           .runInOrder(
               "SHOW TABLE EXTENDED",
               listSchemas(handle),
-              DatabricksHiveMetastoreTasks::quoteIdentifier,
+              DatabricksSqlHelper::quoteIdentifier,
               schema -> showTableExtended(handle, schema),
               (schema, schemaTables) -> builder.addAll(schemaTables));
       return builder.build();
@@ -169,7 +170,7 @@ final class DatabricksHiveMetastoreTasks {
           .runInOrder(
               "SHOW USER FUNCTIONS",
               listSchemas(handle),
-              DatabricksHiveMetastoreTasks::quoteIdentifier,
+              DatabricksSqlHelper::quoteIdentifier,
               schema -> showUserFunctions(handle, schema),
               (schema, schemaFunctionRefs) -> functionRefs.addAll(schemaFunctionRefs));
       ImmutableList.Builder<ParsedFunctionExtended> builder = ImmutableList.builder();
@@ -284,11 +285,6 @@ final class DatabricksHiveMetastoreTasks {
   }
 
   @Nonnull
-  static String quoteIdentifier(@Nonnull String identifier) {
-    return "`" + identifier.replace("`", "``") + "`";
-  }
-
-  @Nonnull
   private static String quoteTableName(@Nonnull ParsedTableExtended table) {
     return quoteIdentifier(table.schemaName) + "." + quoteIdentifier(table.tableName);
   }
@@ -359,7 +355,7 @@ final class DatabricksHiveMetastoreTasks {
             .runInOrder(
                 "DESCRIBE SCHEMA EXTENDED",
                 schemas,
-                DatabricksHiveMetastoreTasks::quoteIdentifier,
+                DatabricksSqlHelper::quoteIdentifier,
                 schema -> describeSchemaOrEmpty(dbxHandle, schema),
                 (schema, description) ->
                     csv.printRecord(

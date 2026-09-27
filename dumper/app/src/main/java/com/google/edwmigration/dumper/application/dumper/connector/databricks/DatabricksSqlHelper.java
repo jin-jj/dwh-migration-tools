@@ -224,6 +224,21 @@ final class DatabricksSqlHelper {
     return val != null ? val : "";
   }
 
+  /** Quotes a SQL identifier with backticks, doubling any backtick inside it. */
+  @Nonnull
+  static String quoteIdentifier(@Nonnull String identifier) {
+    return "`" + identifier.replace("`", "``") + "`";
+  }
+
+  /**
+   * Quotes a SQL string literal. Backslashes and single quotes are escaped with a backslash, as in
+   * the output of {@code SHOW CREATE TABLE}.
+   */
+  @Nonnull
+  static String quoteStringLiteral(@Nonnull String value) {
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
+  }
+
   private final class ChunkRowIterator implements Iterator<List<String>> {
 
     @CheckForNull private final String statementId;
