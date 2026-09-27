@@ -28,6 +28,7 @@ import com.google.edwmigration.dumper.application.dumper.connector.MetadataConne
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreCatalogsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreColumnsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreDdlsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreFunctionDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreFunctionsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreSchemataTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTableConstraintsTask;
@@ -98,6 +99,7 @@ public class DatabricksHiveMetastoreMetadataConnector extends AbstractConnector
     out.add(new DatabricksHiveMetastoreTableConstraintsTask(sessionCache));
     out.add(new DatabricksHiveMetastoreFunctionsTask(sessionCache));
     out.add(new DatabricksHiveMetastoreDdlsTask(sessionCache));
+    out.add(new DatabricksHiveMetastoreFunctionDdlsTask(sessionCache));
   }
 
   @Override

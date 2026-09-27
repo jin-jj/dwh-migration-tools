@@ -16,13 +16,18 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
-import static org.junit.Assert.assertFalse;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.databricks.sdk.WorkspaceClient;
+import com.databricks.sdk.core.DatabricksException;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.ServiceError;
@@ -31,13 +36,26 @@ import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.io.ByteSink;
 import com.google.common.io.Files;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.DdlsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.FunctionDdlsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.SchemataHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreDdlsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreFunctionDdlsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreSchemataTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.HiveMetastoreSessionCache;
+import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import java.io.File;
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.Collections;
+import java.io.IOException;
+import java.io.StringReader;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -47,139 +65,254 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class DatabricksHiveMetastoreTasksTest {
 
+  private static final String SCHEMA = "legacy";
+  private static final String SHOW_SCHEMAS = "SHOW SCHEMAS";
+  private static final String SHOW_TABLES = "SHOW TABLE EXTENDED IN `legacy` LIKE '*'";
+  private static final String SHOW_FUNCTIONS = "SHOW USER FUNCTIONS IN `legacy`";
+
   @Rule public final TemporaryFolder tempFolder = new TemporaryFolder();
 
   @Test
-  public void hiveMetastoreDdlsTask_skipsTableWhoseShowCreateTableFails() throws Exception {
+  public void ddlsTask_skipsTableWhoseShowCreateTableFails() throws Exception {
+    String deltaDdl = "CREATE TABLE hive_metastore.legacy.delta_tbl (id INT NOT NULL) USING delta";
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTablesResponse("delta_tbl", "hive_serde_tbl"),
+                "SHOW CREATE TABLE `legacy`.`delta_tbl`",
+                succeeded(deltaDdl),
+                "SHOW CREATE TABLE `legacy`.`hive_serde_tbl`",
+                failed(
+                    "[UNSUPPORTED_SHOW_CREATE_TABLE.WITH_UNSUPPORTED_SERDE_CONFIGURATION]"
+                        + " Unsupported SHOW CREATE TABLE command.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) -> new DatabricksHiveMetastoreDdlsTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals("delta_tbl", records.get(0).get(DdlsHeader.TableName));
+    assertEquals(deltaDdl, records.get(0).get(DdlsHeader.Ddl));
+  }
+
+  @Test
+  public void ddlsTask_skipsTableWhoseResultDownloadFails() throws Exception {
+    String goodDdl = "CREATE TABLE hive_metastore.legacy.good_tbl (id INT) USING delta";
+    String brokenStatementId = "stmt-broken";
+    StatementResponse brokenResponse =
+        new StatementResponse()
+            .setStatementId(brokenStatementId)
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setResult(
+                new ResultData()
+                    .setChunkIndex(0L)
+                    .setNextChunkIndex(1L)
+                    .setDataArray(rows(ImmutableList.of(ImmutableList.of("CREATE TABLE")))));
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTablesResponse("broken_tbl", "good_tbl"),
+                "SHOW CREATE TABLE `legacy`.`broken_tbl`",
+                brokenResponse,
+                "SHOW CREATE TABLE `legacy`.`good_tbl`",
+                succeeded(goodDdl)));
+    when(statements.getStatementResultChunkN(brokenStatementId, 1L))
+        .thenThrow(new DatabricksException("Connection reset"));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) -> new DatabricksHiveMetastoreDdlsTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals("good_tbl", records.get(0).get(DdlsHeader.TableName));
+    assertEquals(goodDdl, records.get(0).get(DdlsHeader.Ddl));
+  }
+
+  @Test
+  public void functionDdlsTask_skipsFunctionWhoseDescribeFails() throws Exception {
+    ImmutableList<String> describeLines =
+        ImmutableList.of(
+            "Function: hive_metastore.legacy.double_it",
+            "Type: SCALAR",
+            "Input: x INT",
+            "Returns: INT",
+            "Body: x * 2");
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_FUNCTIONS,
+                succeeded("legacy.double_it", "legacy.broken_fn"),
+                "DESCRIBE FUNCTION EXTENDED `legacy`.`double_it`",
+                succeeded(describeLines.toArray(new String[0])),
+                "DESCRIBE FUNCTION EXTENDED `legacy`.`broken_fn`",
+                failed("[ROUTINE_NOT_FOUND] The routine `legacy`.`broken_fn` cannot be found.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreFunctionDdlsTask(cache).doRun(null, sink, handle));
+
+    String expectedDdl =
+        DatabricksHiveMetastoreParser.parseDescribeFunctionExtended(
+                DatabricksFilter.HIVE_METASTORE_CATALOG, SCHEMA, "double_it", describeLines)
+            .ddl;
+    assertEquals(1, records.size());
+    assertEquals("double_it", records.get(0).get(FunctionDdlsHeader.FunctionName));
+    assertEquals(expectedDdl, records.get(0).get(FunctionDdlsHeader.Ddl));
+  }
+
+  @Test
+  public void schemataTask_keepsSchemaWhoseDescribeFails() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA, "locked"),
+                "DESCRIBE SCHEMA EXTENDED `legacy`",
+                succeededRows(
+                    ImmutableList.of(
+                        ImmutableList.of("Comment", "Old data"),
+                        ImmutableList.of("Owner", "alice"))),
+                "DESCRIBE SCHEMA EXTENDED `locked`",
+                failed("[INSUFFICIENT_PERMISSIONS] Insufficient privileges.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreSchemataTask(cache).doRun(null, sink, handle));
+
+    assertEquals(2, records.size());
+    assertEquals("Old data", records.get(0).get(SchemataHeader.Comment));
+    assertEquals("alice", records.get(0).get(SchemataHeader.Owner));
+    assertEquals("locked", records.get(1).get(SchemataHeader.SchemaName));
+    assertEquals("", records.get(1).get(SchemataHeader.Owner));
+  }
+
+  @Test
+  public void sessionCache_doesNotRepeatFailedScan() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS, failed("[INSUFFICIENT_PERMISSIONS] Insufficient privileges.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    try (DatabricksHandle handle = newHandle(statements)) {
+      assertThrows(IOException.class, () -> cache.listParsedTables(handle));
+      IOException repeated =
+          assertThrows(IOException.class, () -> cache.listParsedFunctions(handle));
+      assertTrue(repeated.getMessage().contains("failed earlier"));
+    }
+
+    verify(statements, times(1)).executeStatement(any(ExecuteStatementRequest.class));
+  }
+
+  private interface TaskBody {
+
+    void run(ByteSink sink, DatabricksHandle handle) throws Exception;
+  }
+
+  private List<CSVRecord> runTask(StatementExecutionAPI statements, TaskBody body)
+      throws Exception {
+    File output = tempFolder.newFile();
+    try (DatabricksHandle handle = newHandle(statements)) {
+      body.run(Files.asByteSink(output), handle);
+    }
+    String csv = Files.asCharSource(output, UTF_8).read();
+    try (CSVParser parser =
+        AbstractTask.FORMAT
+            .builder()
+            .setHeader()
+            .setSkipHeaderRecord(true)
+            .get()
+            .parse(new StringReader(csv))) {
+      return parser.getRecords();
+    }
+  }
+
+  private static DatabricksHandle newHandle(StatementExecutionAPI statements) {
     WorkspaceClient client = mock(WorkspaceClient.class);
-    StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
-    when(client.statementExecution()).thenReturn(stmtApi);
-
-    StatementResponse showDatabasesResp =
-        new StatementResponse()
-            .setStatementId("stmt-dbs")
-            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
-            .setResult(
-                new ResultData()
-                    .setDataArray(Collections.singletonList(Collections.singletonList("legacy"))));
-
-    String deltaBlob =
-        "Catalog: hive_metastore\n"
-            + "Database: legacy\n"
-            + "Table: delta_tbl\n"
-            + "Type: MANAGED\n"
-            + "Provider: delta\n"
-            + "Schema: root\n"
-            + " |-- id: integer (nullable = false)\n";
-    String serdeBlob =
-        "Catalog: hive_metastore\n"
-            + "Database: legacy\n"
-            + "Table: hive_serde_tbl\n"
-            + "Type: EXTERNAL\n"
-            + "Provider: hive\n"
-            + "Schema: root\n"
-            + " |-- raw_line: string (nullable = true)\n";
-    StatementResponse showTableExtendedResp =
-        new StatementResponse()
-            .setStatementId("stmt-ext")
-            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
-            .setResult(
-                new ResultData()
-                    .setDataArray(
-                        Arrays.asList(
-                            Arrays.asList("legacy", "delta_tbl", "false", deltaBlob),
-                            Arrays.asList("legacy", "hive_serde_tbl", "false", serdeBlob))));
-
-    StatementResponse deltaDdlResp =
-        new StatementResponse()
-            .setStatementId("stmt-ddl-1")
-            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
-            .setResult(
-                new ResultData()
-                    .setDataArray(
-                        Collections.singletonList(
-                            Collections.singletonList(
-                                "CREATE TABLE hive_metastore.legacy.delta_tbl (id INT NOT NULL) USING delta"))));
-
-    StatementResponse serdeFailResp =
-        new StatementResponse()
-            .setStatementId("stmt-ddl-fail")
-            .setStatus(
-                new StatementStatus()
-                    .setState(StatementState.FAILED)
-                    .setError(
-                        new ServiceError()
-                            .setMessage(
-                                "[UNSUPPORTED_SHOW_CREATE_TABLE.WITH_UNSUPPORTED_SERDE_CONFIGURATION]"
-                                    + " Unsupported SHOW CREATE TABLE command.")));
-
-    StatementResponse showUserFunctionsResp =
-        new StatementResponse()
-            .setStatementId("stmt-fns")
-            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
-            .setResult(
-                new ResultData()
-                    .setDataArray(
-                        Collections.singletonList(Collections.singletonList("legacy.double_it"))));
-
-    StatementResponse descFunctionResp =
-        new StatementResponse()
-            .setStatementId("stmt-desc-fn")
-            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
-            .setResult(
-                new ResultData()
-                    .setDataArray(
-                        Arrays.asList(
-                            Collections.singletonList("Function: hive_metastore.legacy.double_it"),
-                            Collections.singletonList("Type: SCALAR"),
-                            Collections.singletonList("Input: x INT"),
-                            Collections.singletonList("Returns: INT"),
-                            Collections.singletonList("Body: x * 2"))));
-
-    when(stmtApi.executeStatement(any(ExecuteStatementRequest.class)))
-        .thenAnswer(
-            inv -> {
-              ExecuteStatementRequest req = inv.getArgument(0);
-              String sql = req.getStatement();
-              if ("SHOW SCHEMAS".equals(sql)) {
-                return showDatabasesResp;
-              }
-              if ("SHOW TABLE EXTENDED IN `legacy` LIKE '*'".equals(sql)) {
-                return showTableExtendedResp;
-              }
-              if ("SHOW CREATE TABLE `legacy`.`delta_tbl`".equals(sql)) {
-                return deltaDdlResp;
-              }
-              if ("SHOW CREATE TABLE `legacy`.`hive_serde_tbl`".equals(sql)) {
-                return serdeFailResp;
-              }
-              if ("SHOW USER FUNCTIONS IN `legacy`".equals(sql)) {
-                return showUserFunctionsResp;
-              }
-              if ("DESCRIBE FUNCTION EXTENDED `legacy`.`double_it`".equals(sql)) {
-                return descFunctionResp;
-              }
-              throw new IllegalArgumentException("Unexpected SQL: " + sql);
-            });
-
+    when(client.statementExecution()).thenReturn(statements);
     DatabricksSqlHelper sqlHelper =
         new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
-    try (DatabricksHandle handle =
-        new DatabricksHandle(sqlHelper, new DatabricksFilter(ImmutableList.of()))) {
-      HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
-      File ddlsFile = tempFolder.newFile("ddls.csv");
-      new DatabricksHiveMetastoreDdlsTask(cache).doRun(null, Files.asByteSink(ddlsFile), handle);
+    return new DatabricksHandle(sqlHelper, new DatabricksFilter(ImmutableList.of()));
+  }
 
-      String ddlsCsv = Files.asCharSource(ddlsFile, StandardCharsets.UTF_8).read();
-      assertTrue(
-          ddlsCsv.contains(
-              "hive_metastore,legacy,delta_tbl,MANAGED,CREATE TABLE hive_metastore.legacy.delta_tbl (id INT NOT NULL) USING delta"));
-      assertFalse(ddlsCsv.contains("hive_serde_tbl"));
-      assertTrue(
-          ddlsCsv.contains(
-              "hive_metastore,legacy,double_it,FUNCTION,\"CREATE FUNCTION hive_metastore.legacy.double_it(x INT)\n"
-                  + "RETURNS INT\n"
-                  + "RETURN x * 2\""));
+  /** Mocks the Statement Execution API to answer each SQL statement from the map. */
+  private static StatementExecutionAPI mockStatements(
+      Map<String, StatementResponse> responsesBySql) {
+    StatementExecutionAPI statements = mock(StatementExecutionAPI.class);
+    when(statements.executeStatement(any(ExecuteStatementRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              ExecuteStatementRequest request = invocation.getArgument(0);
+              StatementResponse response = responsesBySql.get(request.getStatement());
+              if (response == null) {
+                throw new IllegalArgumentException("Unexpected SQL: " + request.getStatement());
+              }
+              return response;
+            });
+    return statements;
+  }
+
+  private static StatementResponse showTablesResponse(String... tableNames) {
+    List<List<String>> tableRows = new ArrayList<>();
+    for (String tableName : tableNames) {
+      String information =
+          "Catalog: hive_metastore\n"
+              + "Database: legacy\n"
+              + "Table: "
+              + tableName
+              + "\n"
+              + "Type: MANAGED\n"
+              + "Provider: delta\n"
+              + "Schema: root\n"
+              + " |-- id: integer (nullable = false)\n";
+      tableRows.add(ImmutableList.of(SCHEMA, tableName, "false", information));
     }
+    return succeededRows(tableRows);
+  }
+
+  private static StatementResponse succeeded(String... singleColumnRows) {
+    List<List<String>> tableRows = new ArrayList<>();
+    for (String value : singleColumnRows) {
+      tableRows.add(ImmutableList.of(value));
+    }
+    return succeededRows(tableRows);
+  }
+
+  private static StatementResponse succeededRows(List<? extends List<String>> tableRows) {
+    return new StatementResponse()
+        .setStatementId("stmt-ok")
+        .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+        .setResult(new ResultData().setDataArray(rows(tableRows)));
+  }
+
+  private static Collection<Collection<String>> rows(List<? extends List<String>> tableRows) {
+    return new ArrayList<Collection<String>>(tableRows);
+  }
+
+  private static StatementResponse failed(String message) {
+    return new StatementResponse()
+        .setStatementId("stmt-failed")
+        .setStatus(
+            new StatementStatus()
+                .setState(StatementState.FAILED)
+                .setError(new ServiceError().setMessage(message)));
   }
 }

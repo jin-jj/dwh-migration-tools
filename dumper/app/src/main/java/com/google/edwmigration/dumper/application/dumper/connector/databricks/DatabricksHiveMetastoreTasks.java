@@ -19,6 +19,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cell;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.ObjectStatementRunner.runInOrder;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.collect.ImmutableList;
@@ -26,6 +27,7 @@ import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.CatalogsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.ColumnsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.DdlsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.FunctionDdlsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.FunctionsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.SchemataHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TableConstraintsHeader;
@@ -40,14 +42,15 @@ import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskCategory;
 import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.concurrent.GuardedBy;
 import org.apache.commons.csv.CSVPrinter;
+import org.apache.commons.io.function.IOSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -61,189 +64,221 @@ final class DatabricksHiveMetastoreTasks {
 
   private DatabricksHiveMetastoreTasks() {}
 
-  /** Shared per-connector cache of {@code hive_metastore} schemas and parsed table descriptors. */
+  /**
+   * Shared per-connector cache of {@code hive_metastore} schemas, parsed tables and parsed
+   * functions.
+   *
+   * <p>Each list is loaded once. A failed load is remembered, so the other tasks that need the list
+   * fail fast instead of repeating a scan that already failed.
+   */
   static final class HiveMetastoreSessionCache {
 
-    private final Object lock = new Object();
-    private ImmutableList<String> cachedSchemas;
-    private ImmutableList<ParsedTableExtended> cachedTables;
-    private ImmutableList<ParsedFunctionExtended> cachedFunctions;
-    private final Map<String, String> cachedDdls = new LinkedHashMap<>();
+    private final Memoized<ImmutableList<String>> schemas =
+        new Memoized<>("Listing hive_metastore schemas");
+    private final Memoized<ImmutableList<ParsedTableExtended>> tables =
+        new Memoized<>("Listing hive_metastore tables");
+    private final Memoized<ImmutableList<ParsedFunctionExtended>> functions =
+        new Memoized<>("Listing hive_metastore functions");
 
     @Nonnull
     ImmutableList<String> listSchemas(@Nonnull DatabricksHandle handle) throws IOException {
-      synchronized (lock) {
-        if (cachedSchemas != null) {
-          return cachedSchemas;
-        }
-        ImmutableList.Builder<String> builder = ImmutableList.builder();
-        try (CloseableIterable<List<String>> rows =
-            handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SHOW SCHEMAS")) {
-          for (List<String> row : rows) {
-            String schemaName = cell(row, 0);
-            if (schemaName != null && handle.filter().acceptsSchema(schemaName)) {
-              builder.add(schemaName);
-            }
-          }
-        }
-        cachedSchemas = builder.build();
-        return cachedSchemas;
-      }
+      return schemas.load(() -> loadSchemas(handle));
     }
 
     @Nonnull
     ImmutableList<ParsedTableExtended> listParsedTables(@Nonnull DatabricksHandle handle)
         throws IOException {
-      synchronized (lock) {
-        if (cachedTables != null) {
-          return cachedTables;
-        }
-        ImmutableList<String> schemas = listSchemas(handle);
-        ImmutableList.Builder<ParsedTableExtended> builder = ImmutableList.builder();
-        for (String schema : schemas) {
-          String quotedSchema = quoteIdentifier(schema);
-          String query = String.format("SHOW TABLE EXTENDED IN %s LIKE '*'", quotedSchema);
-          try (CloseableIterable<List<String>> rows =
-              handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
-            for (List<String> row : rows) {
-              if (row == null || row.isEmpty()) {
-                continue;
-              }
-              String isTemp = row.size() > 2 ? cell(row, 2) : null;
-              if ("true".equalsIgnoreCase(isTemp)) {
-                continue;
-              }
-              String rowSchema = row.size() > 1 ? cellOrEmpty(row, 0) : schema;
-              String rowTable = row.size() > 1 ? cellOrEmpty(row, 1) : "";
-              String infoBlob = row.size() > 3 ? cell(row, 3) : cell(row, row.size() - 1);
-              builder.add(
-                  DatabricksHiveMetastoreParser.parseShowTableExtended(
-                      rowSchema.isEmpty() ? schema : rowSchema, rowTable, infoBlob));
-            }
-          } catch (DatabricksSqlException e) {
-            if (e.isPermissionDenied()) {
-              logger.warn("Skipping hive_metastore schema '{}' due to missing privileges.", schema);
-              continue;
-            }
-            throw e;
-          }
-        }
-        cachedTables = builder.build();
-        return cachedTables;
-      }
+      return tables.load(() -> loadTables(handle));
     }
 
     @Nonnull
     ImmutableList<ParsedFunctionExtended> listParsedFunctions(@Nonnull DatabricksHandle handle)
         throws IOException {
-      synchronized (lock) {
-        if (cachedFunctions != null) {
-          return cachedFunctions;
-        }
-        ImmutableList<String> schemas = listSchemas(handle);
-        ImmutableList.Builder<ParsedFunctionExtended> builder = ImmutableList.builder();
-        for (String schema : schemas) {
-          String quotedSchema = quoteIdentifier(schema);
-          List<String> functionNames = new ArrayList<>();
-          try (CloseableIterable<List<String>> rows =
-              handle
-                  .sqlHelper()
-                  .executeSqlInCatalog(
-                      HIVE_METASTORE_CATALOG, "SHOW USER FUNCTIONS IN " + quotedSchema)) {
-            for (List<String> row : rows) {
-              String rawName = cell(row, 0);
-              if (rawName != null && !rawName.trim().isEmpty()) {
-                functionNames.add(extractShortFunctionName(rawName.trim()));
-              }
-            }
-          } catch (DatabricksSqlException e) {
-            if (e.isPermissionDenied()) {
-              continue;
-            }
-            throw e;
-          }
+      return functions.load(() -> loadFunctions(handle));
+    }
 
-          for (String funcName : functionNames) {
-            String quotedFunc = quoteIdentifier(funcName);
-            List<String> descLines = new ArrayList<>();
-            try (CloseableIterable<List<String>> descRows =
-                handle
-                    .sqlHelper()
-                    .executeSqlInCatalog(
-                        HIVE_METASTORE_CATALOG,
-                        "DESCRIBE FUNCTION EXTENDED " + quotedSchema + "." + quotedFunc)) {
-              for (List<String> descRow : descRows) {
-                String line = cell(descRow, 0);
-                if (line != null) {
-                  descLines.add(line);
-                }
-              }
-            } catch (DatabricksSqlException e) {
-              logger.warn(
-                  "Skipping DESCRIBE FUNCTION EXTENDED for '{}.{}': {}",
-                  schema,
-                  funcName,
-                  e.getMessage());
-              continue;
-            }
-            builder.add(
-                DatabricksHiveMetastoreParser.parseDescribeFunctionExtended(
-                    HIVE_METASTORE_CATALOG, schema, funcName, descLines));
+    @Nonnull
+    private static ImmutableList<String> loadSchemas(@Nonnull DatabricksHandle handle)
+        throws IOException {
+      ImmutableList.Builder<String> builder = ImmutableList.builder();
+      try (CloseableIterable<List<String>> rows =
+          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SHOW SCHEMAS")) {
+        for (List<String> row : rows) {
+          String schemaName = cell(row, 0);
+          if (schemaName != null && handle.filter().acceptsSchema(schemaName)) {
+            builder.add(schemaName);
           }
         }
-        cachedFunctions = builder.build();
-        return cachedFunctions;
       }
+      return builder.build();
+    }
+
+    @Nonnull
+    private ImmutableList<ParsedTableExtended> loadTables(@Nonnull DatabricksHandle handle)
+        throws IOException {
+      ImmutableList.Builder<ParsedTableExtended> builder = ImmutableList.builder();
+      runInOrder(
+          "SHOW TABLE EXTENDED",
+          listSchemas(handle),
+          DatabricksHiveMetastoreTasks::quoteIdentifier,
+          schema -> showTableExtended(handle, schema),
+          (schema, schemaTables) -> builder.addAll(schemaTables));
+      return builder.build();
+    }
+
+    @Nonnull
+    private static ImmutableList<ParsedTableExtended> showTableExtended(
+        @Nonnull DatabricksHandle handle, @Nonnull String schema) throws IOException {
+      String query = String.format("SHOW TABLE EXTENDED IN %s LIKE '*'", quoteIdentifier(schema));
+      ImmutableList.Builder<ParsedTableExtended> builder = ImmutableList.builder();
+      try (CloseableIterable<List<String>> rows =
+          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
+        for (List<String> row : rows) {
+          if (row == null || row.isEmpty()) {
+            continue;
+          }
+          String isTemp = row.size() > 2 ? cell(row, 2) : null;
+          if ("true".equalsIgnoreCase(isTemp)) {
+            continue;
+          }
+          String rowSchema = row.size() > 1 ? cellOrEmpty(row, 0) : schema;
+          String rowTable = row.size() > 1 ? cellOrEmpty(row, 1) : "";
+          String infoBlob = row.size() > 3 ? cell(row, 3) : cell(row, row.size() - 1);
+          builder.add(
+              DatabricksHiveMetastoreParser.parseShowTableExtended(
+                  rowSchema.isEmpty() ? schema : rowSchema, rowTable, infoBlob));
+        }
+      }
+      return builder.build();
+    }
+
+    @Nonnull
+    private ImmutableList<ParsedFunctionExtended> loadFunctions(@Nonnull DatabricksHandle handle)
+        throws IOException {
+      List<FunctionRef> functionRefs = new ArrayList<>();
+      runInOrder(
+          "SHOW USER FUNCTIONS",
+          listSchemas(handle),
+          DatabricksHiveMetastoreTasks::quoteIdentifier,
+          schema -> showUserFunctions(handle, schema),
+          (schema, schemaFunctionRefs) -> functionRefs.addAll(schemaFunctionRefs));
+      ImmutableList.Builder<ParsedFunctionExtended> builder = ImmutableList.builder();
+      runInOrder(
+          "DESCRIBE FUNCTION EXTENDED",
+          functionRefs,
+          FunctionRef::quotedName,
+          functionRef -> describeFunction(handle, functionRef),
+          (functionRef, parsed) -> builder.add(parsed));
+      return builder.build();
+    }
+
+    @Nonnull
+    private static ImmutableList<FunctionRef> showUserFunctions(
+        @Nonnull DatabricksHandle handle, @Nonnull String schema) throws IOException {
+      String query = "SHOW USER FUNCTIONS IN " + quoteIdentifier(schema);
+      ImmutableList.Builder<FunctionRef> builder = ImmutableList.builder();
+      try (CloseableIterable<List<String>> rows =
+          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
+        for (List<String> row : rows) {
+          String rawName = cell(row, 0);
+          if (rawName != null && !rawName.trim().isEmpty()) {
+            builder.add(new FunctionRef(schema, extractShortFunctionName(rawName.trim())));
+          }
+        }
+      }
+      return builder.build();
+    }
+
+    @Nonnull
+    private static ParsedFunctionExtended describeFunction(
+        @Nonnull DatabricksHandle handle, @Nonnull FunctionRef functionRef) throws IOException {
+      String query = "DESCRIBE FUNCTION EXTENDED " + functionRef.quotedName();
+      List<String> lines = new ArrayList<>();
+      try (CloseableIterable<List<String>> rows =
+          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
+        for (List<String> row : rows) {
+          String line = cell(row, 0);
+          if (line != null) {
+            lines.add(line);
+          }
+        }
+      }
+      return DatabricksHiveMetastoreParser.parseDescribeFunctionExtended(
+          HIVE_METASTORE_CATALOG, functionRef.schema, functionRef.name, lines);
     }
 
     private static String extractShortFunctionName(String fullName) {
       int lastDot = fullName.lastIndexOf('.');
       return lastDot >= 0 ? fullName.substring(lastDot + 1) : fullName;
     }
+  }
 
-    @Nonnull
-    String fetchTableDdl(
-        @Nonnull DatabricksHandle handle, @Nonnull String schema, @Nonnull String table)
-        throws IOException {
-      String key = schema.toLowerCase(Locale.ROOT) + "." + table.toLowerCase(Locale.ROOT);
-      synchronized (lock) {
-        if (cachedDdls.containsKey(key)) {
-          return cachedDdls.get(key);
-        }
-      }
-      String qualifiedTable = quoteIdentifier(schema) + "." + quoteIdentifier(table);
-      String ddl = executeShowCreateTable(handle, "SHOW CREATE TABLE " + qualifiedTable);
-      synchronized (lock) {
-        cachedDdls.put(key, ddl);
-      }
-      return ddl;
+  /** A user function in a {@code hive_metastore} schema. */
+  private static final class FunctionRef {
+
+    final String schema;
+    final String name;
+
+    FunctionRef(@Nonnull String schema, @Nonnull String name) {
+      this.schema = schema;
+      this.name = name;
     }
 
     @Nonnull
-    private static String executeShowCreateTable(
-        @Nonnull DatabricksHandle handle, @Nonnull String sql) throws IOException {
-      StringBuilder sb = new StringBuilder();
-      try (CloseableIterable<List<String>> rows =
-          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, sql)) {
-        for (List<String> row : rows) {
-          String part = cell(row, 0);
-          if (part != null) {
-            if (sb.length() > 0) {
-              sb.append("\n");
-            }
-            sb.append(part);
-          }
-        }
-      } catch (DatabricksSqlException e) {
-        logger.warn("Skipping '{}' due to SQL error: {}", sql, e.getMessage());
-        return "";
-      }
-      return sb.toString();
+    String quotedName() {
+      return quoteIdentifier(schema) + "." + quoteIdentifier(name);
+    }
+  }
+
+  /**
+   * Loads a value at most once. A failed load is remembered and reported to later callers instead
+   * of being retried.
+   */
+  private static final class Memoized<T> {
+
+    private final String description;
+
+    @GuardedBy("this")
+    @CheckForNull
+    private T value;
+
+    @GuardedBy("this")
+    @CheckForNull
+    private Exception failure;
+
+    Memoized(@Nonnull String description) {
+      this.description = description;
     }
 
-    private static String quoteIdentifier(String ident) {
-      return "`" + ident.replace("`", "``") + "`";
+    @Nonnull
+    synchronized T load(@Nonnull IOSupplier<T> loader) throws IOException {
+      if (value != null) {
+        return value;
+      }
+
+      if (failure != null) {
+        throw new IOException(
+            description + " failed earlier and is not retried: " + failure.getMessage(), failure);
+      }
+
+      try {
+        value = loader.get();
+        return value;
+      } catch (IOException | RuntimeException e) {
+        failure = e;
+        throw e;
+      }
     }
+  }
+
+  @Nonnull
+  static String quoteIdentifier(@Nonnull String identifier) {
+    return "`" + identifier.replace("`", "``") + "`";
+  }
+
+  @Nonnull
+  private static String quoteTableName(@Nonnull ParsedTableExtended table) {
+    return quoteIdentifier(table.schemaName) + "." + quoteIdentifier(table.tableName);
   }
 
   abstract static class AbstractDatabricksHiveMetastoreTask extends AbstractTask<Void> {
@@ -304,33 +339,74 @@ final class DatabricksHiveMetastoreTasks {
     protected Void doRun(TaskRunContext context, @Nonnull ByteSink sink, @Nonnull Handle handle)
         throws Exception {
       DatabricksHandle dbxHandle = (DatabricksHandle) handle;
+      ImmutableList<String> schemas = sessionCache.listSchemas(dbxHandle);
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(SchemataHeader.class).print(writer)) {
-        for (String schema : sessionCache.listSchemas(dbxHandle)) {
-          String comment = "";
-          String owner = "";
-          String quotedSchema = "`" + schema.replace("`", "``") + "`";
-          try (CloseableIterable<List<String>> descRows =
-              dbxHandle
-                  .sqlHelper()
-                  .executeSqlInCatalog(
-                      HIVE_METASTORE_CATALOG, "DESCRIBE SCHEMA EXTENDED " + quotedSchema)) {
-            for (List<String> row : descRows) {
-              String key = cellOrEmpty(row, 0);
-              String val = cellOrEmpty(row, 1);
-              if ("Comment".equalsIgnoreCase(key)) {
-                comment = val;
-              } else if ("Owner".equalsIgnoreCase(key)) {
-                owner = val;
-              }
-            }
-          } catch (DatabricksSqlException ignored) {
-            // Keep schema row even if DESCRIBE SCHEMA EXTENDED fails
-          }
-          csv.printRecord(HIVE_METASTORE_CATALOG, schema, comment, owner, "", "");
-        }
+        runInOrder(
+            "DESCRIBE SCHEMA EXTENDED",
+            schemas,
+            DatabricksHiveMetastoreTasks::quoteIdentifier,
+            schema -> describeSchemaOrEmpty(dbxHandle, schema),
+            (schema, description) ->
+                csv.printRecord(
+                    HIVE_METASTORE_CATALOG,
+                    schema,
+                    description.comment,
+                    description.owner,
+                    "",
+                    ""));
       }
       return null;
+    }
+
+    /**
+     * Describes a schema. The schema name is already known from {@code SHOW SCHEMAS}, so if {@code
+     * DESCRIBE SCHEMA EXTENDED} fails, the schema is still written, without comment and owner.
+     */
+    @Nonnull
+    private static SchemaDescription describeSchemaOrEmpty(
+        @Nonnull DatabricksHandle handle, @Nonnull String schema) {
+      String query = "DESCRIBE SCHEMA EXTENDED " + quoteIdentifier(schema);
+      String comment = "";
+      String owner = "";
+      try (CloseableIterable<List<String>> rows =
+          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
+        for (List<String> row : rows) {
+          String key = cellOrEmpty(row, 0);
+          String value = cellOrEmpty(row, 1);
+          if ("Comment".equalsIgnoreCase(key)) {
+            comment = value;
+          } else if ("Owner".equalsIgnoreCase(key)) {
+            owner = value;
+          }
+        }
+      } catch (IOException e) {
+        return emptySchemaDescription(schema, e);
+      } catch (UncheckedIOException e) {
+        return emptySchemaDescription(schema, e.getCause());
+      }
+      return new SchemaDescription(comment, owner);
+    }
+
+    @Nonnull
+    private static SchemaDescription emptySchemaDescription(
+        @Nonnull String schema, @Nonnull IOException failure) {
+      logger.warn(
+          "Writing schema {} without comment and owner because DESCRIBE SCHEMA EXTENDED failed: {}",
+          quoteIdentifier(schema),
+          failure.getMessage());
+      return new SchemaDescription("", "");
+    }
+  }
+
+  private static final class SchemaDescription {
+
+    final String comment;
+    final String owner;
+
+    SchemaDescription(@Nonnull String comment, @Nonnull String owner) {
+      this.comment = comment;
+      this.owner = owner;
     }
   }
 
@@ -512,9 +588,8 @@ final class DatabricksHiveMetastoreTasks {
   }
 
   /**
-   * Complementary task that executes {@code SHOW CREATE TABLE} for each table and view in {@code
-   * hive_metastore}, plus synthesizes {@code CREATE FUNCTION} DDLs from {@code DESCRIBE FUNCTION
-   * EXTENDED}, and dumps all DDL statements into {@code ddls.csv}.
+   * Complementary task that runs {@code SHOW CREATE TABLE} for each table and view in {@code
+   * hive_metastore} and writes the DDL statements to {@code ddls.csv}.
    */
   static final class DatabricksHiveMetastoreDdlsTask extends AbstractDatabricksHiveMetastoreTask {
 
@@ -532,18 +607,75 @@ final class DatabricksHiveMetastoreTasks {
     protected Void doRun(TaskRunContext context, @Nonnull ByteSink sink, @Nonnull Handle handle)
         throws Exception {
       DatabricksHandle dbxHandle = (DatabricksHandle) handle;
+      ImmutableList<ParsedTableExtended> tables = sessionCache.listParsedTables(dbxHandle);
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(DdlsHeader.class).print(writer)) {
-        for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
-          String ddl = sessionCache.fetchTableDdl(dbxHandle, tbl.schemaName, tbl.tableName);
-          if (!ddl.isEmpty()) {
-            csv.printRecord(tbl.catalogName, tbl.schemaName, tbl.tableName, tbl.tableType, ddl);
+        runInOrder(
+            "SHOW CREATE TABLE",
+            tables,
+            DatabricksHiveMetastoreTasks::quoteTableName,
+            table -> showCreateTable(dbxHandle, table),
+            (table, ddl) -> {
+              if (!ddl.isEmpty()) {
+                csv.printRecord(
+                    table.catalogName, table.schemaName, table.tableName, table.tableType, ddl);
+              }
+            });
+      }
+      return null;
+    }
+
+    @Nonnull
+    private static String showCreateTable(
+        @Nonnull DatabricksHandle handle, @Nonnull ParsedTableExtended table) throws IOException {
+      String query = "SHOW CREATE TABLE " + quoteTableName(table);
+      StringBuilder ddl = new StringBuilder();
+      try (CloseableIterable<List<String>> rows =
+          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
+        for (List<String> row : rows) {
+          String part = cell(row, 0);
+          if (part != null) {
+            if (ddl.length() > 0) {
+              ddl.append("\n");
+            }
+            ddl.append(part);
           }
         }
-        for (ParsedFunctionExtended fn : sessionCache.listParsedFunctions(dbxHandle)) {
-          if (fn.ddl != null && !fn.ddl.isEmpty()) {
+      }
+      return ddl.toString();
+    }
+  }
+
+  /**
+   * Writes the {@code CREATE FUNCTION} DDLs synthesized from {@code DESCRIBE FUNCTION EXTENDED} to
+   * {@code function_ddls.csv}.
+   */
+  static final class DatabricksHiveMetastoreFunctionDdlsTask
+      extends AbstractDatabricksHiveMetastoreTask {
+
+    DatabricksHiveMetastoreFunctionDdlsTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
+      super(DatabricksHiveMetastoreDumpFormat.FUNCTION_DDLS_ENTRY_NAME, sessionCache);
+    }
+
+    @Override
+    @Nonnull
+    public String getName() {
+      return "databricks-hms-function-ddls";
+    }
+
+    @Override
+    protected Void doRun(TaskRunContext context, @Nonnull ByteSink sink, @Nonnull Handle handle)
+        throws Exception {
+      DatabricksHandle dbxHandle = (DatabricksHandle) handle;
+      try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
+          CSVPrinter csv = FORMAT.withHeader(FunctionDdlsHeader.class).print(writer)) {
+        for (ParsedFunctionExtended function : sessionCache.listParsedFunctions(dbxHandle)) {
+          if (!function.ddl.isEmpty()) {
             csv.printRecord(
-                fn.functionCatalog, fn.functionSchema, fn.functionName, "FUNCTION", fn.ddl);
+                function.functionCatalog,
+                function.functionSchema,
+                function.functionName,
+                function.ddl);
           }
         }
       }

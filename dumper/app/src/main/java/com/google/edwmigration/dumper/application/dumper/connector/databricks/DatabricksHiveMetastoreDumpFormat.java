@@ -29,6 +29,7 @@ interface DatabricksHiveMetastoreDumpFormat {
   String TABLE_CONSTRAINTS_ENTRY_NAME = "table_constraints.csv";
   String FUNCTIONS_ENTRY_NAME = "functions.csv";
   String DDLS_ENTRY_NAME = "ddls.csv";
+  String FUNCTION_DDLS_ENTRY_NAME = "function_ddls.csv";
 
   enum CatalogsHeader {
     CatalogName,
@@ -105,6 +106,13 @@ interface DatabricksHiveMetastoreDumpFormat {
     TableSchema,
     TableName,
     TableType,
+    Ddl
+  }
+
+  enum FunctionDdlsHeader {
+    FunctionCatalog,
+    FunctionSchema,
+    FunctionName,
     Ddl
   }
 }

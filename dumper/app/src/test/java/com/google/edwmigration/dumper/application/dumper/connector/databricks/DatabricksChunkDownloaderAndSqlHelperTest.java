@@ -26,7 +26,6 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -191,7 +190,7 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
   }
 
   @Test
-  public void sqlHelper_failedStatement_throwsDatabricksSqlExceptionWithPermissionDetection() {
+  public void sqlHelper_failedStatement_throwsDatabricksSqlExceptionWithSqlState() {
     WorkspaceClient client = mock(WorkspaceClient.class);
     StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
     when(client.statementExecution()).thenReturn(stmtApi);
@@ -217,8 +216,8 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
         assertThrows(
             DatabricksSqlException.class,
             () -> helper.executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SELECT * FROM secret"));
-    assertTrue(ex.isPermissionDenied());
     assertEquals("42501", ex.sqlState());
+    assertEquals(ServiceErrorCode.BAD_REQUEST.name(), ex.errorCode());
   }
 
   @Test

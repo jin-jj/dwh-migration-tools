@@ -17,7 +17,6 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import java.io.IOException;
-import java.util.Locale;
 import javax.annotation.CheckForNull;
 
 /** Exception thrown when a Databricks SQL Statement Execution fails. */
@@ -47,29 +46,5 @@ final class DatabricksSqlException extends IOException {
   @CheckForNull
   String errorCode() {
     return errorCode;
-  }
-
-  boolean isPermissionDenied() {
-    if ("42501".equals(sqlState)) {
-      return true;
-    }
-    if (errorCode != null) {
-      String upperCode = errorCode.toUpperCase(Locale.ROOT);
-      if (upperCode.contains("PERMISSION_DENIED")
-          || upperCode.contains("INSUFFICIENT_PERMISSIONS")) {
-        return true;
-      }
-    }
-    String msg = getMessage();
-    if (msg != null) {
-      String upperMsg = msg.toUpperCase(Locale.ROOT);
-      if (upperMsg.contains("SQLSTATE: 42501")
-          || upperMsg.contains("INSUFFICIENT_PERMISSIONS")
-          || upperMsg.contains("PERMISSION_DENIED")
-          || upperMsg.contains("INSUFFICIENT PRIVILEGES")) {
-        return true;
-      }
-    }
-    return false;
   }
 }
