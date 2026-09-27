@@ -142,6 +142,29 @@ public class DatabricksHiveMetastoreTasksTest {
   }
 
   @Test
+  public void ddlsTask_dropsTrailingLineBreak() throws Exception {
+    String ddl = "CREATE TABLE hive_metastore.legacy.delta_tbl (\n  id INT)\nUSING delta";
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTablesResponse("delta_tbl"),
+                "SHOW CREATE TABLE `legacy`.`delta_tbl`",
+                succeeded(ddl + "\n")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) -> new DatabricksHiveMetastoreDdlsTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals(ddl, records.get(0).get(DdlsHeader.Ddl));
+  }
+
+  @Test
   public void functionDdlsTask_skipsFunctionWhoseDescribeFails() throws Exception {
     ImmutableList<String> describeLines =
         ImmutableList.of(

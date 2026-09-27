@@ -16,6 +16,7 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.common.base.CharMatcher.whitespace;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteStringLiteral;
 
@@ -23,6 +24,9 @@ import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,8 +43,42 @@ import javax.annotation.Nonnull;
  */
 final class DatabricksHiveMetastoreParser {
 
-  private static final Pattern TOP_LEVEL_SCHEMA_FIELD_PATTERN =
-      Pattern.compile("^\\s\\|--\\s+([^:]+):\\s+(.+?)\\s*\\(nullable\\s*=\\s*(true|false)\\)\\s*$");
+  /** The prefix of every field line in a {@code Schema} tree. */
+  private static final String SCHEMA_TREE_LINE_PREFIX = " |";
+
+  /** The indentation that each nesting level adds to a field line in a {@code Schema} tree. */
+  private static final String SCHEMA_TREE_INDENT = "    |";
+
+  /** The marker between the indentation and the field in a {@code Schema} tree line. */
+  private static final String SCHEMA_TREE_FIELD_MARKER = "-- ";
+
+  /** The separator between the name and the type of a field in a {@code Schema} tree line. */
+  private static final String SCHEMA_TREE_TYPE_SEPARATOR = ": ";
+
+  /**
+   * Matches the nullability that ends a {@code Schema} tree line, such as {@code (nullable =
+   * true)}.
+   */
+  private static final Pattern SCHEMA_TREE_NULLABILITY_PATTERN =
+      Pattern.compile(" \\((?:nullable|containsNull|valueContainsNull) = (true|false)\\)$");
+
+  private static final String STRUCT_TYPE_NAME = "struct";
+
+  /**
+   * The Spark type names of the types whose element, key, value or field types are nested lines.
+   */
+  private static final ImmutableSet<String> NESTED_TYPE_NAMES =
+      ImmutableSet.of("array", "map", STRUCT_TYPE_NAME);
+
+  /**
+   * The Spark type names that differ in Hive type syntax, such as {@code long} for {@code bigint}.
+   */
+  private static final ImmutableMap<String, String> HIVE_TYPE_NAMES =
+      ImmutableMap.of("byte", "tinyint", "short", "smallint", "integer", "int", "long", "bigint");
+
+  /** The format of {@code java.util.Date#toString}, which Spark uses for {@code Created Time}. */
+  private static final DateTimeFormatter CREATED_TIME_FORMATTER =
+      DateTimeFormatter.ofPattern("EEE MMM dd HH:mm:ss zzz yyyy", Locale.US);
 
   /**
    * Matches {@code Key: value}. {@code DOTALL} lets the value span lines, because {@code DESCRIBE
@@ -99,6 +137,21 @@ final class DatabricksHiveMetastoreParser {
       this.constraintName = constraintName;
       this.constraintType = constraintType;
       this.constraintDetails = constraintDetails;
+    }
+  }
+
+  /** A field line of a {@code Schema} tree, such as {@code |-- id: integer (nullable = true)}. */
+  private static final class SchemaTreeLine {
+    final int depth;
+    final String name;
+    final String typeName;
+    final boolean nullable;
+
+    SchemaTreeLine(int depth, String name, String typeName, boolean nullable) {
+      this.depth = depth;
+      this.name = name;
+      this.typeName = typeName;
+      this.nullable = nullable;
     }
   }
 
@@ -271,7 +324,7 @@ final class DatabricksHiveMetastoreParser {
         values.getOrDefault("Location", ""),
         values.getOrDefault("Comment", ""),
         values.getOrDefault("Owner", ""),
-        values.getOrDefault("Created Time", ""),
+        formatCreatedTime(values.getOrDefault("Created Time", "")),
         "",
         values.getOrDefault("Serde Library", ""),
         values.getOrDefault("InputFormat", ""),
@@ -401,8 +454,23 @@ final class DatabricksHiveMetastoreParser {
   }
 
   /**
-   * Parses the top-level fields of a {@code Schema} tree, such as {@code id} in {@code |-- id:
-   * integer (nullable = true)}.
+   * Returns a {@code Created Time} value, such as {@code Sun Sep 27 21:19:25 UTC 2026}, as an ISO
+   * 8601 instant, such as {@code 2026-09-27T21:19:25Z}, or unchanged if it has another format.
+   */
+  @Nonnull
+  private static String formatCreatedTime(@Nonnull String createdTime) {
+    try {
+      return ZonedDateTime.parse(createdTime, CREATED_TIME_FORMATTER).toInstant().toString();
+    } catch (DateTimeParseException e) {
+      // The value is kept as Databricks printed it, so no information is lost.
+      return createdTime;
+    }
+  }
+
+  /**
+   * Parses the columns of a {@code Schema} tree. Each type is written in Hive type syntax, such as
+   * {@code bigint} for a {@code long} line and {@code array<struct<x:bigint>>} for an {@code array}
+   * line and its nested lines.
    */
   @Nonnull
   private static ImmutableList<ParsedColumn> parseSchemaColumns(
@@ -412,27 +480,107 @@ final class DatabricksHiveMetastoreParser {
       partitionIndexByLowerCol.put(partitionCols.get(idx).toLowerCase(Locale.ROOT), idx);
     }
 
-    ImmutableList.Builder<ParsedColumn> columns = ImmutableList.builder();
-    int ordinal = 0;
-    for (String schemaLine : schemaTree.split("\n")) {
-      Matcher colMatcher = TOP_LEVEL_SCHEMA_FIELD_PATTERN.matcher(schemaLine);
-      if (colMatcher.matches()) {
-        String colName = colMatcher.group(1).trim();
-        String colType = colMatcher.group(2).trim();
-        boolean nullable = Boolean.parseBoolean(colMatcher.group(3));
-        Integer pIdx = partitionIndexByLowerCol.get(colName.toLowerCase(Locale.ROOT));
-        columns.add(
-            new ParsedColumn(
-                ordinal,
-                colName,
-                colType,
-                nullable ? "YES" : "NO",
-                "",
-                pIdx != null ? String.valueOf(pIdx) : ""));
-        ordinal++;
+    ImmutableList.Builder<SchemaTreeLine> treeLinesBuilder = ImmutableList.builder();
+    for (String line : schemaTree.split("\n")) {
+      SchemaTreeLine treeLine = parseSchemaTreeLine(line);
+      if (treeLine != null) {
+        treeLinesBuilder.add(treeLine);
       }
     }
+    ImmutableList<SchemaTreeLine> treeLines = treeLinesBuilder.build();
+
+    ImmutableList.Builder<ParsedColumn> columns = ImmutableList.builder();
+    int ordinal = 0;
+    int index = 0;
+    while (index < treeLines.size()) {
+      SchemaTreeLine field = treeLines.get(index);
+      if (field.depth > 0) {
+        index++;
+        continue;
+      }
+
+      StringBuilder dataType = new StringBuilder();
+      index = appendHiveType(treeLines, index, dataType);
+      Integer pIdx = partitionIndexByLowerCol.get(field.name.toLowerCase(Locale.ROOT));
+      columns.add(
+          new ParsedColumn(
+              ordinal,
+              field.name,
+              dataType.toString(),
+              field.nullable ? "YES" : "NO",
+              "",
+              pIdx != null ? String.valueOf(pIdx) : ""));
+      ordinal++;
+    }
     return columns.build();
+  }
+
+  /**
+   * Parses a field line of a {@code Schema} tree, or returns null for another line. The name is the
+   * text before the last colon and space, because a name may contain a colon and a space and a type
+   * name doesn't.
+   */
+  @CheckForNull
+  private static SchemaTreeLine parseSchemaTreeLine(@Nonnull String line) {
+    if (!line.startsWith(SCHEMA_TREE_LINE_PREFIX)) {
+      return null;
+    }
+
+    int offset = SCHEMA_TREE_LINE_PREFIX.length();
+    int depth = 0;
+    while (line.startsWith(SCHEMA_TREE_INDENT, offset)) {
+      offset += SCHEMA_TREE_INDENT.length();
+      depth++;
+    }
+    if (!line.startsWith(SCHEMA_TREE_FIELD_MARKER, offset)) {
+      return null;
+    }
+
+    String field =
+        whitespace().trimTrailingFrom(line.substring(offset + SCHEMA_TREE_FIELD_MARKER.length()));
+    boolean nullable = true;
+    Matcher nullability = SCHEMA_TREE_NULLABILITY_PATTERN.matcher(field);
+    if (nullability.find()) {
+      nullable = Boolean.parseBoolean(nullability.group(1));
+      field = field.substring(0, nullability.start());
+    }
+    int separator = field.lastIndexOf(SCHEMA_TREE_TYPE_SEPARATOR);
+    if (separator < 0) {
+      return null;
+    }
+
+    return new SchemaTreeLine(
+        depth,
+        field.substring(0, separator),
+        field.substring(separator + SCHEMA_TREE_TYPE_SEPARATOR.length()),
+        nullable);
+  }
+
+  /**
+   * Appends the Hive type of the field at {@code index}, including the types of its nested lines,
+   * and returns the index of the first line after them.
+   */
+  private static int appendHiveType(
+      @Nonnull List<SchemaTreeLine> treeLines, int index, @Nonnull StringBuilder dataType) {
+    SchemaTreeLine field = treeLines.get(index);
+    if (!NESTED_TYPE_NAMES.contains(field.typeName)) {
+      dataType.append(HIVE_TYPE_NAMES.getOrDefault(field.typeName, field.typeName));
+      return index + 1;
+    }
+
+    dataType.append(field.typeName).append('<');
+    int next = index + 1;
+    while (next < treeLines.size() && treeLines.get(next).depth > field.depth) {
+      if (next > index + 1) {
+        dataType.append(',');
+      }
+      if (STRUCT_TYPE_NAME.equals(field.typeName)) {
+        dataType.append(treeLines.get(next).name).append(':');
+      }
+      next = appendHiveType(treeLines, next, dataType);
+    }
+    dataType.append('>');
+    return next;
   }
 
   private static void parseDeltaCheckConstraintsFromProperties(

@@ -18,8 +18,12 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
 
+import com.google.common.collect.ImmutableList;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedColumn;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedFunctionExtended;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedTableExtended;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.Arrays;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -251,6 +255,95 @@ public class DatabricksHiveMetastoreParserTest {
     assertEquals(DELTA_TABLE_PROPERTIES, parsed.tableProperties);
     assertEquals(DELTA_LOCATION, parsed.storageLocation);
     assertEquals(1, parsed.columns.size());
+  }
+
+  @Test
+  public void parseShowTableExtended_writesColumnTypesInHiveSyntax() {
+    String blob =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy_db",
+            "Table: typed",
+            "Type: MANAGED",
+            "Provider: delta",
+            "Schema: root",
+            " |-- a:b: short (nullable = false)",
+            " |-- t: byte (nullable = true)",
+            " |-- amount: decimal(10,2) (nullable = true)",
+            " |-- ts: timestamp_ntz (nullable = true)",
+            " |-- arr: array (nullable = true)",
+            " |    |-- element: struct (containsNull = true)",
+            " |    |    |-- x: long (nullable = true)",
+            " |    |    |-- y: array (nullable = true)",
+            " |    |    |    |-- element: string (containsNull = true)",
+            " |-- m: map (nullable = true)",
+            " |    |-- key: string",
+            " |    |-- value: map (valueContainsNull = true)",
+            " |    |    |-- key: integer",
+            " |    |    |-- value: timestamp (valueContainsNull = true)",
+            " |-- st: struct (nullable = true)",
+            " |    |-- inner: struct (nullable = true)",
+            " |    |    |-- z: double (nullable = true)",
+            " |    |-- k: v: integer (nullable = true)",
+            "",
+            "");
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended("legacy_db", "typed", blob);
+
+    ImmutableList.Builder<String> columns = ImmutableList.builder();
+    for (ParsedColumn column : parsed.columns) {
+      columns.add(
+          String.join(
+              "|",
+              String.valueOf(column.ordinalPosition),
+              column.columnName,
+              column.dataType,
+              column.isNullable));
+    }
+    assertEquals(
+        ImmutableList.of(
+            "0|a:b|smallint|NO",
+            "1|t|tinyint|YES",
+            "2|amount|decimal(10,2)|YES",
+            "3|ts|timestamp_ntz|YES",
+            "4|arr|array<struct<x:bigint,y:array<string>>>|YES",
+            "5|m|map<string,map<int,timestamp>>|YES",
+            "6|st|struct<inner:struct<z:double>,k: v:int>|YES"),
+        columns.build());
+  }
+
+  @Test
+  public void parseShowTableExtended_writesCreatedTimeAsInstant() {
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended(
+            "legacy_db", "events", deltaTableBlob("created", DELTA_TABLE_PROPERTIES));
+
+    assertEquals(
+        ZonedDateTime.of(2026, 9, 27, 21, 19, 25, 0, ZoneOffset.UTC).toInstant().toString(),
+        parsed.createdAt);
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsCreatedTimeInOtherFormat() {
+    String createdTime = "2026-09-27 21:19:25";
+    String blob =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy_db",
+            "Table: events",
+            "Created Time: " + createdTime,
+            "Type: MANAGED",
+            "Schema: root",
+            " |-- id: integer (nullable = true)",
+            "");
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended("legacy_db", "events", blob);
+
+    assertEquals(createdTime, parsed.createdAt);
   }
 
   @Test

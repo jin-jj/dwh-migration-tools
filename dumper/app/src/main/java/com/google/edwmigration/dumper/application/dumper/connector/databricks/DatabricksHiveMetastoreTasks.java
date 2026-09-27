@@ -16,6 +16,7 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.common.base.CharMatcher.whitespace;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cell;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
@@ -642,6 +643,7 @@ final class DatabricksHiveMetastoreTasks {
       return null;
     }
 
+    /** Returns the DDL without the line break that Databricks appends to it. */
     @Nonnull
     private static String showCreateTable(
         @Nonnull DatabricksHandle handle, @Nonnull ParsedTableExtended table) throws IOException {
@@ -659,7 +661,7 @@ final class DatabricksHiveMetastoreTasks {
           }
         }
       }
-      return ddl.toString();
+      return whitespace().trimTrailingFrom(ddl);
     }
   }
 

@@ -51,6 +51,9 @@ interface DatabricksHiveMetastoreDumpFormat {
   /**
    * Columns of {@code tables.csv}.
    *
+   * <p>{@code CreatedAt} is an ISO 8601 instant, such as {@code 2026-09-27T21:19:25Z}. {@code
+   * UpdatedAt} is empty, because {@code SHOW TABLE EXTENDED} has no update time.
+   *
    * <p>The last five columns are copied verbatim from {@code SHOW TABLE EXTENDED}, with properties
    * in the {@code [key=value, ...]} form. The SerDe and formats describe the storage only for Hive
    * compatible tables; for other tables, such as Delta tables, the metastore records placeholders
@@ -74,6 +77,14 @@ interface DatabricksHiveMetastoreDumpFormat {
     TableProperties
   }
 
+  /**
+   * Columns of {@code columns.csv}.
+   *
+   * <p>{@code DataType} is written in Hive type syntax, such as {@code bigint} or {@code
+   * array<struct<x:bigint,y:string>>}. {@code SHOW TABLE EXTENDED} reports {@code CHAR} and {@code
+   * VARCHAR} columns as {@code string} and has no column comments, so the lengths and the comments
+   * are only in {@code ddls.csv}.
+   */
   enum ColumnsHeader {
     TableCatalog,
     TableSchema,
