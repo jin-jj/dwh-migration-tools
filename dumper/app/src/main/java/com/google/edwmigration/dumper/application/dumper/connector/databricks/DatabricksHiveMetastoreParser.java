@@ -21,6 +21,7 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -199,150 +200,239 @@ final class DatabricksHiveMetastoreParser {
 
   private static final String DELTA_CONSTRAINTS_PREFIX = "delta.constraints.";
 
+  /**
+   * The keys of Spark's {@code CatalogTable.toLinkedHashMap}, in the order that {@code SHOW TABLE
+   * EXTENDED} prints them. The metric view key {@code Language} is left out, because {@code
+   * hive_metastore} has no metric views and a comment line such as {@code Language: English} would
+   * otherwise end a comment. {@code Table Constraints} is not a Spark key, so its position is a
+   * guess.
+   */
+  private static final ImmutableList<String> TABLE_KEYS_IN_ORDER =
+      ImmutableList.of(
+          "Catalog",
+          "Database",
+          "Table",
+          "Owner",
+          "Created Time",
+          "Last Access",
+          "Created By",
+          "Type",
+          "Provider",
+          "Num Buckets",
+          "Bucket Columns",
+          "Sort Columns",
+          "Comment",
+          "Collation",
+          "View Text",
+          "View Original Text",
+          "View Schema Mode",
+          "View Catalog and Namespace",
+          "SQL Path",
+          "View Query Output Columns",
+          "Table Properties",
+          "Statistics",
+          "Location",
+          "Serde Name",
+          "Serde Library",
+          "InputFormat",
+          "OutputFormat",
+          "Compressed",
+          "Storage Properties",
+          "Partition Provider",
+          "Partition Columns",
+          "Table Constraints",
+          "Schema");
+
+  /** The keys whose values Spark prints verbatim, so that a value may span lines. */
+  private static final ImmutableSet<String> MULTI_LINE_TABLE_KEYS =
+      ImmutableSet.of(
+          "Comment", "View Text", "View Original Text", "Table Properties", "Storage Properties");
+
   @Nonnull
   static ParsedTableExtended parseShowTableExtended(
       @Nonnull String defaultSchema,
       @Nonnull String defaultTable,
       @CheckForNull String informationBlob) {
-    String catalog = DatabricksFilter.HIVE_METASTORE_CATALOG;
-    String schema = defaultSchema;
-    String table = defaultTable;
-    String type = "";
-    String provider = "";
-    String location = "";
-    String comment = "";
-    String owner = "";
-    String createdTime = "";
-    String serdeLibrary = "";
-    String inputFormat = "";
-    String outputFormat = "";
-    String storageProperties = "";
-    String tableProperties = "";
-    String viewText = null;
-    List<String> partitionCols = new ArrayList<>();
-    List<ParsedColumn> rawCols = new ArrayList<>();
+    ImmutableMap<String, String> values =
+        splitTableInformation(Strings.nullToEmpty(informationBlob));
+    String tableProperties = values.getOrDefault("Table Properties", "");
     List<ParsedTableConstraint> constraints = new ArrayList<>();
+    parseDeltaCheckConstraintsFromProperties(tableProperties, constraints);
+    parseTableConstraintsList(values.getOrDefault("Table Constraints", ""), constraints);
+    List<String> partitionCols =
+        parsePartitionColumnsList(values.getOrDefault("Partition Columns", ""));
 
-    if (informationBlob != null && !informationBlob.isEmpty()) {
-      String[] lines = informationBlob.split("\r?\n");
-      int i = 0;
-      while (i < lines.length) {
-        String line = lines[i];
-        if (line.trim().equals("Schema: root")) {
-          i++;
-          int ordinal = 0;
-          while (i < lines.length) {
-            String schemaLine = lines[i];
-            if (!schemaLine.startsWith(" ")) {
-              break;
-            }
-            Matcher colMatcher = TOP_LEVEL_SCHEMA_FIELD_PATTERN.matcher(schemaLine);
-            if (colMatcher.matches()) {
-              String colName = colMatcher.group(1).trim();
-              String colType = colMatcher.group(2).trim();
-              boolean nullable = Boolean.parseBoolean(colMatcher.group(3));
-              rawCols.add(
-                  new ParsedColumn(ordinal, colName, colType, nullable ? "YES" : "NO", "", ""));
-              ordinal++;
-            }
-            i++;
-          }
-          continue;
-        }
+    return new ParsedTableExtended(
+        valueOrDefault(values, "Catalog", DatabricksFilter.HIVE_METASTORE_CATALOG),
+        valueOrDefault(values, "Database", defaultSchema),
+        valueOrDefault(values, "Table", defaultTable),
+        values.getOrDefault("Type", ""),
+        values.getOrDefault("Provider", "").toUpperCase(Locale.ROOT),
+        values.getOrDefault("Location", ""),
+        values.getOrDefault("Comment", ""),
+        values.getOrDefault("Owner", ""),
+        values.getOrDefault("Created Time", ""),
+        "",
+        values.getOrDefault("Serde Library", ""),
+        values.getOrDefault("InputFormat", ""),
+        values.getOrDefault("OutputFormat", ""),
+        values.getOrDefault("Storage Properties", ""),
+        tableProperties,
+        values.get("View Text"),
+        parseSchemaColumns(values.getOrDefault("Schema", ""), partitionCols),
+        ImmutableList.copyOf(constraints));
+  }
 
-        Matcher kv = KEY_VALUE_LINE_PATTERN.matcher(line);
-        if (kv.matches()) {
-          String key = kv.group(1).trim();
-          String val = kv.group(2) != null ? kv.group(2).trim() : "";
-          if ("Catalog".equalsIgnoreCase(key) && !val.isEmpty()) {
-            catalog = val;
-          } else if (("Database".equalsIgnoreCase(key) || "Namespace".equalsIgnoreCase(key))
-              && !val.isEmpty()) {
-            schema = val;
-          } else if ("Table".equalsIgnoreCase(key) && !val.isEmpty()) {
-            table = val;
-          } else if ("Type".equalsIgnoreCase(key)) {
-            type = val;
-          } else if ("Provider".equalsIgnoreCase(key)) {
-            provider = val.toUpperCase(Locale.ROOT);
-          } else if ("Location".equalsIgnoreCase(key)) {
-            location = val;
-          } else if ("Comment".equalsIgnoreCase(key)) {
-            comment = val;
-          } else if ("Owner".equalsIgnoreCase(key)) {
-            owner = val;
-          } else if ("Created Time".equalsIgnoreCase(key)) {
-            createdTime = val;
-          } else if ("Partition Columns".equalsIgnoreCase(key)) {
-            partitionCols = parsePartitionColumnsList(val);
-          } else if ("Serde Library".equalsIgnoreCase(key)) {
-            serdeLibrary = val;
-          } else if ("InputFormat".equalsIgnoreCase(key)) {
-            inputFormat = val;
-          } else if ("OutputFormat".equalsIgnoreCase(key)) {
-            outputFormat = val;
-          } else if ("Storage Properties".equalsIgnoreCase(key)) {
-            storageProperties = val;
-          } else if ("Table Properties".equalsIgnoreCase(key)) {
-            tableProperties = val;
-            parseDeltaCheckConstraintsFromProperties(val, constraints);
-          } else if ("Table Constraints".equalsIgnoreCase(key)) {
-            parseTableConstraintsList(val, constraints);
-          } else if ("View Text".equalsIgnoreCase(key)) {
-            StringBuilder viewSb = new StringBuilder(val);
-            while (i + 1 < lines.length) {
-              String nextLine = lines[i + 1];
-              if (nextLine.trim().equals("Schema: root")
-                  || KEY_VALUE_LINE_PATTERN.matcher(nextLine).matches()) {
-                break;
-              }
-              viewSb.append("\n").append(nextLine);
-              i++;
-            }
-            viewText = viewSb.toString();
-          }
-        }
-        i++;
+  /**
+   * Splits a {@code SHOW TABLE EXTENDED} information blob into values by key.
+   *
+   * <p>Spark prints one {@code Key: value} line per key, in {@link #TABLE_KEYS_IN_ORDER} order, and
+   * prints the values of {@link #MULTI_LINE_TABLE_KEYS} verbatim, so a line of such a value may
+   * look like a key line, as the comment line {@code Owner: data team} does. The key lines are
+   * therefore the most lines that start with keys in that order. Of equally many, the key line
+   * after a multi-line value is the latest candidate, because text that imitates a key line
+   * precedes the real one, and the key line after any other value is the earliest candidate,
+   * because Spark prints it right after that value.
+   */
+  @Nonnull
+  private static ImmutableMap<String, String> splitTableInformation(
+      @Nonnull String informationBlob) {
+    String[] lines = informationBlob.split("\n");
+    int[] keyIndexes = new int[lines.length];
+    int keyLineCount = 0;
+    for (int lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      keyIndexes[lineIndex] = findTableKeyIndex(lines[lineIndex]);
+      if (keyIndexes[lineIndex] >= 0) {
+        keyLineCount++;
       }
     }
 
+    // skippedCounts[p][state] is the fewest key lines to skip from the p-th key line on, where
+    // state is 0 before the first key and otherwise one more than the index of the last key.
+    int keyCount = TABLE_KEYS_IN_ORDER.size();
+    int[][] skippedCounts = new int[keyLineCount + 1][keyCount + 1];
+    int keyLinePosition = keyLineCount;
+    for (int lineIndex = lines.length - 1; lineIndex >= 0; lineIndex--) {
+      int keyIndex = keyIndexes[lineIndex];
+      if (keyIndex < 0) {
+        continue;
+      }
+
+      keyLinePosition--;
+      for (int state = 0; state <= keyCount; state++) {
+        int skippedIfNotStarted = skippedCounts[keyLinePosition + 1][state] + 1;
+        skippedCounts[keyLinePosition][state] =
+            keyIndex >= state
+                ? Math.min(skippedCounts[keyLinePosition + 1][keyIndex + 1], skippedIfNotStarted)
+                : skippedIfNotStarted;
+      }
+    }
+
+    ImmutableMap.Builder<String, String> values = ImmutableMap.builder();
+    String key = null;
+    StringBuilder value = new StringBuilder();
+    int state = 0;
+    int keyLinesSeen = 0;
+    for (int lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      int keyIndex = keyIndexes[lineIndex];
+      boolean startsKey = false;
+      if (keyIndex >= 0) {
+        keyLinesSeen++;
+        if (keyIndex >= state) {
+          int skippedIfStarted = skippedCounts[keyLinesSeen][keyIndex + 1];
+          int skippedIfNotStarted = skippedCounts[keyLinesSeen][state] + 1;
+          startsKey =
+              skippedIfStarted < skippedIfNotStarted
+                  || (skippedIfStarted == skippedIfNotStarted
+                      && !MULTI_LINE_TABLE_KEYS.contains(key));
+        }
+      }
+
+      if (startsKey) {
+        if (key != null) {
+          values.put(key, finishTableValue(key, value));
+        }
+        key = TABLE_KEYS_IN_ORDER.get(keyIndex);
+        value.setLength(0);
+        value.append(parseKeyLineValue(lines[lineIndex], key));
+        state = keyIndex + 1;
+      } else if (MULTI_LINE_TABLE_KEYS.contains(key) || "Schema".equals(key)) {
+        value.append('\n').append(lines[lineIndex]);
+      }
+    }
+    if (key != null) {
+      values.put(key, finishTableValue(key, value));
+    }
+    return values.build();
+  }
+
+  /**
+   * Returns the index in {@link #TABLE_KEYS_IN_ORDER} of the key that starts the line, as in {@code
+   * Key: value} or, for an empty value, {@code Key}, or -1 if no key starts the line.
+   */
+  private static int findTableKeyIndex(@Nonnull String line) {
+    for (int keyIndex = 0; keyIndex < TABLE_KEYS_IN_ORDER.size(); keyIndex++) {
+      String key = TABLE_KEYS_IN_ORDER.get(keyIndex);
+      if (line.startsWith(key)
+          && (line.length() == key.length() || line.charAt(key.length()) == ':')) {
+        return keyIndex;
+      }
+    }
+    return -1;
+  }
+
+  /** Returns the value in a line that starts with the key, such as {@code v} in {@code Key: v}. */
+  @Nonnull
+  private static String parseKeyLineValue(@Nonnull String line, @Nonnull String key) {
+    String value = line.substring(Math.min(line.length(), key.length() + 1));
+    return value.startsWith(" ") ? value.substring(1) : value;
+  }
+
+  @Nonnull
+  private static String finishTableValue(@Nonnull String key, @Nonnull StringBuilder value) {
+    return MULTI_LINE_TABLE_KEYS.contains(key) ? value.toString() : value.toString().trim();
+  }
+
+  @Nonnull
+  private static String valueOrDefault(
+      @Nonnull Map<String, String> values, @Nonnull String key, @Nonnull String defaultValue) {
+    String value = values.get(key);
+    return Strings.isNullOrEmpty(value) ? defaultValue : value;
+  }
+
+  /**
+   * Parses the top-level fields of a {@code Schema} tree, such as {@code id} in {@code |-- id:
+   * integer (nullable = true)}.
+   */
+  @Nonnull
+  private static ImmutableList<ParsedColumn> parseSchemaColumns(
+      @Nonnull String schemaTree, @Nonnull List<String> partitionCols) {
     Map<String, Integer> partitionIndexByLowerCol = new LinkedHashMap<>();
     for (int idx = 0; idx < partitionCols.size(); idx++) {
       partitionIndexByLowerCol.put(partitionCols.get(idx).toLowerCase(Locale.ROOT), idx);
     }
 
-    ImmutableList.Builder<ParsedColumn> finalCols = ImmutableList.builder();
-    for (ParsedColumn col : rawCols) {
-      Integer pIdx = partitionIndexByLowerCol.get(col.columnName.toLowerCase(Locale.ROOT));
-      finalCols.add(
-          new ParsedColumn(
-              col.ordinalPosition,
-              col.columnName,
-              col.dataType,
-              col.isNullable,
-              col.comment,
-              pIdx != null ? String.valueOf(pIdx) : ""));
+    ImmutableList.Builder<ParsedColumn> columns = ImmutableList.builder();
+    int ordinal = 0;
+    for (String schemaLine : schemaTree.split("\n")) {
+      Matcher colMatcher = TOP_LEVEL_SCHEMA_FIELD_PATTERN.matcher(schemaLine);
+      if (colMatcher.matches()) {
+        String colName = colMatcher.group(1).trim();
+        String colType = colMatcher.group(2).trim();
+        boolean nullable = Boolean.parseBoolean(colMatcher.group(3));
+        Integer pIdx = partitionIndexByLowerCol.get(colName.toLowerCase(Locale.ROOT));
+        columns.add(
+            new ParsedColumn(
+                ordinal,
+                colName,
+                colType,
+                nullable ? "YES" : "NO",
+                "",
+                pIdx != null ? String.valueOf(pIdx) : ""));
+        ordinal++;
+      }
     }
-
-    return new ParsedTableExtended(
-        catalog,
-        schema,
-        table,
-        type,
-        provider,
-        location,
-        comment,
-        owner,
-        createdTime,
-        "",
-        serdeLibrary,
-        inputFormat,
-        outputFormat,
-        storageProperties,
-        tableProperties,
-        viewText,
-        finalCols.build(),
-        ImmutableList.copyOf(constraints));
+    return columns.build();
   }
 
   private static void parseDeltaCheckConstraintsFromProperties(

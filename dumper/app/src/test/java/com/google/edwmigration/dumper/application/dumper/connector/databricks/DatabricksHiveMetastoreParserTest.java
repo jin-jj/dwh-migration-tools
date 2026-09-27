@@ -28,6 +28,15 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class DatabricksHiveMetastoreParserTest {
 
+  private static final String OWNER = "data_eng";
+  private static final String DELTA_LOCATION = "dbfs:/user/hive/warehouse/legacy_db.db/events";
+  private static final String DELTA_TABLE_PROPERTIES =
+      "[delta.checkpoint.writeStatsAsJson=false, delta.checkpoint.writeStatsAsStruct=true,"
+          + " delta.enableDeletionVectors=true]";
+  private static final String VIEW_TEXT =
+      "SELECT id\nFROM legacy_db.events\nWHERE name:a IS NOT NULL";
+  private static final String VIEW_TABLE_PROPERTIES = "[transient_lastDdlTime=1790543963]";
+
   @Test
   public void parseShowTableExtended_parsesAttributesColumnsAndConstraints() {
     String tableProperties =
@@ -120,6 +129,128 @@ public class DatabricksHiveMetastoreParserTest {
     assertEquals(tableProperties, parsed.tableProperties);
     assertEquals(2, parsed.columns.size());
     assertEquals(0, parsed.constraints.size());
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsMultiLineViewText() {
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended(
+            "legacy_db", "active_ids", viewBlob("view line one", VIEW_TEXT));
+
+    assertEquals(VIEW_TEXT, parsed.viewDefinition);
+    assertEquals("VIEW", parsed.tableType);
+    assertEquals(VIEW_TABLE_PROPERTIES, parsed.tableProperties);
+    assertEquals(1, parsed.columns.size());
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsViewCommentLinesThatLookLikeKeys() {
+    for (String comment :
+        Arrays.asList("view line one\nOwner: not the owner", "Sales view\nLocation: building 5")) {
+      ParsedTableExtended parsed =
+          DatabricksHiveMetastoreParser.parseShowTableExtended(
+              "legacy_db", "active_ids", viewBlob(comment, VIEW_TEXT));
+
+      assertEquals(comment, parsed.comment);
+      assertEquals(comment, OWNER, parsed.owner);
+      assertEquals(comment, "", parsed.storageLocation);
+      assertEquals(comment, VIEW_TEXT, parsed.viewDefinition);
+    }
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsTableCommentLinesThatLookLikeKeys() {
+    for (String comment :
+        Arrays.asList(
+            "first line\nType: VIEW\nLocation: fake\nlast line",
+            "Nightly load\nStatistics: refreshed daily",
+            "first line\nTable Properties: [fake=1]",
+            "first line\nComment: second line")) {
+      ParsedTableExtended parsed =
+          DatabricksHiveMetastoreParser.parseShowTableExtended(
+              "legacy_db", "events", deltaTableBlob(comment, DELTA_TABLE_PROPERTIES));
+
+      assertEquals(comment, parsed.comment);
+      assertEquals(comment, "MANAGED", parsed.tableType);
+      assertEquals(comment, DELTA_TABLE_PROPERTIES, parsed.tableProperties);
+      assertEquals(comment, DELTA_LOCATION, parsed.storageLocation);
+    }
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsCommentWhitespace() {
+    String comment = "  indented\ntrailing newline\n";
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended(
+            "legacy_db", "events", deltaTableBlob(comment, DELTA_TABLE_PROPERTIES));
+
+    assertEquals(comment, parsed.comment);
+    assertEquals(DELTA_TABLE_PROPERTIES, parsed.tableProperties);
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsMultiLineCheckConstraint() {
+    String checkConstraint = "a > 0\nAND b > 0";
+    String tableProperties =
+        "[delta.checkpoint.writeStatsAsJson=false, delta.constraints.positive="
+            + checkConstraint
+            + ", delta.enableDeletionVectors=true]";
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended(
+            "legacy_db", "events", deltaTableBlob("checked", tableProperties));
+
+    assertEquals(tableProperties, parsed.tableProperties);
+    assertEquals(DELTA_LOCATION, parsed.storageLocation);
+    assertEquals(1, parsed.constraints.size());
+    assertEquals(checkConstraint, parsed.constraints.get(0).constraintDetails);
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsMultiLineStorageProperties() {
+    String storageProperties = "[line.delim=\n, field.delim=,, serialization.format=,]";
+    String blob =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy_db",
+            "Table: csv_events",
+            "Type: EXTERNAL",
+            "Provider: hive",
+            "Table Properties: [transient_lastDdlTime=1790544831]",
+            "Location: dbfs:/mnt/legacy/csv_events",
+            "Serde Library: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+            "InputFormat: org.apache.hadoop.mapred.TextInputFormat",
+            "OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+            "Storage Properties: " + storageProperties,
+            "Partition Provider: Catalog",
+            "Schema: root",
+            " |-- id: integer (nullable = true)",
+            " |-- name: string (nullable = true)",
+            "",
+            "");
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended("legacy_db", "csv_events", blob);
+
+    assertEquals(storageProperties, parsed.storageProperties);
+    assertEquals(2, parsed.columns.size());
+  }
+
+  @Test
+  public void parseShowTableExtended_skipsKeyLineOutOfSparkOrder() {
+    String comment = "first line\nLocation: fake";
+    String blob = deltaTableBlob(comment, DELTA_TABLE_PROPERTIES) + "Owner: late";
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreParser.parseShowTableExtended("legacy_db", "events", blob);
+
+    assertEquals(comment, parsed.comment);
+    assertEquals(OWNER, parsed.owner);
+    assertEquals(DELTA_TABLE_PROPERTIES, parsed.tableProperties);
+    assertEquals(DELTA_LOCATION, parsed.storageLocation);
+    assertEquals(1, parsed.columns.size());
   }
 
   @Test
@@ -336,6 +467,63 @@ public class DatabricksHiveMetastoreParserTest {
     assertEquals(
         "CREATE FUNCTION `hive_metastore`.`legacy_db`.`f_zero`()\nRETURNS INT\nRETURN 42",
         parsed.ddl);
+  }
+
+  /**
+   * Returns a {@code SHOW TABLE EXTENDED} blob as Databricks prints it for a managed Delta table.
+   */
+  private static String deltaTableBlob(String comment, String tableProperties) {
+    return String.join(
+        "\n",
+        "Catalog: hive_metastore",
+        "Database: legacy_db",
+        "Table: events",
+        "Owner: " + OWNER,
+        "Created Time: Sun Sep 27 21:19:25 UTC 2026",
+        "Last Access: UNKNOWN",
+        "Created By: Spark 4.2.0",
+        "Type: MANAGED",
+        "Provider: delta",
+        "Comment: " + comment,
+        "Table Properties: " + tableProperties,
+        "Location: " + DELTA_LOCATION,
+        "Serde Library: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+        "InputFormat: org.apache.hadoop.mapred.SequenceFileInputFormat",
+        "OutputFormat: org.apache.hadoop.hive.ql.io.HiveSequenceFileOutputFormat",
+        "Partition Provider: Catalog",
+        "Schema: root",
+        " |-- id: integer (nullable = true)",
+        "",
+        "");
+  }
+
+  /** Returns a {@code SHOW TABLE EXTENDED} blob as Databricks prints it for a view. */
+  private static String viewBlob(String comment, String viewText) {
+    return String.join(
+        "\n",
+        "Catalog: hive_metastore",
+        "Database: legacy_db",
+        "Table: active_ids",
+        "Owner: " + OWNER,
+        "Created Time: Sun Sep 27 21:19:23 UTC 2026",
+        "Last Access: UNKNOWN",
+        "Created By: Spark 4.2.0",
+        "Type: VIEW",
+        "Comment: " + comment,
+        "View Text: " + viewText,
+        "View Original Text: " + viewText,
+        "View Schema Mode: COMPENSATION",
+        "View Catalog and Namespace: spark_catalog.default",
+        "View Query Output Columns: [`id`]",
+        "Table Properties: " + VIEW_TABLE_PROPERTIES,
+        "Serde Library: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+        "InputFormat: org.apache.hadoop.mapred.SequenceFileInputFormat",
+        "OutputFormat: org.apache.hadoop.hive.ql.io.HiveSequenceFileOutputFormat",
+        "Storage Properties: [serialization.format=1]",
+        "Schema: root",
+        " |-- id: integer (nullable = true)",
+        "",
+        "");
   }
 
   private static ParsedFunctionExtended parseFunction(String functionName, String... lines) {
