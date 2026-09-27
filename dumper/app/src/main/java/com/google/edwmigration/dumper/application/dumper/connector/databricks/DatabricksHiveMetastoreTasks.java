@@ -46,7 +46,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
@@ -202,7 +201,7 @@ final class DatabricksHiveMetastoreTasks {
       return lastDot >= 0 ? fullName.substring(lastDot + 1) : fullName;
     }
 
-    @CheckForNull
+    @Nonnull
     String fetchTableDdl(
         @Nonnull DatabricksHandle handle, @Nonnull String schema, @Nonnull String table)
         throws IOException {
@@ -214,16 +213,13 @@ final class DatabricksHiveMetastoreTasks {
       }
       String qualifiedTable = quoteIdentifier(schema) + "." + quoteIdentifier(table);
       String ddl = executeShowCreateTable(handle, "SHOW CREATE TABLE " + qualifiedTable);
-      if (ddl == null) {
-        ddl = executeShowCreateTable(handle, "SHOW CREATE TABLE " + qualifiedTable + " AS SERDE");
-      }
       synchronized (lock) {
         cachedDdls.put(key, ddl);
       }
       return ddl;
     }
 
-    @CheckForNull
+    @Nonnull
     private static String executeShowCreateTable(
         @Nonnull DatabricksHandle handle, @Nonnull String sql) throws IOException {
       StringBuilder sb = new StringBuilder();
@@ -239,11 +235,7 @@ final class DatabricksHiveMetastoreTasks {
           }
         }
       } catch (DatabricksSqlException e) {
-        String msg = e.getMessage() != null ? e.getMessage() : "";
-        if (msg.contains("AS SERDE") || msg.contains("SHOW_CREATE_TABLE")) {
-          return null;
-        }
-        logger.warn("Skipping '{}' due to SQL error: {}", sql, msg);
+        logger.warn("Skipping '{}' due to SQL error: {}", sql, e.getMessage());
         return "";
       }
       return sb.toString();
@@ -544,7 +536,7 @@ final class DatabricksHiveMetastoreTasks {
           CSVPrinter csv = FORMAT.withHeader(DdlsHeader.class).print(writer)) {
         for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
           String ddl = sessionCache.fetchTableDdl(dbxHandle, tbl.schemaName, tbl.tableName);
-          if (ddl != null && !ddl.isEmpty()) {
+          if (!ddl.isEmpty()) {
             csv.printRecord(tbl.catalogName, tbl.schemaName, tbl.tableName, tbl.tableType, ddl);
           }
         }

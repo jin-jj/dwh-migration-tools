@@ -16,6 +16,7 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -49,7 +50,7 @@ public class DatabricksHiveMetastoreTasksTest {
   @Rule public final TemporaryFolder tempFolder = new TemporaryFolder();
 
   @Test
-  public void hiveMetastoreDdlsTask_dumpsShowCreateTableWithSerdeFallback() throws Exception {
+  public void hiveMetastoreDdlsTask_skipsTableWhoseShowCreateTableFails() throws Exception {
     WorkspaceClient client = mock(WorkspaceClient.class);
     StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
     when(client.statementExecution()).thenReturn(stmtApi);
@@ -109,18 +110,8 @@ public class DatabricksHiveMetastoreTasksTest {
                     .setError(
                         new ServiceError()
                             .setMessage(
-                                "[SHOW_CREATE_TABLE_ON_HIVE_SERDE] Please execute SHOW CREATE TABLE ... AS SERDE")));
-
-    StatementResponse serdeDdlResp =
-        new StatementResponse()
-            .setStatementId("stmt-ddl-2")
-            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
-            .setResult(
-                new ResultData()
-                    .setDataArray(
-                        Collections.singletonList(
-                            Collections.singletonList(
-                                "CREATE EXTERNAL TABLE hive_metastore.legacy.hive_serde_tbl (raw_line STRING) ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'"))));
+                                "[UNSUPPORTED_SHOW_CREATE_TABLE.WITH_UNSUPPORTED_SERDE_CONFIGURATION]"
+                                    + " Unsupported SHOW CREATE TABLE command.")));
 
     StatementResponse showUserFunctionsResp =
         new StatementResponse()
@@ -162,9 +153,6 @@ public class DatabricksHiveMetastoreTasksTest {
               if ("SHOW CREATE TABLE `legacy`.`hive_serde_tbl`".equals(sql)) {
                 return serdeFailResp;
               }
-              if ("SHOW CREATE TABLE `legacy`.`hive_serde_tbl` AS SERDE".equals(sql)) {
-                return serdeDdlResp;
-              }
               if ("SHOW USER FUNCTIONS IN `legacy`".equals(sql)) {
                 return showUserFunctionsResp;
               }
@@ -186,9 +174,7 @@ public class DatabricksHiveMetastoreTasksTest {
       assertTrue(
           ddlsCsv.contains(
               "hive_metastore,legacy,delta_tbl,MANAGED,CREATE TABLE hive_metastore.legacy.delta_tbl (id INT NOT NULL) USING delta"));
-      assertTrue(
-          ddlsCsv.contains(
-              "hive_metastore,legacy,hive_serde_tbl,EXTERNAL,CREATE EXTERNAL TABLE hive_metastore.legacy.hive_serde_tbl (raw_line STRING) ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'"));
+      assertFalse(ddlsCsv.contains("hive_serde_tbl"));
       assertTrue(
           ddlsCsv.contains(
               "hive_metastore,legacy,double_it,FUNCTION,\"CREATE FUNCTION hive_metastore.legacy.double_it(x INT)\n"
