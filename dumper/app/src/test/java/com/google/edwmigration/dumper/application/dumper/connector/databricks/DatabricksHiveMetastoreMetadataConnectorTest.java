@@ -16,6 +16,8 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreMetadataConnector.DatabricksHiveMetastoreProperty.MAX_CONCURRENT_STATEMENTS;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreMetadataConnector.MAX_CONCURRENT_STATEMENTS_RANGE;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
@@ -82,6 +84,29 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
   }
 
   @Test
+  public void validate_acceptsMaxConcurrentStatementsInRange() throws IOException {
+    DatabricksHiveMetastoreMetadataConnector connector =
+        new DatabricksHiveMetastoreMetadataConnector();
+    ConnectorArguments arguments =
+        argumentsWithMaxConcurrentStatements(MAX_CONCURRENT_STATEMENTS_RANGE.upperEndpoint());
+
+    connector.validate(arguments);
+  }
+
+  @Test
+  public void validate_rejectsMaxConcurrentStatementsOutOfRange() throws IOException {
+    DatabricksHiveMetastoreMetadataConnector connector =
+        new DatabricksHiveMetastoreMetadataConnector();
+    ConnectorArguments arguments =
+        argumentsWithMaxConcurrentStatements(MAX_CONCURRENT_STATEMENTS_RANGE.upperEndpoint() + 1);
+
+    MetadataDumperUsageException exception =
+        assertThrows(MetadataDumperUsageException.class, () -> connector.validate(arguments));
+    assertTrue(exception.getMessage().contains(MAX_CONCURRENT_STATEMENTS.getName()));
+    assertTrue(exception.getMessage().contains(MAX_CONCURRENT_STATEMENTS_RANGE.toString()));
+  }
+
+  @Test
   public void addTasksTo_addsCanonicalCsvAndDdlTasks() throws Exception {
     DatabricksHiveMetastoreMetadataConnector connector =
         new DatabricksHiveMetastoreMetadataConnector();
@@ -116,5 +141,17 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
     }
 
     assertTrue(targetPaths.containsAll(expectedEntries));
+  }
+
+  private static ConnectorArguments argumentsWithMaxConcurrentStatements(long value)
+      throws IOException {
+    return new ConnectorArguments(
+        "--connector",
+        CONNECTOR_NAME,
+        "--url",
+        "https://workspace.cloud.databricks.com",
+        "--warehouse",
+        "wh-123",
+        "-D" + MAX_CONCURRENT_STATEMENTS.getName() + "=" + value);
   }
 }

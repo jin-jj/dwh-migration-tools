@@ -16,26 +16,49 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.common.base.Throwables.throwIfUnchecked;
+import static java.util.concurrent.Executors.newFixedThreadPool;
+
+import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.function.Function;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import javax.annotation.concurrent.ThreadSafe;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Runs one SQL statement per object, such as {@code SHOW CREATE TABLE} for each table, and passes
- * the results to a consumer in input order.
+ * Runs one SQL statement per object, such as {@code SHOW CREATE TABLE} for each table, on a bounded
+ * number of threads, and passes the results to a consumer in input order.
+ *
+ * <p>The consumer runs on the calling thread, so it can write to a file without synchronization.
+ * Only a few statements per thread are submitted ahead of the consumer, so a slow statement doesn't
+ * make the results of the following statements pile up in memory.
  *
  * <p>A statement that fails with an {@link IOException} or {@link UncheckedIOException} is logged
  * and its object is skipped, so one broken object doesn't discard the output of the others. If
  * every statement fails, the cause is likely systemic, such as lost access to the warehouse, so the
  * run fails with the first failure as its cause. Other exceptions propagate immediately.
  */
-final class ObjectStatementRunner {
+@ThreadSafe
+final class ObjectStatementRunner implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(ObjectStatementRunner.class);
+
+  /**
+   * Statements submitted per thread ahead of the consumer. More than one keeps the threads busy
+   * while the consumer waits for a slow statement.
+   */
+  private static final int PENDING_STATEMENTS_PER_THREAD = 2;
 
   /** Executes the statement for one object. */
   interface Statement<I, O> {
@@ -50,7 +73,23 @@ final class ObjectStatementRunner {
     void accept(@Nonnull I input, @Nonnull O result) throws IOException;
   }
 
-  private ObjectStatementRunner() {}
+  private final ExecutorService executor;
+  private final int maxPendingStatements;
+
+  ObjectStatementRunner(int maxConcurrentStatements) {
+    Preconditions.checkArgument(
+        maxConcurrentStatements > 0,
+        "Max concurrent statements must be positive, got %s.",
+        maxConcurrentStatements);
+    this.executor =
+        newFixedThreadPool(
+            maxConcurrentStatements,
+            new ThreadFactoryBuilder()
+                .setNameFormat("databricks-statement-%d")
+                .setDaemon(true)
+                .build());
+    this.maxPendingStatements = PENDING_STATEMENTS_PER_THREAD * maxConcurrentStatements;
+  }
 
   /**
    * Runs {@code statement} for each input and passes each successful result to {@code consumer}, in
@@ -58,9 +97,10 @@ final class ObjectStatementRunner {
    *
    * @param statementName the statement, for log messages, e.g. {@code SHOW CREATE TABLE}
    * @param describer describes an input for log messages, e.g. as a quoted table name
+   * @throws InterruptedIOException if the calling thread was interrupted
    * @throws IOException if every statement failed, or if the consumer failed
    */
-  static <I, O> void runInOrder(
+  <I, O> void runInOrder(
       @Nonnull String statementName,
       @Nonnull Iterable<I> inputs,
       @Nonnull Function<? super I, String> describer,
@@ -68,24 +108,85 @@ final class ObjectStatementRunner {
       @Nonnull ResultConsumer<? super I, ? super O> consumer)
       throws IOException {
     Failures failures = new Failures(statementName);
-    for (I input : inputs) {
-      O result;
-      try {
-        result = statement.execute(input);
-      } catch (IOException e) {
-        failures.record(describer.apply(input), e);
-        continue;
-      } catch (UncheckedIOException e) {
-        failures.record(describer.apply(input), e.getCause());
-        continue;
+    Deque<PendingStatement<I, O>> pendingStatements = new ArrayDeque<>();
+    try {
+      for (I input : inputs) {
+        Future<O> result = executor.submit(() -> statement.execute(input));
+        pendingStatements.addLast(new PendingStatement<>(input, result));
+        if (pendingStatements.size() >= maxPendingStatements) {
+          consume(pendingStatements.removeFirst(), describer, consumer, failures);
+        }
       }
-      failures.recordSuccess();
-      consumer.accept(input, result);
+
+      while (!pendingStatements.isEmpty()) {
+        consume(pendingStatements.removeFirst(), describer, consumer, failures);
+      }
+    } finally {
+      for (PendingStatement<I, O> pendingStatement : pendingStatements) {
+        pendingStatement.result.cancel(true);
+      }
     }
     failures.throwIfAllFailed();
   }
 
-  /** Counts statement outcomes and logs each failure. */
+  private static <I, O> void consume(
+      @Nonnull PendingStatement<I, O> pendingStatement,
+      @Nonnull Function<? super I, String> describer,
+      @Nonnull ResultConsumer<? super I, ? super O> consumer,
+      @Nonnull Failures failures)
+      throws IOException {
+    I input = pendingStatement.input;
+    O result;
+    try {
+      result = pendingStatement.result.get();
+    } catch (InterruptedException e) {
+      pendingStatement.result.cancel(true);
+      Thread.currentThread().interrupt();
+      InterruptedIOException interrupted =
+          new InterruptedIOException(
+              String.format(
+                  "Interrupted while waiting for %s for %s.",
+                  failures.statementName, describer.apply(input)));
+      interrupted.initCause(e);
+      throw interrupted;
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof IOException) {
+        failures.record(describer.apply(input), (IOException) cause);
+        return;
+      }
+
+      if (cause instanceof UncheckedIOException) {
+        failures.record(describer.apply(input), ((UncheckedIOException) cause).getCause());
+        return;
+      }
+
+      throwIfUnchecked(cause);
+      throw new IllegalStateException("Statement threw an undeclared checked exception.", cause);
+    }
+    failures.recordSuccess();
+    consumer.accept(input, result);
+  }
+
+  /** Stops the threads, interrupting the statements that are still running. */
+  @Override
+  public void close() {
+    executor.shutdownNow();
+  }
+
+  /** A submitted statement and the object it runs for. */
+  private static final class PendingStatement<I, O> {
+
+    final I input;
+    final Future<O> result;
+
+    PendingStatement(@Nonnull I input, @Nonnull Future<O> result) {
+      this.input = input;
+      this.result = result;
+    }
+  }
+
+  /** Counts statement outcomes and logs each failure. Used by the calling thread only. */
   private static final class Failures {
 
     private final String statementName;

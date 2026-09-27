@@ -19,7 +19,6 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cell;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.ObjectStatementRunner.runInOrder;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.collect.ImmutableList;
@@ -117,12 +116,14 @@ final class DatabricksHiveMetastoreTasks {
     private ImmutableList<ParsedTableExtended> loadTables(@Nonnull DatabricksHandle handle)
         throws IOException {
       ImmutableList.Builder<ParsedTableExtended> builder = ImmutableList.builder();
-      runInOrder(
-          "SHOW TABLE EXTENDED",
-          listSchemas(handle),
-          DatabricksHiveMetastoreTasks::quoteIdentifier,
-          schema -> showTableExtended(handle, schema),
-          (schema, schemaTables) -> builder.addAll(schemaTables));
+      handle
+          .statementRunner()
+          .runInOrder(
+              "SHOW TABLE EXTENDED",
+              listSchemas(handle),
+              DatabricksHiveMetastoreTasks::quoteIdentifier,
+              schema -> showTableExtended(handle, schema),
+              (schema, schemaTables) -> builder.addAll(schemaTables));
       return builder.build();
     }
 
@@ -163,19 +164,23 @@ final class DatabricksHiveMetastoreTasks {
     private ImmutableList<ParsedFunctionExtended> loadFunctions(@Nonnull DatabricksHandle handle)
         throws IOException {
       List<FunctionRef> functionRefs = new ArrayList<>();
-      runInOrder(
-          "SHOW USER FUNCTIONS",
-          listSchemas(handle),
-          DatabricksHiveMetastoreTasks::quoteIdentifier,
-          schema -> showUserFunctions(handle, schema),
-          (schema, schemaFunctionRefs) -> functionRefs.addAll(schemaFunctionRefs));
+      handle
+          .statementRunner()
+          .runInOrder(
+              "SHOW USER FUNCTIONS",
+              listSchemas(handle),
+              DatabricksHiveMetastoreTasks::quoteIdentifier,
+              schema -> showUserFunctions(handle, schema),
+              (schema, schemaFunctionRefs) -> functionRefs.addAll(schemaFunctionRefs));
       ImmutableList.Builder<ParsedFunctionExtended> builder = ImmutableList.builder();
-      runInOrder(
-          "DESCRIBE FUNCTION EXTENDED",
-          functionRefs,
-          FunctionRef::quotedName,
-          functionRef -> describeFunction(handle, functionRef),
-          (functionRef, parsed) -> builder.add(parsed));
+      handle
+          .statementRunner()
+          .runInOrder(
+              "DESCRIBE FUNCTION EXTENDED",
+              functionRefs,
+              FunctionRef::quotedName,
+              functionRef -> describeFunction(handle, functionRef),
+              (functionRef, parsed) -> builder.add(parsed));
       return builder.build();
     }
 
@@ -349,19 +354,21 @@ final class DatabricksHiveMetastoreTasks {
       ImmutableList<String> schemas = sessionCache.listSchemas(dbxHandle);
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(SchemataHeader.class).print(writer)) {
-        runInOrder(
-            "DESCRIBE SCHEMA EXTENDED",
-            schemas,
-            DatabricksHiveMetastoreTasks::quoteIdentifier,
-            schema -> describeSchemaOrEmpty(dbxHandle, schema),
-            (schema, description) ->
-                csv.printRecord(
-                    HIVE_METASTORE_CATALOG,
-                    schema,
-                    description.comment,
-                    description.owner,
-                    "",
-                    ""));
+        dbxHandle
+            .statementRunner()
+            .runInOrder(
+                "DESCRIBE SCHEMA EXTENDED",
+                schemas,
+                DatabricksHiveMetastoreTasks::quoteIdentifier,
+                schema -> describeSchemaOrEmpty(dbxHandle, schema),
+                (schema, description) ->
+                    csv.printRecord(
+                        HIVE_METASTORE_CATALOG,
+                        schema,
+                        description.comment,
+                        description.owner,
+                        "",
+                        ""));
       }
       return null;
     }
@@ -622,17 +629,19 @@ final class DatabricksHiveMetastoreTasks {
       ImmutableList<ParsedTableExtended> tables = sessionCache.listParsedTables(dbxHandle);
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(DdlsHeader.class).print(writer)) {
-        runInOrder(
-            "SHOW CREATE TABLE",
-            tables,
-            DatabricksHiveMetastoreTasks::quoteTableName,
-            table -> showCreateTable(dbxHandle, table),
-            (table, ddl) -> {
-              if (!ddl.isEmpty()) {
-                csv.printRecord(
-                    table.catalogName, table.schemaName, table.tableName, table.tableType, ddl);
-              }
-            });
+        dbxHandle
+            .statementRunner()
+            .runInOrder(
+                "SHOW CREATE TABLE",
+                tables,
+                DatabricksHiveMetastoreTasks::quoteTableName,
+                table -> showCreateTable(dbxHandle, table),
+                (table, ddl) -> {
+                  if (!ddl.isEmpty()) {
+                    csv.printRecord(
+                        table.catalogName, table.schemaName, table.tableName, table.tableType, ddl);
+                  }
+                });
       }
       return null;
     }

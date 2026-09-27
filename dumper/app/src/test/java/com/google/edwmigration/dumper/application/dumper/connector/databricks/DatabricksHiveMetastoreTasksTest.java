@@ -71,6 +71,7 @@ public class DatabricksHiveMetastoreTasksTest {
   private static final String SHOW_SCHEMAS = "SHOW SCHEMAS";
   private static final String SHOW_TABLES = "SHOW TABLE EXTENDED IN `legacy` LIKE '*'";
   private static final String SHOW_FUNCTIONS = "SHOW USER FUNCTIONS IN `legacy`";
+  private static final int MAX_CONCURRENT_STATEMENTS = 4;
 
   @Rule public final TemporaryFolder tempFolder = new TemporaryFolder();
 
@@ -309,7 +310,8 @@ public class DatabricksHiveMetastoreTasksTest {
     when(client.statementExecution()).thenReturn(statements);
     DatabricksSqlHelper sqlHelper =
         new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
-    return new DatabricksHandle(sqlHelper, new DatabricksFilter(ImmutableList.of()));
+    return new DatabricksHandle(
+        sqlHelper, new DatabricksFilter(ImmutableList.of()), MAX_CONCURRENT_STATEMENTS);
   }
 
   /** Mocks the Statement Execution API to answer each SQL statement from the map. */
