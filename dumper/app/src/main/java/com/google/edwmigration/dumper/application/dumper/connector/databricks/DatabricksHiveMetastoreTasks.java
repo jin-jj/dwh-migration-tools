@@ -23,18 +23,18 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.ByteSink;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.CatalogsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.ColumnsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.DdlsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.FunctionsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.SchemataHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TableConstraintsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TablesHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.ViewsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedColumn;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedFunctionExtended;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedTableConstraint;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedTableExtended;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.CatalogsHeader;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.ColumnsHeader;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.DdlsHeader;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.FunctionsHeader;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.SchemataHeader;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.TableConstraintsHeader;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.TablesHeader;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.ViewsHeader;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import com.google.edwmigration.dumper.application.dumper.task.TaskCategory;
@@ -275,7 +275,7 @@ final class DatabricksHiveMetastoreTasks {
       extends AbstractDatabricksHiveMetastoreTask {
 
     DatabricksHiveMetastoreCatalogsTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
-      super(DatabricksMetadataDumpFormat.CATALOGS_ENTRY_NAME, sessionCache);
+      super(DatabricksHiveMetastoreDumpFormat.CATALOGS_ENTRY_NAME, sessionCache);
     }
 
     @Override
@@ -299,7 +299,7 @@ final class DatabricksHiveMetastoreTasks {
       extends AbstractDatabricksHiveMetastoreTask {
 
     DatabricksHiveMetastoreSchemataTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
-      super(DatabricksMetadataDumpFormat.SCHEMATA_ENTRY_NAME, sessionCache);
+      super(DatabricksHiveMetastoreDumpFormat.SCHEMATA_ENTRY_NAME, sessionCache);
     }
 
     @Override
@@ -345,7 +345,7 @@ final class DatabricksHiveMetastoreTasks {
   static final class DatabricksHiveMetastoreTablesTask extends AbstractDatabricksHiveMetastoreTask {
 
     DatabricksHiveMetastoreTablesTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
-      super(DatabricksMetadataDumpFormat.TABLES_ENTRY_NAME, sessionCache);
+      super(DatabricksHiveMetastoreDumpFormat.TABLES_ENTRY_NAME, sessionCache);
     }
 
     @Override
@@ -382,7 +382,7 @@ final class DatabricksHiveMetastoreTasks {
       extends AbstractDatabricksHiveMetastoreTask {
 
     DatabricksHiveMetastoreColumnsTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
-      super(DatabricksMetadataDumpFormat.COLUMNS_ENTRY_NAME, sessionCache);
+      super(DatabricksHiveMetastoreDumpFormat.COLUMNS_ENTRY_NAME, sessionCache);
     }
 
     @Override
@@ -419,7 +419,7 @@ final class DatabricksHiveMetastoreTasks {
   static final class DatabricksHiveMetastoreViewsTask extends AbstractDatabricksHiveMetastoreTask {
 
     DatabricksHiveMetastoreViewsTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
-      super(DatabricksMetadataDumpFormat.VIEWS_ENTRY_NAME, sessionCache);
+      super(DatabricksHiveMetastoreDumpFormat.VIEWS_ENTRY_NAME, sessionCache);
     }
 
     @Override
@@ -452,7 +452,7 @@ final class DatabricksHiveMetastoreTasks {
       extends AbstractDatabricksHiveMetastoreTask {
 
     DatabricksHiveMetastoreTableConstraintsTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
-      super(DatabricksMetadataDumpFormat.TABLE_CONSTRAINTS_ENTRY_NAME, sessionCache);
+      super(DatabricksHiveMetastoreDumpFormat.TABLE_CONSTRAINTS_ENTRY_NAME, sessionCache);
     }
 
     @Override
@@ -487,7 +487,7 @@ final class DatabricksHiveMetastoreTasks {
       extends AbstractDatabricksHiveMetastoreTask {
 
     DatabricksHiveMetastoreFunctionsTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
-      super(DatabricksMetadataDumpFormat.FUNCTIONS_ENTRY_NAME, sessionCache);
+      super(DatabricksHiveMetastoreDumpFormat.FUNCTIONS_ENTRY_NAME, sessionCache);
     }
 
     @Override
@@ -527,7 +527,7 @@ final class DatabricksHiveMetastoreTasks {
   static final class DatabricksHiveMetastoreDdlsTask extends AbstractDatabricksHiveMetastoreTask {
 
     DatabricksHiveMetastoreDdlsTask(@Nonnull HiveMetastoreSessionCache sessionCache) {
-      super(DatabricksMetadataDumpFormat.DDLS_ENTRY_NAME, sessionCache);
+      super(DatabricksHiveMetastoreDumpFormat.DDLS_ENTRY_NAME, sessionCache);
     }
 
     @Override

@@ -45,6 +45,11 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
   }
 
   @Test
+  public void formatName_isSpecificToConnector() {
+    assertEquals(CONNECTOR_NAME + ".dump.zip", DatabricksHiveMetastoreDumpFormat.FORMAT_NAME);
+  }
+
+  @Test
   public void validate_rejectsAssessmentFlag() throws IOException {
     DatabricksHiveMetastoreMetadataConnector connector =
         new DatabricksHiveMetastoreMetadataConnector();
@@ -90,14 +95,14 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
             "wh-123");
     ImmutableList<String> expectedEntries =
         ImmutableList.of(
-            DatabricksMetadataDumpFormat.CATALOGS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.SCHEMATA_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.TABLES_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.COLUMNS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.VIEWS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.TABLE_CONSTRAINTS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.FUNCTIONS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.DDLS_ENTRY_NAME);
+            DatabricksHiveMetastoreDumpFormat.CATALOGS_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.SCHEMATA_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.TABLES_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.COLUMNS_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.VIEWS_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.TABLE_CONSTRAINTS_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.FUNCTIONS_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.DDLS_ENTRY_NAME);
     int metadataAndFormatTaskCount = 2;
 
     List<Task<?>> tasks = new ArrayList<>();

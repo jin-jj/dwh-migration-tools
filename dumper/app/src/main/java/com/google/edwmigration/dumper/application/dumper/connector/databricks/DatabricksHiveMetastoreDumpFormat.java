@@ -17,9 +17,9 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 /** Output archive contract for the Databricks {@code hive_metastore} metadata connector. */
-interface DatabricksMetadataDumpFormat {
+interface DatabricksHiveMetastoreDumpFormat {
 
-  String FORMAT_NAME = "databricks.dump.zip";
+  String FORMAT_NAME = "databricks-hive-metastore.dump.zip";
 
   String CATALOGS_ENTRY_NAME = "catalogs.csv";
   String SCHEMATA_ENTRY_NAME = "schemata.csv";

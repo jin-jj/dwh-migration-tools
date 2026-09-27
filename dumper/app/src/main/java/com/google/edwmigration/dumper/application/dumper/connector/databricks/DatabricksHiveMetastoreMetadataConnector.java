@@ -86,8 +86,8 @@ public class DatabricksHiveMetastoreMetadataConnector extends AbstractConnector
     Preconditions.checkNotNull(arguments, "ConnectorArguments was null.");
     validate(arguments);
 
-    out.add(new DumpMetadataTask(arguments, DatabricksMetadataDumpFormat.FORMAT_NAME));
-    out.add(new FormatTask(DatabricksMetadataDumpFormat.FORMAT_NAME));
+    out.add(new DumpMetadataTask(arguments, DatabricksHiveMetastoreDumpFormat.FORMAT_NAME));
+    out.add(new FormatTask(DatabricksHiveMetastoreDumpFormat.FORMAT_NAME));
 
     HiveMetastoreSessionCache sessionCache = new HiveMetastoreSessionCache();
     out.add(new DatabricksHiveMetastoreCatalogsTask(sessionCache));
