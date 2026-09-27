@@ -36,8 +36,12 @@ final class DatabricksHiveMetastoreParser {
   private static final Pattern TOP_LEVEL_SCHEMA_FIELD_PATTERN =
       Pattern.compile("^\\s\\|--\\s+([^:]+):\\s+(.+?)\\s*\\(nullable\\s*=\\s*(true|false)\\)\\s*$");
 
+  /**
+   * Matches {@code Key: value}. {@code DOTALL} lets the value span lines, because {@code DESCRIBE
+   * FUNCTION EXTENDED} returns a multi-line {@code Body} as one cell with embedded newlines.
+   */
   private static final Pattern KEY_VALUE_LINE_PATTERN =
-      Pattern.compile("^([A-Za-z][A-Za-z0-9 _-]*):(?:\\s*(.*))?$");
+      Pattern.compile("^([A-Za-z][A-Za-z0-9 _-]*):(?:\\s*(.*))?$", Pattern.DOTALL);
 
   private DatabricksHiveMetastoreParser() {}
 

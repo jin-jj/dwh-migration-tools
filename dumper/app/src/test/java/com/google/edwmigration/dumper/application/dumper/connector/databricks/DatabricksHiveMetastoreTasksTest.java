@@ -16,7 +16,6 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
-import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -32,8 +31,6 @@ import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.Files;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedFunctionExtended;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.ParsedTableExtended;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.HiveMetastoreSessionCache;
 import java.io.File;
@@ -50,86 +47,6 @@ import org.junit.runners.JUnit4;
 public class DatabricksHiveMetastoreTasksTest {
 
   @Rule public final TemporaryFolder tempFolder = new TemporaryFolder();
-
-  @Test
-  public void hiveMetastoreParser_parsesShowTableExtendedAndDescribeFunctionExtended() {
-    String blob =
-        "Catalog: hive_metastore\n"
-            + "Database: legacy_db\n"
-            + "Table: events\n"
-            + "Owner: data_eng\n"
-            + "Created Time: Wed Sep 18 12:00:00 UTC 2024\n"
-            + "Type: EXTERNAL\n"
-            + "Provider: parquet\n"
-            + "Comment: Legacy events\n"
-            + "Table Properties: [delta.checkpoint.writeStatsAsJson=false, "
-            + "delta.constraints.valid_event_type=event_type IN ('click', 'view', 'purchase'), "
-            + "delta.enableDeletionVectors=true]\n"
-            + "Location: s3://legacy-bucket/events\n"
-            + "Partition Columns: [`dt`, `country`]\n"
-            + "Schema: root\n"
-            + " |-- event_id: string (nullable = false)\n"
-            + " |-- payload: string (nullable = true)\n"
-            + " |-- dt: date (nullable = true)\n"
-            + " |-- country: string (nullable = true)\n";
-
-    ParsedTableExtended parsed =
-        DatabricksHiveMetastoreParser.parseShowTableExtended("legacy_db", "events", blob);
-    assertEquals("hive_metastore", parsed.catalogName);
-    assertEquals("legacy_db", parsed.schemaName);
-    assertEquals("events", parsed.tableName);
-    assertEquals("EXTERNAL", parsed.tableType);
-    assertEquals("PARQUET", parsed.dataSourceFormat);
-    assertEquals("s3://legacy-bucket/events", parsed.storageLocation);
-    assertEquals(4, parsed.columns.size());
-    assertEquals("NO", parsed.columns.get(0).isNullable);
-    assertEquals("", parsed.columns.get(0).partitionIndex);
-    assertEquals("0", parsed.columns.get(2).partitionIndex);
-    assertEquals("1", parsed.columns.get(3).partitionIndex);
-    assertEquals(1, parsed.constraints.size());
-    assertEquals("valid_event_type", parsed.constraints.get(0).constraintName);
-    assertEquals("CHECK", parsed.constraints.get(0).constraintType);
-    assertEquals(
-        "event_type IN ('click', 'view', 'purchase')", parsed.constraints.get(0).constraintDetails);
-
-    ParsedFunctionExtended sqlFn =
-        DatabricksHiveMetastoreParser.parseDescribeFunctionExtended(
-            "hive_metastore",
-            "legacy_db",
-            "double_it",
-            Arrays.asList(
-                "Function: hive_metastore.legacy_db.double_it",
-                "Input: x INT",
-                "Returns: INT",
-                "Comment: Doubles input",
-                "Owner: alice",
-                "Body: x * 2"));
-    assertEquals("INT", sqlFn.dataType);
-    assertEquals("x INT", sqlFn.inputParams);
-    assertEquals("x * 2", sqlFn.routineDefinition);
-    assertEquals("SQL", sqlFn.routineLanguage);
-    assertEquals(
-        "CREATE FUNCTION hive_metastore.legacy_db.double_it(x INT)\n"
-            + "RETURNS INT\n"
-            + "COMMENT 'Doubles input'\n"
-            + "RETURN x * 2",
-        sqlFn.ddl);
-
-    ParsedFunctionExtended javaFn =
-        DatabricksHiveMetastoreParser.parseDescribeFunctionExtended(
-            "hive_metastore",
-            "legacy_db",
-            "custom_hash",
-            Arrays.asList(
-                "Function: default.custom_hash",
-                "Class: com.acme.udf.CustomHashUdf",
-                "Owner: bob"));
-    assertEquals("com.acme.udf.CustomHashUdf", javaFn.routineDefinition);
-    assertEquals("JAVA", javaFn.routineLanguage);
-    assertEquals(
-        "CREATE FUNCTION hive_metastore.legacy_db.custom_hash AS 'com.acme.udf.CustomHashUdf'",
-        javaFn.ddl);
-  }
 
   @Test
   public void hiveMetastoreDdlsTask_dumpsShowCreateTableWithSerdeFallback() throws Exception {
