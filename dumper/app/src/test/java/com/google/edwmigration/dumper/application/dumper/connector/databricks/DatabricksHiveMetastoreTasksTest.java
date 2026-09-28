@@ -202,6 +202,37 @@ public class DatabricksHiveMetastoreTasksTest {
   }
 
   @Test
+  public void schemataTask_writesLocation() throws Exception {
+    String location = "dbfs:/mnt/lake/legacy";
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                "DESCRIBE SCHEMA EXTENDED `legacy`",
+                succeededRows(
+                    ImmutableList.of(
+                        ImmutableList.of("Catalog Name", DatabricksFilter.HIVE_METASTORE_CATALOG),
+                        ImmutableList.of("Namespace Name", SCHEMA),
+                        ImmutableList.of("Comment", "Old data"),
+                        ImmutableList.of("Location", location),
+                        ImmutableList.of("Owner", "alice"),
+                        ImmutableList.of("Properties", "((team,migration))")))));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreSchemataTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals(location, records.get(0).get(SchemataHeader.StorageLocation));
+    assertEquals("Old data", records.get(0).get(SchemataHeader.Comment));
+    assertEquals("alice", records.get(0).get(SchemataHeader.Owner));
+  }
+
+  @Test
   public void schemataTask_keepsSchemaWhoseDescribeFails() throws Exception {
     StatementExecutionAPI statements =
         mockStatements(
@@ -228,6 +259,7 @@ public class DatabricksHiveMetastoreTasksTest {
     assertEquals("alice", records.get(0).get(SchemataHeader.Owner));
     assertEquals("locked", records.get(1).get(SchemataHeader.SchemaName));
     assertEquals("", records.get(1).get(SchemataHeader.Owner));
+    assertEquals("", records.get(1).get(SchemataHeader.StorageLocation));
   }
 
   @Test

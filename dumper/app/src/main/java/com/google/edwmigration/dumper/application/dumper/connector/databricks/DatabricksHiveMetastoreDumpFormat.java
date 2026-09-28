@@ -39,13 +39,22 @@ interface DatabricksHiveMetastoreDumpFormat {
     UpdatedAt
   }
 
+  /**
+   * Columns of {@code schemata.csv}.
+   *
+   * <p>{@code StorageLocation} is the {@code Location} that {@code DESCRIBE SCHEMA EXTENDED}
+   * reports, such as {@code dbfs:/user/hive/warehouse/sales.db}. The data of a managed table in the
+   * schema is stored in a directory with the table name under it. {@code CreatedAt} and {@code
+   * UpdatedAt} are empty, because {@code DESCRIBE SCHEMA EXTENDED} has no times.
+   */
   enum SchemataHeader {
     CatalogName,
     SchemaName,
     Comment,
     Owner,
     CreatedAt,
-    UpdatedAt
+    UpdatedAt,
+    StorageLocation
   }
 
   /**

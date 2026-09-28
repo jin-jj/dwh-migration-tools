@@ -365,14 +365,16 @@ final class DatabricksHiveMetastoreTasks {
                         description.comment,
                         description.owner,
                         "",
-                        ""));
+                        "",
+                        description.location));
       }
       return null;
     }
 
     /**
      * Describes a schema. The schema name is already known from {@code SHOW SCHEMAS}, so if {@code
-     * DESCRIBE SCHEMA EXTENDED} fails, the schema is still written, without comment and owner.
+     * DESCRIBE SCHEMA EXTENDED} fails, the schema is still written, without comment, owner and
+     * location.
      */
     @Nonnull
     private static SchemaDescription describeSchemaOrEmpty(
@@ -380,6 +382,7 @@ final class DatabricksHiveMetastoreTasks {
       String query = "DESCRIBE SCHEMA EXTENDED " + quoteIdentifier(schema);
       String comment = "";
       String owner = "";
+      String location = "";
       try (CloseableIterable<List<String>> rows =
           handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
         for (List<String> row : rows) {
@@ -389,6 +392,8 @@ final class DatabricksHiveMetastoreTasks {
             comment = value;
           } else if ("Owner".equalsIgnoreCase(key)) {
             owner = value;
+          } else if ("Location".equalsIgnoreCase(key)) {
+            location = value;
           }
         }
       } catch (IOException e) {
@@ -396,17 +401,18 @@ final class DatabricksHiveMetastoreTasks {
       } catch (UncheckedIOException e) {
         return emptySchemaDescription(schema, e.getCause());
       }
-      return new SchemaDescription(comment, owner);
+      return new SchemaDescription(comment, owner, location);
     }
 
     @Nonnull
     private static SchemaDescription emptySchemaDescription(
         @Nonnull String schema, @Nonnull IOException failure) {
       logger.warn(
-          "Writing schema {} without comment and owner because DESCRIBE SCHEMA EXTENDED failed: {}",
+          "Writing schema {} without comment, owner and location because DESCRIBE SCHEMA EXTENDED"
+              + " failed: {}",
           quoteIdentifier(schema),
           failure.getMessage());
-      return new SchemaDescription("", "");
+      return new SchemaDescription("", "", "");
     }
   }
 
@@ -414,10 +420,12 @@ final class DatabricksHiveMetastoreTasks {
 
     final String comment;
     final String owner;
+    final String location;
 
-    SchemaDescription(@Nonnull String comment, @Nonnull String owner) {
+    SchemaDescription(@Nonnull String comment, @Nonnull String owner, @Nonnull String location) {
       this.comment = comment;
       this.owner = owner;
+      this.location = location;
     }
   }
 
