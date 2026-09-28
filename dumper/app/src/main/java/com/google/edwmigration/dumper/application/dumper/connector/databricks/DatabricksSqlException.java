@@ -17,34 +17,15 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import java.io.IOException;
-import javax.annotation.CheckForNull;
 
 /** Exception thrown when a Databricks SQL Statement Execution fails. */
 final class DatabricksSqlException extends IOException {
 
-  private final String sqlState;
-  private final String errorCode;
-
-  DatabricksSqlException(
-      String message, @CheckForNull String sqlState, @CheckForNull String errorCode) {
+  DatabricksSqlException(String message) {
     super(message);
-    this.sqlState = sqlState;
-    this.errorCode = errorCode;
   }
 
   DatabricksSqlException(String message, Throwable cause) {
     super(message, cause);
-    this.sqlState = null;
-    this.errorCode = null;
-  }
-
-  @CheckForNull
-  String sqlState() {
-    return sqlState;
-  }
-
-  @CheckForNull
-  String errorCode() {
-    return errorCode;
   }
 }

@@ -109,7 +109,6 @@ final class DatabricksHiveMetastoreParser {
     final String columnName;
     final String dataType;
     final String isNullable;
-    final String comment;
     final String partitionIndex;
 
     ParsedColumn(
@@ -117,13 +116,11 @@ final class DatabricksHiveMetastoreParser {
         String columnName,
         String dataType,
         String isNullable,
-        String comment,
         String partitionIndex) {
       this.ordinalPosition = ordinalPosition;
       this.columnName = columnName;
       this.dataType = dataType;
       this.isNullable = isNullable;
-      this.comment = comment;
       this.partitionIndex = partitionIndex;
     }
   }
@@ -165,7 +162,6 @@ final class DatabricksHiveMetastoreParser {
     final String comment;
     final String owner;
     final String createdAt;
-    final String updatedAt;
     final String serdeLibrary;
     final String inputFormat;
     final String outputFormat;
@@ -185,7 +181,6 @@ final class DatabricksHiveMetastoreParser {
         String comment,
         String owner,
         String createdAt,
-        String updatedAt,
         String serdeLibrary,
         String inputFormat,
         String outputFormat,
@@ -203,7 +198,6 @@ final class DatabricksHiveMetastoreParser {
       this.comment = comment;
       this.owner = owner;
       this.createdAt = createdAt;
-      this.updatedAt = updatedAt;
       this.serdeLibrary = serdeLibrary;
       this.inputFormat = inputFormat;
       this.outputFormat = outputFormat;
@@ -257,8 +251,7 @@ final class DatabricksHiveMetastoreParser {
    * The keys of Spark's {@code CatalogTable.toLinkedHashMap}, in the order that {@code SHOW TABLE
    * EXTENDED} prints them. The metric view key {@code Language} is left out, because {@code
    * hive_metastore} has no metric views and a comment line such as {@code Language: English} would
-   * otherwise end a comment. {@code Table Constraints} is not a Spark key, so its position is a
-   * guess.
+   * otherwise end a comment.
    */
   private static final ImmutableList<String> TABLE_KEYS_IN_ORDER =
       ImmutableList.of(
@@ -293,7 +286,6 @@ final class DatabricksHiveMetastoreParser {
           "Storage Properties",
           "Partition Provider",
           "Partition Columns",
-          "Table Constraints",
           "Schema");
 
   /** The keys whose values Spark prints verbatim, so that a value may span lines. */
@@ -311,7 +303,6 @@ final class DatabricksHiveMetastoreParser {
     String tableProperties = values.getOrDefault("Table Properties", "");
     List<ParsedTableConstraint> constraints = new ArrayList<>();
     parseDeltaCheckConstraintsFromProperties(tableProperties, constraints);
-    parseTableConstraintsList(values.getOrDefault("Table Constraints", ""), constraints);
     List<String> partitionCols =
         parsePartitionColumnsList(values.getOrDefault("Partition Columns", ""));
 
@@ -325,7 +316,6 @@ final class DatabricksHiveMetastoreParser {
         values.getOrDefault("Comment", ""),
         values.getOrDefault("Owner", ""),
         formatCreatedTime(values.getOrDefault("Created Time", "")),
-        "",
         values.getOrDefault("Serde Library", ""),
         values.getOrDefault("InputFormat", ""),
         values.getOrDefault("OutputFormat", ""),
@@ -508,7 +498,6 @@ final class DatabricksHiveMetastoreParser {
               field.name,
               dataType.toString(),
               field.nullable ? "YES" : "NO",
-              "",
               pIdx != null ? String.valueOf(pIdx) : ""));
       ordinal++;
     }
@@ -585,9 +574,6 @@ final class DatabricksHiveMetastoreParser {
 
   private static void parseDeltaCheckConstraintsFromProperties(
       String rawProps, List<ParsedTableConstraint> out) {
-    if (rawProps == null) {
-      return;
-    }
     String stripped = rawProps.trim();
     if (stripped.startsWith("[") && stripped.endsWith("]")) {
       stripped = stripped.substring(1, stripped.length() - 1);
@@ -608,42 +594,6 @@ final class DatabricksHiveMetastoreParser {
           out.add(new ParsedTableConstraint(constraintName, "CHECK", propVal));
         }
       }
-    }
-  }
-
-  private static void parseTableConstraintsList(
-      String rawConstraints, List<ParsedTableConstraint> out) {
-    if (rawConstraints == null) {
-      return;
-    }
-    String stripped = rawConstraints.trim();
-    if (stripped.startsWith("[") && stripped.endsWith("]")) {
-      stripped = stripped.substring(1, stripped.length() - 1);
-    }
-    if (stripped.isEmpty()) {
-      return;
-    }
-    for (String item : splitTopLevelEntries(stripped)) {
-      String trimmed = item.trim();
-      if (trimmed.startsWith("(") && trimmed.endsWith(")") && trimmed.length() > 2) {
-        trimmed = trimmed.substring(1, trimmed.length() - 1);
-      }
-      int commaIdx = trimmed.indexOf(',');
-      if (commaIdx <= 0) {
-        continue;
-      }
-      String name = trimmed.substring(0, commaIdx).trim();
-      String def = trimmed.substring(commaIdx + 1).trim();
-      String type = "CONSTRAINT";
-      String upperDef = def.toUpperCase(Locale.ROOT);
-      if (upperDef.startsWith("PRIMARY KEY")) {
-        type = "PRIMARY KEY";
-      } else if (upperDef.startsWith("FOREIGN KEY")) {
-        type = "FOREIGN KEY";
-      } else if (upperDef.startsWith("CHECK")) {
-        type = "CHECK";
-      }
-      out.add(new ParsedTableConstraint(name, type, def));
     }
   }
 
@@ -683,9 +633,6 @@ final class DatabricksHiveMetastoreParser {
 
   private static List<String> parsePartitionColumnsList(String raw) {
     List<String> result = new ArrayList<>();
-    if (raw == null) {
-      return result;
-    }
     String stripped = raw.trim();
     if (stripped.startsWith("[") && stripped.endsWith("]")) {
       stripped = stripped.substring(1, stripped.length() - 1);

@@ -450,7 +450,7 @@ final class DatabricksHiveMetastoreTasks {
               tbl.comment,
               tbl.owner,
               tbl.createdAt,
-              tbl.updatedAt,
+              "",
               tbl.serdeLibrary,
               tbl.inputFormat,
               tbl.outputFormat,
@@ -491,7 +491,7 @@ final class DatabricksHiveMetastoreTasks {
                 col.columnName,
                 col.dataType,
                 col.isNullable,
-                col.comment,
+                "",
                 col.partitionIndex);
           }
         }

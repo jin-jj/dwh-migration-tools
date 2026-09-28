@@ -190,22 +190,24 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
   }
 
   @Test
-  public void sqlHelper_failedStatement_throwsDatabricksSqlExceptionWithSqlState() {
+  public void sqlHelper_failedStatement_throwsDatabricksSqlExceptionWithSqlStateInMessage() {
     WorkspaceClient client = mock(WorkspaceClient.class);
     StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
     when(client.statementExecution()).thenReturn(stmtApi);
 
+    String sqlState = "42501";
+    String errorMessage = "User does not have USE CATALOG on Catalog 'secret'";
     StatementResponse failedResp =
         new StatementResponse()
             .setStatementId("stmt-denied")
             .setStatus(
                 new StatementStatus()
                     .setState(StatementState.FAILED)
-                    .setSqlState("42501")
+                    .setSqlState(sqlState)
                     .setError(
                         new ServiceError()
                             .setErrorCode(ServiceErrorCode.BAD_REQUEST)
-                            .setMessage("User does not have USE CATALOG on Catalog 'secret'")));
+                            .setMessage(errorMessage)));
 
     when(stmtApi.executeStatement(any(ExecuteStatementRequest.class))).thenReturn(failedResp);
 
@@ -216,8 +218,11 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
         assertThrows(
             DatabricksSqlException.class,
             () -> helper.executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SELECT * FROM secret"));
-    assertEquals("42501", ex.sqlState());
-    assertEquals(ServiceErrorCode.BAD_REQUEST.name(), ex.errorCode());
+    assertEquals(
+        String.format(
+            "SQL statement stmt-denied failed in state %s (SQLSTATE: %s, errorCode: %s): %s",
+            StatementState.FAILED, sqlState, ServiceErrorCode.BAD_REQUEST.name(), errorMessage),
+        ex.getMessage());
   }
 
   @Test

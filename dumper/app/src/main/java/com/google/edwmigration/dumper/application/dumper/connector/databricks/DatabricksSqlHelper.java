@@ -122,7 +122,7 @@ final class DatabricksSqlHelper {
     while (response != null && isRunningState(extractState(response))) {
       if (statementId == null) {
         throw new DatabricksSqlException(
-            "Statement is in RUNNING/PENDING state without a statementId.", null, null);
+            "Statement is in RUNNING/PENDING state without a statementId.");
       }
       sleepForPoll(statementId);
       try {
@@ -134,7 +134,7 @@ final class DatabricksSqlHelper {
     }
 
     if (response == null) {
-      throw new DatabricksSqlException("Received null StatementResponse.", null, null);
+      throw new DatabricksSqlException("Received null StatementResponse.");
     }
 
     StatementStatus status = response.getStatus();
@@ -147,9 +147,7 @@ final class DatabricksSqlHelper {
       throw new DatabricksSqlException(
           String.format(
               "SQL statement %s failed in state %s (SQLSTATE: %s, errorCode: %s): %s",
-              statementId, state, sqlState, errCode, errMsg),
-          sqlState,
-          errCode);
+              statementId, state, sqlState, errCode, errMsg));
     }
 
     ResultData firstResult = response.getResult();
