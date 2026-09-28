@@ -39,10 +39,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.ByteSink;
 import com.google.common.io.Files;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.ColumnsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.DdlsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.FunctionDdlsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.SchemataHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TablesHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreColumnsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreFunctionDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreSchemataTask;
@@ -53,6 +55,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.StringReader;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +77,118 @@ public class DatabricksHiveMetastoreTasksTest {
   private static final int MAX_CONCURRENT_STATEMENTS = 4;
 
   @Rule public final TemporaryFolder tempFolder = new TemporaryFolder();
+
+  @Test
+  public void columnsTask_writesCharAndVarcharLengthsFromDescribeTable() throws Exception {
+    String information =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy",
+            "Table: customers",
+            "Type: MANAGED",
+            "Provider: delta",
+            "Partition Columns: [`dt`]",
+            "Schema: root",
+            " |-- id: long (nullable = false)",
+            " |-- name: string (nullable = true)",
+            " |-- tags: array (nullable = true)",
+            " |    |-- element: string (containsNull = true)",
+            " |-- dt: date (nullable = true)",
+            "");
+    ImmutableList<List<String>> columnRows =
+        ImmutableList.of(
+            Arrays.asList("id", "bigint", "primary id"),
+            Arrays.asList("name", "varchar(20)", null),
+            Arrays.asList("tags", "array<char(2)>", null),
+            Arrays.asList("dt", "date", null));
+    List<List<String>> describeRows = new ArrayList<>(columnRows);
+    describeRows.add(Arrays.asList("# Partition Information", "", ""));
+    describeRows.add(Arrays.asList("# col_name", "data_type", "comment"));
+    describeRows.add(Arrays.asList("dt", "date", null));
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTableResponse("customers", information),
+                "DESCRIBE TABLE `legacy`.`customers`",
+                succeededRows(describeRows)));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreColumnsTask(cache).doRun(null, sink, handle));
+
+    ImmutableList.Builder<String> expectedTypes = ImmutableList.builder();
+    for (List<String> row : columnRows) {
+      expectedTypes.add(row.get(1));
+    }
+    ImmutableList.Builder<String> writtenTypes = ImmutableList.builder();
+    for (CSVRecord record : records) {
+      writtenTypes.add(record.get(ColumnsHeader.DataType));
+    }
+    assertEquals(expectedTypes.build(), writtenTypes.build());
+  }
+
+  @Test
+  public void columnsTask_runsNoDescribeTableForTableWithoutStringColumns() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS, succeeded(SCHEMA), SHOW_TABLES, showTablesResponse("numbers")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreColumnsTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals("int", records.get(0).get(ColumnsHeader.DataType));
+    int showStatementCount = ImmutableList.of(SHOW_SCHEMAS, SHOW_TABLES).size();
+    verify(statements, times(showStatementCount))
+        .executeStatement(any(ExecuteStatementRequest.class));
+  }
+
+  @Test
+  public void columnsTask_keepsStringTypeWhenDescribeTableFails() throws Exception {
+    String information =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy",
+            "Table: customers",
+            "Type: MANAGED",
+            "Provider: delta",
+            "Schema: root",
+            " |-- name: string (nullable = true)",
+            "");
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTableResponse("customers", information),
+                "DESCRIBE TABLE `legacy`.`customers`",
+                failed("[INSUFFICIENT_PERMISSIONS] Insufficient privileges.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreColumnsTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals("name", records.get(0).get(ColumnsHeader.ColumnName));
+    assertEquals("string", records.get(0).get(ColumnsHeader.DataType));
+  }
 
   @Test
   public void ddlsTask_skipsTableWhoseShowCreateTableFails() throws Exception {
@@ -384,6 +499,11 @@ public class DatabricksHiveMetastoreTasksTest {
               return response;
             });
     return statements;
+  }
+
+  private static StatementResponse showTableResponse(String tableName, String information) {
+    return succeededRows(
+        ImmutableList.of(ImmutableList.of(SCHEMA, tableName, "false", information)));
   }
 
   private static StatementResponse showTablesResponse(String... tableNames) {

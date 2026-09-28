@@ -50,8 +50,8 @@ import javax.annotation.Nonnull;
 
 /**
  * Standalone Databricks {@code hive_metastore} metadata connector using {@code SHOW TABLE
- * EXTENDED}, {@code SHOW CREATE TABLE}, and {@code DESCRIBE FUNCTION EXTENDED} via a Databricks SQL
- * Warehouse.
+ * EXTENDED}, {@code DESCRIBE TABLE}, {@code SHOW CREATE TABLE}, and {@code DESCRIBE FUNCTION
+ * EXTENDED} via a Databricks SQL Warehouse.
  */
 @AutoService(Connector.class)
 @Description("Dumps metadata and DDLs from Databricks legacy hive_metastore using SQL Warehouse.")

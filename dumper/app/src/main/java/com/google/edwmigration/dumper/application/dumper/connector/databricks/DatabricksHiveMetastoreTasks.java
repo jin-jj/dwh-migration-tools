@@ -18,6 +18,9 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.common.base.CharMatcher.whitespace;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.hasStringColumn;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.parseDescribeTableTypes;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreParser.withCharVarcharLengths;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cell;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
@@ -57,7 +60,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Extraction tasks for the legacy {@code hive_metastore} catalog using request-scoped {@code SHOW
- * TABLE EXTENDED}, {@code SHOW CREATE TABLE}, and {@code DESCRIBE FUNCTION EXTENDED}.
+ * TABLE EXTENDED}, {@code DESCRIBE TABLE}, {@code SHOW CREATE TABLE}, and {@code DESCRIBE FUNCTION
+ * EXTENDED}.
  */
 final class DatabricksHiveMetastoreTasks {
 
@@ -470,6 +474,13 @@ final class DatabricksHiveMetastoreTasks {
     }
   }
 
+  /**
+   * Writes the columns of each table and view in {@code hive_metastore} to {@code columns.csv}.
+   *
+   * <p>{@code SHOW TABLE EXTENDED} reports {@code CHAR} and {@code VARCHAR} columns as {@code
+   * string}, so {@code DESCRIBE TABLE} runs for each table and view that has a {@code string} type,
+   * to find their lengths.
+   */
   static final class DatabricksHiveMetastoreColumnsTask
       extends AbstractDatabricksHiveMetastoreTask {
 
@@ -487,24 +498,65 @@ final class DatabricksHiveMetastoreTasks {
     protected Void doRun(TaskRunContext context, @Nonnull ByteSink sink, @Nonnull Handle handle)
         throws Exception {
       DatabricksHandle dbxHandle = (DatabricksHandle) handle;
+      ImmutableList<ParsedTableExtended> tables = sessionCache.listParsedTables(dbxHandle);
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(ColumnsHeader.class).print(writer)) {
-        for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
-          for (ParsedColumn col : tbl.columns) {
-            csv.printRecord(
-                tbl.catalogName,
-                tbl.schemaName,
-                tbl.tableName,
-                String.valueOf(col.ordinalPosition),
-                col.columnName,
-                col.dataType,
-                col.isNullable,
-                "",
-                col.partitionIndex);
-          }
-        }
+        dbxHandle
+            .statementRunner()
+            .runInOrder(
+                "DESCRIBE TABLE",
+                tables,
+                DatabricksHiveMetastoreTasks::quoteTableName,
+                table -> findColumnsWithLengths(dbxHandle, table),
+                (table, columns) -> {
+                  for (ParsedColumn column : columns) {
+                    csv.printRecord(
+                        table.catalogName,
+                        table.schemaName,
+                        table.tableName,
+                        String.valueOf(column.ordinalPosition),
+                        column.columnName,
+                        column.dataType,
+                        column.isNullable,
+                        "",
+                        column.partitionIndex);
+                  }
+                });
       }
       return null;
+    }
+
+    /**
+     * Returns the columns of a table with the lengths of its {@code CHAR} and {@code VARCHAR}
+     * columns. The columns are already known from {@code SHOW TABLE EXTENDED}, so if {@code
+     * DESCRIBE TABLE} fails, they are returned with {@code string} types.
+     */
+    @Nonnull
+    private static ImmutableList<ParsedColumn> findColumnsWithLengths(
+        @Nonnull DatabricksHandle handle, @Nonnull ParsedTableExtended table) {
+      if (!hasStringColumn(table)) {
+        return table.columns;
+      }
+
+      String query = "DESCRIBE TABLE " + quoteTableName(table);
+      try (CloseableIterable<List<String>> rows =
+          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
+        return withCharVarcharLengths(table.columns, parseDescribeTableTypes(rows));
+      } catch (IOException e) {
+        return columnsWithoutLengths(table, e);
+      } catch (UncheckedIOException e) {
+        return columnsWithoutLengths(table, e.getCause());
+      }
+    }
+
+    @Nonnull
+    private static ImmutableList<ParsedColumn> columnsWithoutLengths(
+        @Nonnull ParsedTableExtended table, @Nonnull IOException failure) {
+      logger.warn(
+          "Writing the CHAR and VARCHAR columns of {} as string because DESCRIBE TABLE failed: {}",
+          quoteTableName(table),
+          failure.getMessage());
+      return table.columns;
     }
   }
 

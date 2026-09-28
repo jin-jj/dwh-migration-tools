@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.common.base.CharMatcher.whitespace;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteStringLiteral;
 
@@ -38,8 +39,8 @@ import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
 /**
- * Parses Databricks {@code SHOW TABLE EXTENDED}, {@code DESCRIBE SCHEMA EXTENDED}, and {@code
- * DESCRIBE FUNCTION EXTENDED} text outputs for {@code hive_metastore}.
+ * Parses Databricks {@code SHOW TABLE EXTENDED}, {@code DESCRIBE TABLE}, and {@code DESCRIBE
+ * FUNCTION EXTENDED} text outputs for {@code hive_metastore}.
  */
 final class DatabricksHiveMetastoreParser {
 
@@ -75,6 +76,17 @@ final class DatabricksHiveMetastoreParser {
    */
   private static final ImmutableMap<String, String> HIVE_TYPE_NAMES =
       ImmutableMap.of("byte", "tinyint", "short", "smallint", "integer", "int", "long", "bigint");
+
+  private static final String STRING_TYPE_NAME = "string";
+
+  /** Matches the {@code string} type in a Hive type, such as in {@code array<string>}. */
+  private static final Pattern STRING_TYPE_PATTERN = Pattern.compile("\\bstring\\b");
+
+  /**
+   * Matches a {@code CHAR} or {@code VARCHAR} type with its length, such as {@code varchar(20)}.
+   */
+  private static final Pattern CHAR_VARCHAR_TYPE_PATTERN =
+      Pattern.compile("\\b(?:var)?char\\(\\d+\\)", Pattern.CASE_INSENSITIVE);
 
   /** The format of {@code java.util.Date#toString}, which Spark uses for {@code Created Time}. */
   private static final DateTimeFormatter CREATED_TIME_FORMATTER =
@@ -122,6 +134,12 @@ final class DatabricksHiveMetastoreParser {
       this.dataType = dataType;
       this.isNullable = isNullable;
       this.partitionIndex = partitionIndex;
+    }
+
+    /** Returns this column with another data type. */
+    @Nonnull
+    ParsedColumn withDataType(@Nonnull String dataType) {
+      return new ParsedColumn(ordinalPosition, columnName, dataType, isNullable, partitionIndex);
     }
   }
 
@@ -570,6 +588,65 @@ final class DatabricksHiveMetastoreParser {
     }
     dataType.append('>');
     return next;
+  }
+
+  /**
+   * Returns whether the type of a column contains {@code string}, which the {@code Schema} tree
+   * also reports for {@code CHAR} and {@code VARCHAR} types.
+   */
+  static boolean hasStringColumn(@Nonnull ParsedTableExtended table) {
+    for (ParsedColumn column : table.columns) {
+      if (STRING_TYPE_PATTERN.matcher(column.dataType).find()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Parses the column types of {@code DESCRIBE TABLE} rows, such as {@code varchar(20)}, by column
+   * name. The columns end at the first row without a type, such as {@code # Partition Information},
+   * which starts a section that lists the partition columns again.
+   */
+  @Nonnull
+  static ImmutableMap<String, String> parseDescribeTableTypes(
+      @Nonnull Iterable<? extends List<String>> rows) {
+    Map<String, String> typesByColumnName = new LinkedHashMap<>();
+    for (List<String> row : rows) {
+      String dataType = cellOrEmpty(row, 1);
+      if (dataType.isEmpty()) {
+        break;
+      }
+
+      typesByColumnName.putIfAbsent(cellOrEmpty(row, 0), dataType);
+    }
+    return ImmutableMap.copyOf(typesByColumnName);
+  }
+
+  /**
+   * Returns the columns with the {@code CHAR} and {@code VARCHAR} types that {@code DESCRIBE TABLE}
+   * reports, which the {@code Schema} tree reports as {@code string}.
+   *
+   * <p>A described type replaces the type of a column only if both are equal once each {@code CHAR}
+   * and {@code VARCHAR} type is replaced by {@code string}. So a column keeps its type if {@code
+   * DESCRIBE TABLE} truncated the type, as it does for a struct with many fields, such as {@code
+   * struct<f00:int,...,f24:int,... 5 more fields>}.
+   */
+  @Nonnull
+  static ImmutableList<ParsedColumn> withCharVarcharLengths(
+      @Nonnull List<ParsedColumn> columns, @Nonnull Map<String, String> describedTypes) {
+    ImmutableList.Builder<ParsedColumn> builder = ImmutableList.builder();
+    for (ParsedColumn column : columns) {
+      String describedType = describedTypes.get(column.columnName);
+      boolean differsOnlyInLengths =
+          describedType != null
+              && CHAR_VARCHAR_TYPE_PATTERN
+                  .matcher(describedType)
+                  .replaceAll(STRING_TYPE_NAME)
+                  .equals(column.dataType);
+      builder.add(differsOnlyInLengths ? column.withDataType(describedType) : column);
+    }
+    return builder.build();
   }
 
   private static void parseDeltaCheckConstraintsFromProperties(
