@@ -16,16 +16,24 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.hasStringColumn;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.parseDescribeTableTypes;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.withCharVarcharLengths;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.ParsedColumn;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.ParsedTableExtended;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -344,6 +352,99 @@ public class DatabricksHiveMetastoreTableParserTest {
   }
 
   @Test
+  public void hasStringColumn_findsStringTypeButNotStringNamePrefix() {
+    assertTrue(
+        hasStringColumn(
+            tableWithSchema(
+                " |-- tags: array (nullable = true)",
+                " |    |-- element: string (containsNull = true)")));
+    assertFalse(
+        hasStringColumn(
+            tableWithSchema(
+                " |-- s: struct (nullable = true)",
+                " |    |-- string_id: long (nullable = true)")));
+  }
+
+  @Test
+  public void parseDescribeTableTypes_stopsAtPartitionInformation() {
+    ImmutableList<List<String>> columnRows =
+        ImmutableList.of(
+            Arrays.asList("id", "bigint", "primary id"),
+            Arrays.asList("name", "varchar(20)", "customer's name"),
+            Arrays.asList("code", "char(3)", null),
+            Arrays.asList("addr", "struct<city:string,zip:int>", null),
+            Arrays.asList("dt", "date", null));
+    List<List<String>> rows = new ArrayList<>(columnRows);
+    rows.add(Arrays.asList("# Partition Information", "", ""));
+    rows.add(Arrays.asList("# col_name", "data_type", "comment"));
+    rows.add(Arrays.asList("dt", "date", null));
+
+    ImmutableMap.Builder<String, String> expected = ImmutableMap.builder();
+    for (List<String> row : columnRows) {
+      expected.put(row.get(0), row.get(1));
+    }
+    assertEquals(expected.build(), parseDescribeTableTypes(rows));
+  }
+
+  @Test
+  public void withCharVarcharLengths_replacesTypesThatDifferOnlyInLengths() {
+    // DESCRIBE TABLE shows the first 25 fields of a struct, as for this 30-field struct.
+    int wideFieldCount = 30;
+    int shownFieldCount = 25;
+    List<String> wideFields = new ArrayList<>();
+    for (int field = 0; field < wideFieldCount - 1; field++) {
+      wideFields.add(String.format("f%02d:int", field));
+    }
+    wideFields.add("last:string");
+    String wideTreeType = "struct<" + String.join(",", wideFields) + ">";
+    String wideDescribedType =
+        String.format(
+            "struct<%s,... %d more fields>",
+            String.join(",", wideFields.subList(0, shownFieldCount)),
+            wideFieldCount - shownFieldCount);
+    ImmutableList<ParsedColumn> columns =
+        ImmutableList.of(
+            new ParsedColumn(0, "name", "string", "YES", ""),
+            new ParsedColumn(1, "code", "string", "NO", "0"),
+            new ParsedColumn(2, "s", "struct<a:string,b:int>", "YES", ""),
+            new ParsedColumn(3, "arr", "array<string>", "YES", ""),
+            new ParsedColumn(4, "m", "map<string,string>", "YES", ""),
+            new ParsedColumn(5, "plain", "string", "YES", ""),
+            new ParsedColumn(6, "w", wideTreeType, "YES", ""),
+            new ParsedColumn(7, "n", "int", "YES", ""),
+            new ParsedColumn(8, "added", "string", "YES", ""));
+    ImmutableMap<String, String> describedTypes =
+        ImmutableMap.<String, String>builder()
+            .put("name", "varchar(20)")
+            .put("code", "char(3)")
+            .put("s", "struct<a:varchar(10),b:int>")
+            .put("arr", "array<char(2)>")
+            .put("m", "map<varchar(5),char(1)>")
+            .put("plain", "string")
+            .put("w", wideDescribedType)
+            .put("n", "varchar(3)")
+            .build();
+    ImmutableSet<String> columnsWithDescribedTypes =
+        ImmutableSet.of("name", "code", "s", "arr", "m", "plain");
+
+    ImmutableList<ParsedColumn> result = withCharVarcharLengths(columns, describedTypes);
+
+    ImmutableList.Builder<String> expected = ImmutableList.builder();
+    for (ParsedColumn column : columns) {
+      String dataType =
+          columnsWithDescribedTypes.contains(column.columnName)
+              ? describedTypes.get(column.columnName)
+              : column.dataType;
+      expected.add(describeColumn(column.withDataType(dataType)));
+    }
+    ImmutableList.Builder<String> actual = ImmutableList.builder();
+    for (ParsedColumn column : result) {
+      actual.add(describeColumn(column));
+    }
+    assertEquals(expected.build(), actual.build());
+  }
+
+  @Test
   public void parseShowTableExtended_writesCreatedTimeAsInstant() {
     ParsedTableExtended parsed =
         DatabricksHiveMetastoreTableParser.parseShowTableExtended(
@@ -430,5 +531,30 @@ public class DatabricksHiveMetastoreTableParserTest {
         " |-- id: integer (nullable = true)",
         "",
         "");
+  }
+
+  /** Returns a managed Delta table parsed from the given {@code Schema} tree lines. */
+  private static ParsedTableExtended tableWithSchema(String... schemaTreeLines) {
+    List<String> lines = new ArrayList<>();
+    lines.add("Catalog: hive_metastore");
+    lines.add("Database: legacy_db");
+    lines.add("Table: typed");
+    lines.add("Type: MANAGED");
+    lines.add("Provider: delta");
+    lines.add("Schema: root");
+    lines.addAll(Arrays.asList(schemaTreeLines));
+    return DatabricksHiveMetastoreTableParser.parseShowTableExtended(
+        "legacy_db", "typed", String.join("\n", lines) + "\n");
+  }
+
+  /** Returns all fields of a column, such as {@code 0|name|varchar(20)|YES|}. */
+  private static String describeColumn(ParsedColumn column) {
+    return String.join(
+        "|",
+        String.valueOf(column.ordinalPosition),
+        column.columnName,
+        column.dataType,
+        column.isNullable,
+        column.partitionIndex);
   }
 }

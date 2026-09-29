@@ -319,4 +319,16 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
     assertEquals(1, rows.size());
     assertEquals(Collections.singletonList("refreshed_row"), rows.get(0));
   }
+
+  @Test
+  public void quoteIdentifier_doublesBackticks() {
+    assertEquals("`legacy`", DatabricksSqlHelper.quoteIdentifier("legacy"));
+    assertEquals("`odd``name`", DatabricksSqlHelper.quoteIdentifier("odd`name"));
+  }
+
+  @Test
+  public void quoteStringLiteral_escapesBackslashesAndSingleQuotes() {
+    assertEquals("'plain'", DatabricksSqlHelper.quoteStringLiteral("plain"));
+    assertEquals("'it\\'s C:\\\\tmp'", DatabricksSqlHelper.quoteStringLiteral("it's C:\\tmp"));
+  }
 }

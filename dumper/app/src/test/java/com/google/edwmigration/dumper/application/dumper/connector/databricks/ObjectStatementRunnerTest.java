@@ -29,12 +29,16 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -113,6 +117,29 @@ public class ObjectStatementRunnerTest {
   }
 
   @Test
+  public void runInOrder_runsUpToMaxConcurrentStatementsAtOnce() throws IOException {
+    CountDownLatch allThreadsBusy = new CountDownLatch(MAX_CONCURRENT_STATEMENTS);
+    AtomicInteger running = new AtomicInteger();
+    AtomicInteger maxRunning = new AtomicInteger();
+
+    runner.runInOrder(
+        "TEST",
+        inputs(5 * MAX_CONCURRENT_STATEMENTS),
+        String::valueOf,
+        input -> {
+          maxRunning.accumulateAndGet(running.incrementAndGet(), Math::max);
+          allThreadsBusy.countDown();
+          // Holds the first statements until MAX_CONCURRENT_STATEMENTS of them run at once.
+          awaitUninterruptibly(allThreadsBusy, TIMEOUT_SECONDS, SECONDS);
+          running.decrementAndGet();
+          return input;
+        },
+        (input, result) -> {});
+
+    assertEquals(MAX_CONCURRENT_STATEMENTS, maxRunning.get());
+  }
+
+  @Test
   public void runInOrder_throwsFirstFailureWhenEveryStatementFails() {
     ImmutableMap<String, IOException> failuresByInput =
         ImmutableMap.of("a", new IOException("Broken a"), "b", new IOException("Broken b"));
@@ -133,6 +160,97 @@ public class ObjectStatementRunnerTest {
 
     assertSame(failuresByInput.get(inputs.get(0)), thrown.getCause());
     assertTrue(thrown.getMessage().contains("all " + inputs.size() + " objects"));
+  }
+
+  @Test
+  public void runInOrder_acceptsNoInputs() throws IOException {
+    runner.runInOrder(
+        "TEST",
+        ImmutableList.<String>of(),
+        input -> input,
+        input -> input,
+        (input, result) -> fail("There are no inputs."));
+  }
+
+  @Test
+  public void runInOrder_propagatesRuntimeExceptions() {
+    IllegalStateException bug = new IllegalStateException("Bug");
+
+    IllegalStateException thrown =
+        assertThrows(
+            IllegalStateException.class,
+            () ->
+                runner.runInOrder(
+                    "TEST",
+                    ImmutableList.of("a", "b"),
+                    input -> input,
+                    input -> {
+                      throw bug;
+                    },
+                    (input, result) -> fail("No statement succeeded.")));
+
+    assertSame(bug, thrown);
+  }
+
+  @Test
+  public void runInOrder_throwsInterruptedIoExceptionWhenCallerIsInterrupted() {
+    Thread.currentThread().interrupt();
+    try {
+      assertThrows(
+          InterruptedIOException.class,
+          () ->
+              runner.runInOrder(
+                  "TEST",
+                  ImmutableList.of("a"),
+                  input -> input,
+                  input -> input,
+                  (input, result) -> fail("The caller was interrupted.")));
+      assertTrue(Thread.currentThread().isInterrupted());
+    } finally {
+      // Clears the interrupt, so it doesn't leak into other tests on this thread.
+      Thread.interrupted();
+    }
+  }
+
+  @Test
+  public void runInOrder_cancelsRunningStatementWhenInterrupted() throws InterruptedException {
+    CountDownLatch statementStarted = new CountDownLatch(1);
+    CountDownLatch statementInterrupted = new CountDownLatch(1);
+    AtomicReference<Throwable> thrown = new AtomicReference<>();
+    AtomicBoolean interruptFlagKept = new AtomicBoolean();
+    Thread caller =
+        new Thread(
+            () -> {
+              try {
+                runner.runInOrder(
+                    "TEST",
+                    ImmutableList.of("a"),
+                    input -> input,
+                    input -> {
+                      statementStarted.countDown();
+                      try {
+                        Thread.sleep(SECONDS.toMillis(TIMEOUT_SECONDS));
+                      } catch (InterruptedException e) {
+                        statementInterrupted.countDown();
+                        throw new InterruptedIOException("Statement was cancelled.");
+                      }
+                      return input;
+                    },
+                    (input, result) -> fail("The statement was cancelled."));
+              } catch (Throwable e) {
+                thrown.set(e);
+              }
+              interruptFlagKept.set(Thread.currentThread().isInterrupted());
+            });
+
+    caller.start();
+    assertTrue(statementStarted.await(TIMEOUT_SECONDS, SECONDS));
+    caller.interrupt();
+    caller.join(SECONDS.toMillis(TIMEOUT_SECONDS));
+
+    assertTrue(String.valueOf(thrown.get()), thrown.get() instanceof InterruptedIOException);
+    assertTrue(interruptFlagKept.get());
+    assertTrue(statementInterrupted.await(TIMEOUT_SECONDS, SECONDS));
   }
 
   private static ImmutableList<Integer> inputs(int count) {

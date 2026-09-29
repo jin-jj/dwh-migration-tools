@@ -84,6 +84,17 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
   }
 
   @Test
+  public void validate_acceptsMaxConcurrentStatementsInRange() throws IOException {
+    DatabricksHiveMetastoreMetadataConnector connector =
+        new DatabricksHiveMetastoreMetadataConnector();
+
+    connector.validate(
+        argumentsWithMaxConcurrentStatements(MAX_CONCURRENT_STATEMENTS_RANGE.lowerEndpoint()));
+    connector.validate(
+        argumentsWithMaxConcurrentStatements(MAX_CONCURRENT_STATEMENTS_RANGE.upperEndpoint()));
+  }
+
+  @Test
   public void validate_rejectsMaxConcurrentStatementsOutOfRange() throws IOException {
     DatabricksHiveMetastoreMetadataConnector connector =
         new DatabricksHiveMetastoreMetadataConnector();
