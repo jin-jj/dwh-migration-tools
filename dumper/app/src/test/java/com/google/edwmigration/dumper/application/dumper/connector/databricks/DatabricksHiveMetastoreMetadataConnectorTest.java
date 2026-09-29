@@ -16,6 +16,8 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreMetadataConnector.DatabricksHiveMetastoreProperty.MAX_CONCURRENT_STATEMENTS;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreMetadataConnector.MAX_CONCURRENT_STATEMENTS_RANGE;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
@@ -82,7 +84,25 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
   }
 
   @Test
-  public void addTasksTo_addsSchemaAndTableTasks() throws Exception {
+  public void validate_rejectsMaxConcurrentStatementsOutOfRange() throws IOException {
+    DatabricksHiveMetastoreMetadataConnector connector =
+        new DatabricksHiveMetastoreMetadataConnector();
+
+    for (long value :
+        ImmutableList.of(
+            MAX_CONCURRENT_STATEMENTS_RANGE.lowerEndpoint() - 1,
+            MAX_CONCURRENT_STATEMENTS_RANGE.upperEndpoint() + 1)) {
+      ConnectorArguments arguments = argumentsWithMaxConcurrentStatements(value);
+
+      MetadataDumperUsageException exception =
+          assertThrows(MetadataDumperUsageException.class, () -> connector.validate(arguments));
+      assertTrue(exception.getMessage().contains(MAX_CONCURRENT_STATEMENTS.getName()));
+      assertTrue(exception.getMessage().contains(MAX_CONCURRENT_STATEMENTS_RANGE.toString()));
+    }
+  }
+
+  @Test
+  public void addTasksTo_addsCanonicalCsvAndDdlTasks() throws Exception {
     DatabricksHiveMetastoreMetadataConnector connector =
         new DatabricksHiveMetastoreMetadataConnector();
     ConnectorArguments arguments =
@@ -100,7 +120,10 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
             DatabricksHiveMetastoreDumpFormat.TABLES_ENTRY_NAME,
             DatabricksHiveMetastoreDumpFormat.COLUMNS_ENTRY_NAME,
             DatabricksHiveMetastoreDumpFormat.VIEWS_ENTRY_NAME,
-            DatabricksHiveMetastoreDumpFormat.TABLE_CONSTRAINTS_ENTRY_NAME);
+            DatabricksHiveMetastoreDumpFormat.TABLE_CONSTRAINTS_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.FUNCTIONS_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.DDLS_ENTRY_NAME,
+            DatabricksHiveMetastoreDumpFormat.FUNCTION_DDLS_ENTRY_NAME);
     int metadataAndFormatTaskCount = 2;
 
     List<Task<?>> tasks = new ArrayList<>();
@@ -113,5 +136,17 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
     }
 
     assertTrue(targetPaths.containsAll(expectedEntries));
+  }
+
+  private static ConnectorArguments argumentsWithMaxConcurrentStatements(long value)
+      throws IOException {
+    return new ConnectorArguments(
+        "--connector",
+        CONNECTOR_NAME,
+        "--url",
+        "https://workspace.cloud.databricks.com",
+        "--warehouse",
+        "wh-123",
+        "-D" + MAX_CONCURRENT_STATEMENTS.getName() + "=" + value);
   }
 }

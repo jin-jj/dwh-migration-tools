@@ -39,11 +39,15 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.io.ByteSink;
 import com.google.common.io.Files;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.ColumnsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.DdlsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.FunctionDdlsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.SchemataHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TableConstraintsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TablesHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.ViewsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreColumnsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreDdlsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreFunctionDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreSchemataTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTableConstraintsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTablesTask;
@@ -55,6 +59,7 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.StringReader;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -72,6 +77,8 @@ public class DatabricksHiveMetastoreTasksTest {
   private static final String SCHEMA = "legacy";
   private static final String SHOW_SCHEMAS = "SHOW SCHEMAS";
   private static final String SHOW_TABLES = "SHOW TABLE EXTENDED IN `legacy` LIKE '*'";
+  private static final String SHOW_FUNCTIONS = "SHOW USER FUNCTIONS IN `legacy`";
+  private static final int MAX_CONCURRENT_STATEMENTS = 4;
 
   @Rule public final TemporaryFolder tempFolder = new TemporaryFolder();
 
@@ -437,6 +444,128 @@ public class DatabricksHiveMetastoreTasksTest {
   }
 
   @Test
+  public void columnsTask_writesCharAndVarcharLengthsFromDescribeTable() throws Exception {
+    String information =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy",
+            "Table: customers",
+            "Type: MANAGED",
+            "Provider: delta",
+            "Partition Columns: [`dt`]",
+            "Schema: root",
+            " |-- id: long (nullable = false)",
+            " |-- name: string (nullable = true)",
+            " |-- tags: array (nullable = true)",
+            " |    |-- element: string (containsNull = true)",
+            " |-- dt: date (nullable = true)",
+            "");
+    ImmutableList<List<String>> columnRows =
+        ImmutableList.of(
+            Arrays.asList("id", "bigint", "primary id"),
+            Arrays.asList("name", "varchar(20)", null),
+            Arrays.asList("tags", "array<char(2)>", null),
+            Arrays.asList("dt", "date", null));
+    List<List<String>> describeRows = new ArrayList<>(columnRows);
+    describeRows.add(Arrays.asList("# Partition Information", "", ""));
+    describeRows.add(Arrays.asList("# col_name", "data_type", "comment"));
+    describeRows.add(Arrays.asList("dt", "date", null));
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTableResponse("customers", information),
+                "DESCRIBE TABLE `legacy`.`customers`",
+                succeededRows(describeRows)));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreColumnsTask(cache).doRun(null, sink, handle));
+
+    ImmutableList.Builder<String> expectedTypes = ImmutableList.builder();
+    for (List<String> row : columnRows) {
+      expectedTypes.add(row.get(1));
+    }
+    ImmutableList.Builder<String> writtenTypes = ImmutableList.builder();
+    for (CSVRecord record : records) {
+      writtenTypes.add(record.get(ColumnsHeader.DataType));
+    }
+    assertEquals(expectedTypes.build(), writtenTypes.build());
+  }
+
+  @Test
+  public void ddlsTask_skipsTableWhoseShowCreateTableFails() throws Exception {
+    String deltaDdl = "CREATE TABLE hive_metastore.legacy.delta_tbl (id INT NOT NULL) USING delta";
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTablesResponse("delta_tbl", "hive_serde_tbl"),
+                "SHOW CREATE TABLE `legacy`.`delta_tbl`",
+                succeeded(deltaDdl),
+                "SHOW CREATE TABLE `legacy`.`hive_serde_tbl`",
+                failed(
+                    "[UNSUPPORTED_SHOW_CREATE_TABLE.WITH_UNSUPPORTED_SERDE_CONFIGURATION]"
+                        + " Unsupported SHOW CREATE TABLE command.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) -> new DatabricksHiveMetastoreDdlsTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals("delta_tbl", records.get(0).get(DdlsHeader.TableName));
+    assertEquals("MANAGED", records.get(0).get(DdlsHeader.TableType));
+    assertEquals(deltaDdl, records.get(0).get(DdlsHeader.Ddl));
+  }
+
+  @Test
+  public void functionDdlsTask_skipsFunctionWhoseDescribeFails() throws Exception {
+    ImmutableList<String> describeLines =
+        ImmutableList.of(
+            "Function: hive_metastore.legacy.double_it",
+            "Type: SCALAR",
+            "Input: x INT",
+            "Returns: INT",
+            "Body: x * 2");
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_FUNCTIONS,
+                succeeded("legacy.double_it", "legacy.broken_fn"),
+                "DESCRIBE FUNCTION EXTENDED `legacy`.`double_it`",
+                succeeded(describeLines.toArray(new String[0])),
+                "DESCRIBE FUNCTION EXTENDED `legacy`.`broken_fn`",
+                failed("[ROUTINE_NOT_FOUND] The routine `legacy`.`broken_fn` cannot be found.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreFunctionDdlsTask(cache).doRun(null, sink, handle));
+
+    String expectedDdl =
+        DatabricksHiveMetastoreFunctionParser.parseDescribeFunctionExtended(
+                DatabricksFilter.HIVE_METASTORE_CATALOG, SCHEMA, "double_it", describeLines)
+            .ddl;
+    assertEquals(1, records.size());
+    assertEquals("double_it", records.get(0).get(FunctionDdlsHeader.FunctionName));
+    assertEquals(expectedDdl, records.get(0).get(FunctionDdlsHeader.Ddl));
+  }
+
+  @Test
   public void sessionCache_runsShowTableExtendedOncePerSchemaForAllTasks() throws Exception {
     StatementExecutionAPI statements =
         mockStatements(
@@ -508,7 +637,7 @@ public class DatabricksHiveMetastoreTasksTest {
     when(client.statementExecution()).thenReturn(statements);
     DatabricksSqlHelper sqlHelper =
         new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
-    return new DatabricksHandle(sqlHelper, filter);
+    return new DatabricksHandle(sqlHelper, filter, MAX_CONCURRENT_STATEMENTS);
   }
 
   /** Mocks the Statement Execution API to answer each SQL statement from the map. */

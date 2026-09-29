@@ -19,6 +19,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
@@ -42,8 +43,12 @@ import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
 import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.stubbing.Scenario;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -69,6 +74,58 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
     if (wireMock != null) {
       wireMock.stop();
     }
+  }
+
+  @Test
+  public void chunkDownloader_retriesOn429WithRetryAfterAndPreservesNullVsStringNull()
+      throws Exception {
+    wireMock.stubFor(
+        get(urlEqualTo("/chunk/0"))
+            .inScenario("retry-chunk")
+            .whenScenarioStateIs(Scenario.STARTED)
+            .willReturn(aResponse().withStatus(429).withHeader("Retry-After", "2"))
+            .willSetStateTo("SECOND_TRY"));
+
+    wireMock.stubFor(
+        get(urlEqualTo("/chunk/0"))
+            .inScenario("retry-chunk")
+            .whenScenarioStateIs("SECOND_TRY")
+            .willReturn(
+                aResponse()
+                    .withStatus(503)
+                    .withHeader("Retry-After", "Fri, 18 Sep 2026 19:00:03 GMT"))
+            .willSetStateTo("SUCCESS"));
+
+    wireMock.stubFor(
+        get(urlEqualTo("/chunk/0"))
+            .inScenario("retry-chunk")
+            .whenScenarioStateIs("SUCCESS")
+            .withHeader("X-Custom-Cloud-Header", equalTo("sig-token"))
+            .willReturn(
+                aResponse()
+                    .withStatus(200)
+                    .withHeader("Content-Type", "application/json")
+                    .withBody("[[\"cat1\", null, \"null\"], [\"cat2\", \"comment\", \"owner\"]]")));
+
+    List<Long> recordedSleeps = new ArrayList<>();
+    Clock fixedClock = Clock.fixed(Instant.parse("2026-09-18T19:00:00Z"), ZoneOffset.UTC);
+    DatabricksChunkDownloader downloader =
+        new DatabricksChunkDownloader(5, 100L, 1000L, fixedClock, recordedSleeps::add);
+
+    ExternalLink link =
+        new ExternalLink()
+            .setExternalLink(wireMock.baseUrl() + "/chunk/0")
+            .setHttpHeaders(ImmutableMap.of("X-Custom-Cloud-Header", "sig-token"));
+
+    List<List<String>> rows = downloader.downloadChunkRows(link);
+    assertEquals(2, rows.size());
+    assertEquals("cat1", rows.get(0).get(0));
+    assertNull(rows.get(0).get(1));
+    assertEquals("null", rows.get(0).get(2));
+    assertEquals(2, recordedSleeps.size());
+    assertEquals(Long.valueOf(2000L), recordedSleeps.get(0));
+    assertEquals(Long.valueOf(3000L), recordedSleeps.get(1));
+    wireMock.verify(3, getRequestedFor(urlEqualTo("/chunk/0")));
   }
 
   @Test

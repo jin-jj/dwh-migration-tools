@@ -16,17 +16,25 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.edwmigration.dumper.application.dumper.utils.PropertyParser.parseNumber;
+import static java.lang.Math.toIntExact;
+
 import com.databricks.sdk.WorkspaceClient;
 import com.google.auto.service.AutoService;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Range;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
 import com.google.edwmigration.dumper.application.dumper.annotations.RespectsArgumentSchemaPredicate;
 import com.google.edwmigration.dumper.application.dumper.annotations.RespectsInput;
 import com.google.edwmigration.dumper.application.dumper.connector.AbstractConnector;
 import com.google.edwmigration.dumper.application.dumper.connector.Connector;
+import com.google.edwmigration.dumper.application.dumper.connector.ConnectorProperty;
 import com.google.edwmigration.dumper.application.dumper.connector.MetadataConnector;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreCatalogsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreColumnsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreDdlsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreFunctionDdlsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreFunctionsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreSchemataTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTableConstraintsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTablesTask;
@@ -42,10 +50,12 @@ import javax.annotation.Nonnull;
 
 /**
  * Standalone Databricks {@code hive_metastore} metadata connector using {@code SHOW SCHEMAS},
- * {@code DESCRIBE SCHEMA EXTENDED} and {@code SHOW TABLE EXTENDED} via a Databricks SQL Warehouse.
+ * {@code DESCRIBE SCHEMA EXTENDED}, {@code SHOW TABLE EXTENDED}, {@code DESCRIBE TABLE}, {@code
+ * SHOW CREATE TABLE}, {@code SHOW USER FUNCTIONS} and {@code DESCRIBE FUNCTION EXTENDED} via a
+ * Databricks SQL Warehouse.
  */
 @AutoService(Connector.class)
-@Description("Dumps metadata from Databricks legacy hive_metastore using SQL Warehouse.")
+@Description("Dumps metadata and DDLs from Databricks legacy hive_metastore using SQL Warehouse.")
 @RespectsInput(
     order = 100,
     arg = ConnectorArguments.OPT_URI,
@@ -64,8 +74,55 @@ public class DatabricksHiveMetastoreMetadataConnector extends AbstractConnector
 
   public static final String CONNECTOR_NAME = "databricks-hive-metastore";
 
+  /**
+   * Allowed values of {@link DatabricksHiveMetastoreProperty#MAX_CONCURRENT_STATEMENTS}. The HTTP
+   * client of the Databricks SDK keeps at most 20 connections per host, so more threads would only
+   * wait for a connection.
+   */
+  static final Range<Long> MAX_CONCURRENT_STATEMENTS_RANGE = Range.closed(1L, 20L);
+
+  private static final int DEFAULT_MAX_CONCURRENT_STATEMENTS = 8;
+
+  /** Properties of this connector, passed as {@code -D<name>=<value>}. */
+  enum DatabricksHiveMetastoreProperty implements ConnectorProperty {
+    MAX_CONCURRENT_STATEMENTS(
+        "max-concurrent-statements",
+        "Max number of SQL statements, such as SHOW CREATE TABLE for each table, that run"
+            + " concurrently on the SQL warehouse. Allowed range: "
+            + MAX_CONCURRENT_STATEMENTS_RANGE
+            + ". Default: "
+            + DEFAULT_MAX_CONCURRENT_STATEMENTS
+            + ".");
+
+    private final String name;
+    private final String description;
+
+    DatabricksHiveMetastoreProperty(@Nonnull String name, @Nonnull String description) {
+      this.name = CONNECTOR_NAME + "." + name;
+      this.description = description;
+    }
+
+    @Override
+    @Nonnull
+    public String getName() {
+      return name;
+    }
+
+    @Override
+    @Nonnull
+    public String getDescription() {
+      return description;
+    }
+  }
+
   public DatabricksHiveMetastoreMetadataConnector() {
     super(CONNECTOR_NAME);
+  }
+
+  @Override
+  @Nonnull
+  protected Class<? extends Enum<? extends ConnectorProperty>> getConnectorProperties() {
+    return DatabricksHiveMetastoreProperty.class;
   }
 
   @Override
@@ -74,6 +131,7 @@ public class DatabricksHiveMetastoreMetadataConnector extends AbstractConnector
     DatabricksClientFactory.validateNotAssessment(getName(), arguments);
     DatabricksClientFactory.requireUrl(arguments);
     DatabricksClientFactory.requireWarehouse(arguments);
+    parseMaxConcurrentStatements(arguments);
   }
 
   @Override
@@ -93,6 +151,9 @@ public class DatabricksHiveMetastoreMetadataConnector extends AbstractConnector
     out.add(new DatabricksHiveMetastoreColumnsTask(sessionCache));
     out.add(new DatabricksHiveMetastoreViewsTask(sessionCache));
     out.add(new DatabricksHiveMetastoreTableConstraintsTask(sessionCache));
+    out.add(new DatabricksHiveMetastoreFunctionsTask(sessionCache));
+    out.add(new DatabricksHiveMetastoreDdlsTask(sessionCache));
+    out.add(new DatabricksHiveMetastoreFunctionDdlsTask(sessionCache));
   }
 
   @Override
@@ -103,6 +164,17 @@ public class DatabricksHiveMetastoreMetadataConnector extends AbstractConnector
     String warehouseId = DatabricksClientFactory.requireWarehouse(arguments);
     WorkspaceClient client = DatabricksClientFactory.createWorkspaceClient(arguments);
     return new DatabricksHandle(
-        new DatabricksSqlHelper(client, warehouseId), DatabricksFilter.fromArguments(arguments));
+        new DatabricksSqlHelper(client, warehouseId),
+        DatabricksFilter.fromArguments(arguments),
+        parseMaxConcurrentStatements(arguments));
+  }
+
+  private static int parseMaxConcurrentStatements(@Nonnull ConnectorArguments arguments) {
+    return toIntExact(
+        parseNumber(
+                arguments,
+                DatabricksHiveMetastoreProperty.MAX_CONCURRENT_STATEMENTS,
+                MAX_CONCURRENT_STATEMENTS_RANGE)
+            .orElse(DEFAULT_MAX_CONCURRENT_STATEMENTS));
   }
 }

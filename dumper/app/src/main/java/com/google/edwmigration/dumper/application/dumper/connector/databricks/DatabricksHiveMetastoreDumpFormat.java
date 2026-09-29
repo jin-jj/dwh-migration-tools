@@ -89,10 +89,13 @@ interface DatabricksHiveMetastoreDumpFormat {
   /**
    * Columns of {@code columns.csv}.
    *
-   * <p>{@code DataType} is written in Hive type syntax, such as {@code bigint} or {@code
-   * array<struct<x:bigint,y:string>>}. {@code SHOW TABLE EXTENDED} reports {@code CHAR} and {@code
-   * VARCHAR} types as {@code string}. {@code Comment} is empty, because {@code SHOW TABLE EXTENDED}
-   * has no column comments.
+   * <p>{@code DataType} is written in Hive type syntax, such as {@code bigint}, {@code varchar(20)}
+   * or {@code array<struct<x:bigint,y:string>>}. {@code SHOW TABLE EXTENDED} reports {@code CHAR}
+   * and {@code VARCHAR} types as {@code string}, so their lengths come from {@code DESCRIBE TABLE},
+   * which runs for each table and view that has a {@code string} type. A column keeps {@code
+   * string} if {@code DESCRIBE TABLE} fails or truncates its type, as it does for a struct with
+   * many fields. {@code Comment} is empty, because {@code SHOW TABLE EXTENDED} has no column
+   * comments; they are in {@code ddls.csv}.
    */
   enum ColumnsHeader {
     TableCatalog,

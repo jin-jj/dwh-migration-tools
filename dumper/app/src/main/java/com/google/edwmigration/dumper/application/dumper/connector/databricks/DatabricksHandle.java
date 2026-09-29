@@ -24,18 +24,24 @@ import javax.annotation.concurrent.ThreadSafe;
 /**
  * Thread-safe shared {@code Handle} for the Databricks {@code hive_metastore} connector.
  *
- * <p>Holds the {@link DatabricksSqlHelper} bound to the configured SQL Warehouse and the schema
- * {@link DatabricksFilter}.
+ * <p>Holds the {@link DatabricksSqlHelper} bound to the configured SQL Warehouse, the schema {@link
+ * DatabricksFilter}, and the {@link ObjectStatementRunner} that bounds the number of statements
+ * running concurrently on the warehouse.
  */
 @ThreadSafe
 final class DatabricksHandle extends AbstractHandle {
 
   private final DatabricksSqlHelper sqlHelper;
   private final DatabricksFilter filter;
+  private final ObjectStatementRunner statementRunner;
 
-  DatabricksHandle(@Nonnull DatabricksSqlHelper sqlHelper, @Nonnull DatabricksFilter filter) {
+  DatabricksHandle(
+      @Nonnull DatabricksSqlHelper sqlHelper,
+      @Nonnull DatabricksFilter filter,
+      int maxConcurrentStatements) {
     this.sqlHelper = Preconditions.checkNotNull(sqlHelper, "DatabricksSqlHelper was null.");
     this.filter = Preconditions.checkNotNull(filter, "DatabricksFilter was null.");
+    this.statementRunner = new ObjectStatementRunner(maxConcurrentStatements);
   }
 
   @Nonnull
@@ -46,5 +52,15 @@ final class DatabricksHandle extends AbstractHandle {
   @Nonnull
   DatabricksFilter filter() {
     return filter;
+  }
+
+  @Nonnull
+  ObjectStatementRunner statementRunner() {
+    return statementRunner;
+  }
+
+  @Override
+  public void close() {
+    statementRunner.close();
   }
 }
