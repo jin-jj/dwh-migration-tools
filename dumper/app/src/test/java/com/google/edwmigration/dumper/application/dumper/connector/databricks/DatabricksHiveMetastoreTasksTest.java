@@ -18,13 +18,18 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ResultData;
+import com.databricks.sdk.service.sql.ServiceError;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
@@ -33,13 +38,21 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.ByteSink;
 import com.google.common.io.Files;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.ColumnsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.SchemataHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TableConstraintsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.TablesHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDumpFormat.ViewsHeader;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreColumnsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreSchemataTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTableConstraintsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTablesTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreViewsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.HiveMetastoreSessionCache;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import java.io.File;
+import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -94,6 +107,60 @@ public class DatabricksHiveMetastoreTasksTest {
   }
 
   @Test
+  public void schemataTask_keepsSchemaWhoseDescribeFails() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA, "locked"),
+                "DESCRIBE SCHEMA EXTENDED `legacy`",
+                succeededRows(
+                    ImmutableList.of(
+                        ImmutableList.of("Comment", "Old data"),
+                        ImmutableList.of("Owner", "alice"))),
+                "DESCRIBE SCHEMA EXTENDED `locked`",
+                failed("[INSUFFICIENT_PERMISSIONS] Insufficient privileges.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreSchemataTask(cache).doRun(null, sink, handle));
+
+    assertEquals(2, records.size());
+    assertEquals("Old data", records.get(0).get(SchemataHeader.Comment));
+    assertEquals("alice", records.get(0).get(SchemataHeader.Owner));
+    assertEquals("locked", records.get(1).get(SchemataHeader.SchemaName));
+    assertEquals("", records.get(1).get(SchemataHeader.Owner));
+    assertEquals("", records.get(1).get(SchemataHeader.StorageLocation));
+  }
+
+  @Test
+  public void schemataTask_writesOnlySchemasAcceptedByFilter() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded("information_schema", SCHEMA, "other"),
+                "DESCRIBE SCHEMA EXTENDED `legacy`",
+                succeededRows(ImmutableList.of(ImmutableList.of("Owner", "alice")))));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+    DatabricksFilter filter = new DatabricksFilter(ImmutableList.of(" LEGACY "));
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            filter,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreSchemataTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals(SCHEMA, records.get(0).get(SchemataHeader.SchemaName));
+    assertEquals("alice", records.get(0).get(SchemataHeader.Owner));
+  }
+
+  @Test
   public void tablesTask_writesHiveStorageColumns() throws Exception {
     String serdeLibrary = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe";
     String inputFormat = "org.apache.hadoop.mapred.TextInputFormat";
@@ -129,9 +196,7 @@ public class DatabricksHiveMetastoreTasksTest {
                 SHOW_SCHEMAS,
                 succeeded(SCHEMA),
                 SHOW_TABLES,
-                succeededRows(
-                    ImmutableList.of(
-                        ImmutableList.of(SCHEMA, "csv_events", "false", information)))));
+                showTableResponse("csv_events", information)));
     HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
 
     List<CSVRecord> records =
@@ -150,6 +215,265 @@ public class DatabricksHiveMetastoreTasksTest {
     assertEquals(tableProperties, record.get(TablesHeader.TableProperties));
   }
 
+  @Test
+  public void tablesTask_skipsTemporaryViews() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                succeededRows(
+                    ImmutableList.of(
+                        ImmutableList.of(SCHEMA, "events", "false", tableInformation("events")),
+                        ImmutableList.of("", "session_view", "true", viewInformation("x"))))));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreTablesTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals("events", records.get(0).get(TablesHeader.TableName));
+  }
+
+  @Test
+  public void tablesTask_skipsSchemaWhoseShowTableExtendedFails() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded("locked", SCHEMA),
+                "SHOW TABLE EXTENDED IN `locked` LIKE '*'",
+                failed("[INSUFFICIENT_PERMISSIONS] Insufficient privileges."),
+                SHOW_TABLES,
+                showTablesResponse("events")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreTablesTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals(SCHEMA, records.get(0).get(TablesHeader.TableSchema));
+    assertEquals("events", records.get(0).get(TablesHeader.TableName));
+  }
+
+  @Test
+  public void tablesTask_failsWhenShowTableExtendedFailsForEverySchema() {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                failed("[INSUFFICIENT_PERMISSIONS] Insufficient privileges.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    IOException thrown =
+        assertThrows(
+            IOException.class,
+            () ->
+                runTask(
+                    statements,
+                    (sink, handle) ->
+                        new DatabricksHiveMetastoreTablesTask(cache).doRun(null, sink, handle)));
+
+    assertTrue(thrown.getMessage().contains("SHOW TABLE EXTENDED"));
+  }
+
+  @Test
+  public void tablesTask_throwsInterruptedIoExceptionWhenInterrupted() {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS, succeeded(SCHEMA), SHOW_TABLES, showTablesResponse("events")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    Thread.currentThread().interrupt();
+    try {
+      assertThrows(
+          InterruptedIOException.class,
+          () ->
+              runTask(
+                  statements,
+                  (sink, handle) ->
+                      new DatabricksHiveMetastoreTablesTask(cache).doRun(null, sink, handle)));
+    } finally {
+      Thread.interrupted();
+    }
+  }
+
+  @Test
+  public void columnsTask_writesColumnsInSchemaOrder() throws Exception {
+    String information =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy",
+            "Table: events",
+            "Type: MANAGED",
+            "Provider: delta",
+            "Partition Columns: [`dt`]",
+            "Schema: root",
+            " |-- id: long (nullable = false)",
+            " |-- point: struct (nullable = true)",
+            " |    |-- x: double (nullable = true)",
+            " |-- dt: date (nullable = true)",
+            "");
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTableResponse("events", information)));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreColumnsTask(cache).doRun(null, sink, handle));
+
+    ImmutableList.Builder<String> columns = ImmutableList.builder();
+    for (CSVRecord record : records) {
+      columns.add(
+          String.join(
+              "|",
+              record.get(ColumnsHeader.TableName),
+              record.get(ColumnsHeader.OrdinalPosition),
+              record.get(ColumnsHeader.ColumnName),
+              record.get(ColumnsHeader.DataType),
+              record.get(ColumnsHeader.IsNullable),
+              record.get(ColumnsHeader.PartitionIndex)));
+    }
+    assertEquals(
+        ImmutableList.of(
+            "events|0|id|bigint|NO|",
+            "events|1|point|struct<x:double>|YES|",
+            "events|2|dt|date|YES|0"),
+        columns.build());
+  }
+
+  @Test
+  public void viewsTask_writesOnlyViews() throws Exception {
+    String viewText = "SELECT id\nFROM legacy.events";
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                succeededRows(
+                    ImmutableList.of(
+                        ImmutableList.of(SCHEMA, "events", "false", tableInformation("events")),
+                        ImmutableList.of(
+                            SCHEMA, "event_ids", "false", viewInformation(viewText))))));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreViewsTask(cache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals("event_ids", records.get(0).get(ViewsHeader.TableName));
+    assertEquals(viewText, records.get(0).get(ViewsHeader.ViewDefinition));
+  }
+
+  @Test
+  public void tableConstraintsTask_writesDeltaCheckConstraints() throws Exception {
+    String information =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy",
+            "Table: orders",
+            "Type: MANAGED",
+            "Provider: delta",
+            "Table Properties: [delta.constraints.positive_amount=amount > 0,"
+                + " delta.constraints.known_status=status IN ('new', 'done'),"
+                + " delta.minReaderVersion=1]",
+            "Schema: root",
+            " |-- amount: integer (nullable = true)",
+            " |-- status: integer (nullable = true)",
+            "");
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTableResponse("orders", information)));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreTableConstraintsTask(cache).doRun(null, sink, handle));
+
+    ImmutableList.Builder<String> constraints = ImmutableList.builder();
+    for (CSVRecord record : records) {
+      constraints.add(
+          String.join(
+              "|",
+              record.get(TableConstraintsHeader.TableName),
+              record.get(TableConstraintsHeader.ConstraintName),
+              record.get(TableConstraintsHeader.ConstraintType),
+              record.get(TableConstraintsHeader.ConstraintDetails)));
+    }
+    assertEquals(
+        ImmutableList.of(
+            "orders|positive_amount|CHECK|amount > 0",
+            "orders|known_status|CHECK|status IN ('new', 'done')"),
+        constraints.build());
+  }
+
+  @Test
+  public void sessionCache_runsShowTableExtendedOncePerSchemaForAllTasks() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS, succeeded(SCHEMA), SHOW_TABLES, showTablesResponse("events")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    runTask(
+        statements,
+        (sink, handle) -> new DatabricksHiveMetastoreTablesTask(cache).doRun(null, sink, handle));
+    runTask(
+        statements,
+        (sink, handle) -> new DatabricksHiveMetastoreViewsTask(cache).doRun(null, sink, handle));
+
+    int showStatementCount = ImmutableList.of(SHOW_SCHEMAS, SHOW_TABLES).size();
+    verify(statements, times(showStatementCount))
+        .executeStatement(any(ExecuteStatementRequest.class));
+  }
+
+  @Test
+  public void sessionCache_doesNotRepeatFailedScan() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS, failed("[INSUFFICIENT_PERMISSIONS] Insufficient privileges.")));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+
+    try (DatabricksHandle handle =
+        newHandle(statements, new DatabricksFilter(ImmutableList.of()))) {
+      assertThrows(IOException.class, () -> cache.listParsedTables(handle));
+      IOException repeated = assertThrows(IOException.class, () -> cache.listSchemas(handle));
+      assertTrue(repeated.getMessage().contains("failed earlier"));
+    }
+
+    verify(statements, times(1)).executeStatement(any(ExecuteStatementRequest.class));
+  }
+
   private interface TaskBody {
 
     void run(ByteSink sink, DatabricksHandle handle) throws Exception;
@@ -157,8 +481,13 @@ public class DatabricksHiveMetastoreTasksTest {
 
   private List<CSVRecord> runTask(StatementExecutionAPI statements, TaskBody body)
       throws Exception {
+    return runTask(statements, new DatabricksFilter(ImmutableList.of()), body);
+  }
+
+  private List<CSVRecord> runTask(
+      StatementExecutionAPI statements, DatabricksFilter filter, TaskBody body) throws Exception {
     File output = tempFolder.newFile();
-    try (DatabricksHandle handle = newHandle(statements)) {
+    try (DatabricksHandle handle = newHandle(statements, filter)) {
       body.run(Files.asByteSink(output), handle);
     }
     String csv = Files.asCharSource(output, UTF_8).read();
@@ -173,12 +502,13 @@ public class DatabricksHiveMetastoreTasksTest {
     }
   }
 
-  private static DatabricksHandle newHandle(StatementExecutionAPI statements) {
+  private static DatabricksHandle newHandle(
+      StatementExecutionAPI statements, DatabricksFilter filter) {
     WorkspaceClient client = mock(WorkspaceClient.class);
     when(client.statementExecution()).thenReturn(statements);
     DatabricksSqlHelper sqlHelper =
         new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
-    return new DatabricksHandle(sqlHelper, new DatabricksFilter(ImmutableList.of()));
+    return new DatabricksHandle(sqlHelper, filter);
   }
 
   /** Mocks the Statement Execution API to answer each SQL statement from the map. */
@@ -198,6 +528,48 @@ public class DatabricksHiveMetastoreTasksTest {
     return statements;
   }
 
+  private static StatementResponse showTableResponse(String tableName, String information) {
+    return succeededRows(
+        ImmutableList.of(ImmutableList.of(SCHEMA, tableName, "false", information)));
+  }
+
+  private static StatementResponse showTablesResponse(String... tableNames) {
+    List<List<String>> tableRows = new ArrayList<>();
+    for (String tableName : tableNames) {
+      tableRows.add(ImmutableList.of(SCHEMA, tableName, "false", tableInformation(tableName)));
+    }
+    return succeededRows(tableRows);
+  }
+
+  /** Returns the {@code SHOW TABLE EXTENDED} information of a Delta table with an int column. */
+  private static String tableInformation(String tableName) {
+    return "Catalog: hive_metastore\n"
+        + "Database: legacy\n"
+        + "Table: "
+        + tableName
+        + "\n"
+        + "Type: MANAGED\n"
+        + "Provider: delta\n"
+        + "Schema: root\n"
+        + " |-- id: integer (nullable = false)\n";
+  }
+
+  /** Returns the {@code SHOW TABLE EXTENDED} information of a view with an int column. */
+  private static String viewInformation(String viewText) {
+    return "Catalog: hive_metastore\n"
+        + "Database: legacy\n"
+        + "Table: event_ids\n"
+        + "Type: VIEW\n"
+        + "View Text: "
+        + viewText
+        + "\n"
+        + "View Original Text: "
+        + viewText
+        + "\n"
+        + "Schema: root\n"
+        + " |-- id: integer (nullable = true)\n";
+  }
+
   private static StatementResponse succeeded(String... singleColumnRows) {
     List<List<String>> tableRows = new ArrayList<>();
     for (String value : singleColumnRows) {
@@ -215,5 +587,14 @@ public class DatabricksHiveMetastoreTasksTest {
 
   private static Collection<Collection<String>> rows(List<? extends List<String>> tableRows) {
     return new ArrayList<Collection<String>>(tableRows);
+  }
+
+  private static StatementResponse failed(String message) {
+    return new StatementResponse()
+        .setStatementId("stmt-failed")
+        .setStatus(
+            new StatementStatus()
+                .setState(StatementState.FAILED)
+                .setError(new ServiceError().setMessage(message)));
   }
 }

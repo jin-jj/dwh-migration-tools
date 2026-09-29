@@ -17,8 +17,15 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
+import com.google.common.collect.ImmutableList;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.ParsedColumn;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.ParsedTableExtended;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.util.Arrays;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -28,6 +35,9 @@ public class DatabricksHiveMetastoreTableParserTest {
 
   private static final String OWNER = "data_eng";
   private static final String DELTA_LOCATION = "dbfs:/user/hive/warehouse/legacy_db.db/events";
+  private static final String DELTA_TABLE_PROPERTIES =
+      "[delta.checkpoint.writeStatsAsJson=false, delta.checkpoint.writeStatsAsStruct=true,"
+          + " delta.enableDeletionVectors=true]";
   private static final String VIEW_TEXT =
       "SELECT id\nFROM legacy_db.events\nWHERE name:a IS NOT NULL";
   private static final String VIEW_TABLE_PROPERTIES = "[transient_lastDdlTime=1790543963]";
@@ -93,6 +103,68 @@ public class DatabricksHiveMetastoreTableParserTest {
   }
 
   @Test
+  public void parseShowTableExtended_usesDefaultsWithoutInformation() {
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "events", null);
+
+    assertEquals(DatabricksFilter.HIVE_METASTORE_CATALOG, parsed.catalogName);
+    assertEquals("legacy_db", parsed.schemaName);
+    assertEquals("events", parsed.tableName);
+    assertEquals("", parsed.tableType);
+    assertEquals("", parsed.createdAt);
+    assertNull(parsed.viewDefinition);
+    assertTrue(parsed.columns.isEmpty());
+    assertTrue(parsed.constraints.isEmpty());
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsHiveStorageDescriptor() {
+    String serdeLibrary = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe";
+    String inputFormat = "org.apache.hadoop.mapred.TextInputFormat";
+    String outputFormat = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat";
+    String storageProperties = "[field.delim=,, serialization.format=,]";
+    String tableProperties = "[transient_lastDdlTime=1790541380]";
+    String blob =
+        "Catalog: hive_metastore\n"
+            + "Database: legacy_db\n"
+            + "Table: csv_events\n"
+            + "Type: EXTERNAL\n"
+            + "Provider: hive\n"
+            + "Table Properties: "
+            + tableProperties
+            + "\n"
+            + "Location: dbfs:/mnt/legacy/csv_events\n"
+            + "Serde Library: "
+            + serdeLibrary
+            + "\n"
+            + "InputFormat: "
+            + inputFormat
+            + "\n"
+            + "OutputFormat: "
+            + outputFormat
+            + "\n"
+            + "Storage Properties: "
+            + storageProperties
+            + "\n"
+            + "Partition Provider: Catalog\n"
+            + "Schema: root\n"
+            + " |-- id: integer (nullable = true)\n"
+            + " |-- name: string (nullable = true)\n";
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "csv_events", blob);
+
+    assertEquals("HIVE", parsed.dataSourceFormat);
+    assertEquals(serdeLibrary, parsed.serdeLibrary);
+    assertEquals(inputFormat, parsed.inputFormat);
+    assertEquals(outputFormat, parsed.outputFormat);
+    assertEquals(storageProperties, parsed.storageProperties);
+    assertEquals(tableProperties, parsed.tableProperties);
+    assertEquals(2, parsed.columns.size());
+    assertEquals(0, parsed.constraints.size());
+  }
+
+  @Test
   public void parseShowTableExtended_keepsMultiLineViewText() {
     ParsedTableExtended parsed =
         DatabricksHiveMetastoreTableParser.parseShowTableExtended(
@@ -102,6 +174,205 @@ public class DatabricksHiveMetastoreTableParserTest {
     assertEquals("VIEW", parsed.tableType);
     assertEquals(VIEW_TABLE_PROPERTIES, parsed.tableProperties);
     assertEquals(1, parsed.columns.size());
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsViewCommentLinesThatLookLikeKeys() {
+    for (String comment :
+        Arrays.asList("view line one\nOwner: not the owner", "Sales view\nLocation: building 5")) {
+      ParsedTableExtended parsed =
+          DatabricksHiveMetastoreTableParser.parseShowTableExtended(
+              "legacy_db", "active_ids", viewBlob(comment, VIEW_TEXT));
+
+      assertEquals(comment, parsed.comment);
+      assertEquals(comment, OWNER, parsed.owner);
+      assertEquals(comment, "", parsed.storageLocation);
+      assertEquals(comment, VIEW_TEXT, parsed.viewDefinition);
+    }
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsTableCommentLinesThatLookLikeKeys() {
+    for (String comment :
+        Arrays.asList(
+            "first line\nType: VIEW\nLocation: fake\nlast line",
+            "Nightly load\nStatistics: refreshed daily",
+            "first line\nTable Properties: [fake=1]",
+            "first line\nComment: second line")) {
+      ParsedTableExtended parsed =
+          DatabricksHiveMetastoreTableParser.parseShowTableExtended(
+              "legacy_db", "events", deltaTableBlob(comment, DELTA_TABLE_PROPERTIES));
+
+      assertEquals(comment, parsed.comment);
+      assertEquals(comment, "MANAGED", parsed.tableType);
+      assertEquals(comment, DELTA_TABLE_PROPERTIES, parsed.tableProperties);
+      assertEquals(comment, DELTA_LOCATION, parsed.storageLocation);
+    }
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsCommentWhitespace() {
+    String comment = "  indented\ntrailing newline\n";
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended(
+            "legacy_db", "events", deltaTableBlob(comment, DELTA_TABLE_PROPERTIES));
+
+    assertEquals(comment, parsed.comment);
+    assertEquals(DELTA_TABLE_PROPERTIES, parsed.tableProperties);
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsMultiLineCheckConstraint() {
+    String checkConstraint = "a > 0\nAND b > 0";
+    String tableProperties =
+        "[delta.checkpoint.writeStatsAsJson=false, delta.constraints.positive="
+            + checkConstraint
+            + ", delta.enableDeletionVectors=true]";
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended(
+            "legacy_db", "events", deltaTableBlob("checked", tableProperties));
+
+    assertEquals(tableProperties, parsed.tableProperties);
+    assertEquals(DELTA_LOCATION, parsed.storageLocation);
+    assertEquals(1, parsed.constraints.size());
+    assertEquals(checkConstraint, parsed.constraints.get(0).constraintDetails);
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsMultiLineStorageProperties() {
+    String storageProperties = "[line.delim=\n, field.delim=,, serialization.format=,]";
+    String blob =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy_db",
+            "Table: csv_events",
+            "Type: EXTERNAL",
+            "Provider: hive",
+            "Table Properties: [transient_lastDdlTime=1790544831]",
+            "Location: dbfs:/mnt/legacy/csv_events",
+            "Serde Library: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+            "InputFormat: org.apache.hadoop.mapred.TextInputFormat",
+            "OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+            "Storage Properties: " + storageProperties,
+            "Partition Provider: Catalog",
+            "Schema: root",
+            " |-- id: integer (nullable = true)",
+            " |-- name: string (nullable = true)",
+            "",
+            "");
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "csv_events", blob);
+
+    assertEquals(storageProperties, parsed.storageProperties);
+    assertEquals(2, parsed.columns.size());
+  }
+
+  @Test
+  public void parseShowTableExtended_skipsKeyLineOutOfSparkOrder() {
+    String comment = "first line\nLocation: fake";
+    String blob = deltaTableBlob(comment, DELTA_TABLE_PROPERTIES) + "Owner: late";
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "events", blob);
+
+    assertEquals(comment, parsed.comment);
+    assertEquals(OWNER, parsed.owner);
+    assertEquals(DELTA_TABLE_PROPERTIES, parsed.tableProperties);
+    assertEquals(DELTA_LOCATION, parsed.storageLocation);
+    assertEquals(1, parsed.columns.size());
+  }
+
+  @Test
+  public void parseShowTableExtended_writesColumnTypesInHiveSyntax() {
+    String blob =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy_db",
+            "Table: typed",
+            "Type: MANAGED",
+            "Provider: delta",
+            "Schema: root",
+            " |-- a:b: short (nullable = false)",
+            " |-- t: byte (nullable = true)",
+            " |-- amount: decimal(10,2) (nullable = true)",
+            " |-- ts: timestamp_ntz (nullable = true)",
+            " |-- arr: array (nullable = true)",
+            " |    |-- element: struct (containsNull = true)",
+            " |    |    |-- x: long (nullable = true)",
+            " |    |    |-- y: array (nullable = true)",
+            " |    |    |    |-- element: string (containsNull = true)",
+            " |-- m: map (nullable = true)",
+            " |    |-- key: string",
+            " |    |-- value: map (valueContainsNull = true)",
+            " |    |    |-- key: integer",
+            " |    |    |-- value: timestamp (valueContainsNull = true)",
+            " |-- st: struct (nullable = true)",
+            " |    |-- inner: struct (nullable = true)",
+            " |    |    |-- z: double (nullable = true)",
+            " |    |-- k: v: integer (nullable = true)",
+            "",
+            "");
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "typed", blob);
+
+    ImmutableList.Builder<String> columns = ImmutableList.builder();
+    for (ParsedColumn column : parsed.columns) {
+      columns.add(
+          String.join(
+              "|",
+              String.valueOf(column.ordinalPosition),
+              column.columnName,
+              column.dataType,
+              column.isNullable));
+    }
+    assertEquals(
+        ImmutableList.of(
+            "0|a:b|smallint|NO",
+            "1|t|tinyint|YES",
+            "2|amount|decimal(10,2)|YES",
+            "3|ts|timestamp_ntz|YES",
+            "4|arr|array<struct<x:bigint,y:array<string>>>|YES",
+            "5|m|map<string,map<int,timestamp>>|YES",
+            "6|st|struct<inner:struct<z:double>,k: v:int>|YES"),
+        columns.build());
+  }
+
+  @Test
+  public void parseShowTableExtended_writesCreatedTimeAsInstant() {
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended(
+            "legacy_db", "events", deltaTableBlob("created", DELTA_TABLE_PROPERTIES));
+
+    assertEquals(
+        ZonedDateTime.of(2026, 9, 27, 21, 19, 25, 0, ZoneOffset.UTC).toInstant().toString(),
+        parsed.createdAt);
+  }
+
+  @Test
+  public void parseShowTableExtended_keepsCreatedTimeInOtherFormat() {
+    String createdTime = "2026-09-27 21:19:25";
+    String blob =
+        String.join(
+            "\n",
+            "Catalog: hive_metastore",
+            "Database: legacy_db",
+            "Table: events",
+            "Created Time: " + createdTime,
+            "Type: MANAGED",
+            "Schema: root",
+            " |-- id: integer (nullable = true)",
+            "");
+
+    ParsedTableExtended parsed =
+        DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "events", blob);
+
+    assertEquals(createdTime, parsed.createdAt);
   }
 
   /**

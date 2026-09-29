@@ -22,6 +22,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
@@ -34,6 +35,8 @@ import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ExternalLink;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.ResultManifest;
+import com.databricks.sdk.service.sql.ServiceError;
+import com.databricks.sdk.service.sql.ServiceErrorCode;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
@@ -159,7 +162,7 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
 
     List<List<String>> streamed = new ArrayList<>();
     try (CloseableIterable<List<String>> rows =
-        helper.executeSqlInCatalog("hive_metastore", "SELECT 1")) {
+        helper.executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SELECT 1")) {
       for (List<String> row : rows) {
         streamed.add(row);
       }
@@ -167,5 +170,96 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
     assertEquals(2, streamed.size());
     assertEquals("row0_col0", streamed.get(0).get(0));
     assertEquals("row1_col0", streamed.get(1).get(0));
+  }
+
+  @Test
+  public void sqlHelper_failedStatement_throwsDatabricksSqlExceptionWithSqlStateInMessage() {
+    WorkspaceClient client = mock(WorkspaceClient.class);
+    StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
+    when(client.statementExecution()).thenReturn(stmtApi);
+
+    String sqlState = "42501";
+    String errorMessage = "User does not have USE CATALOG on Catalog 'secret'";
+    StatementResponse failedResp =
+        new StatementResponse()
+            .setStatementId("stmt-denied")
+            .setStatus(
+                new StatementStatus()
+                    .setState(StatementState.FAILED)
+                    .setSqlState(sqlState)
+                    .setError(
+                        new ServiceError()
+                            .setErrorCode(ServiceErrorCode.BAD_REQUEST)
+                            .setMessage(errorMessage)));
+
+    when(stmtApi.executeStatement(any(ExecuteStatementRequest.class))).thenReturn(failedResp);
+
+    DatabricksSqlHelper helper =
+        new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
+
+    DatabricksSqlException ex =
+        assertThrows(
+            DatabricksSqlException.class,
+            () -> helper.executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SELECT * FROM secret"));
+    assertEquals(
+        String.format(
+            "SQL statement stmt-denied failed in state %s (SQLSTATE: %s, errorCode: %s): %s",
+            StatementState.FAILED, sqlState, ServiceErrorCode.BAD_REQUEST.name(), errorMessage),
+        ex.getMessage());
+  }
+
+  @Test
+  public void sqlHelper_refreshesExpiredExternalLinkBeforeDownload() throws Exception {
+    wireMock.stubFor(
+        get(urlEqualTo("/fresh-chunk-0.json"))
+            .willReturn(aResponse().withStatus(200).withBody("[[\"refreshed_row\"]]")));
+
+    WorkspaceClient client = mock(WorkspaceClient.class);
+    StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
+    when(client.statementExecution()).thenReturn(stmtApi);
+
+    ResultData expiredChunk =
+        new ResultData()
+            .setChunkIndex(0L)
+            .setExternalLinks(
+                Collections.singletonList(
+                    new ExternalLink()
+                        .setChunkIndex(0L)
+                        .setExpiration("2020-01-01T00:00:00Z")
+                        .setExternalLink(wireMock.baseUrl() + "/expired-chunk-0.json")));
+
+    ResultData refreshedChunk =
+        new ResultData()
+            .setChunkIndex(0L)
+            .setExternalLinks(
+                Collections.singletonList(
+                    new ExternalLink()
+                        .setChunkIndex(0L)
+                        .setExpiration("2099-01-01T00:00:00Z")
+                        .setExternalLink(wireMock.baseUrl() + "/fresh-chunk-0.json")));
+
+    StatementResponse resp =
+        new StatementResponse()
+            .setStatementId("stmt-expired")
+            .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+            .setManifest(new ResultManifest().setTotalChunkCount(1L))
+            .setResult(expiredChunk);
+
+    when(stmtApi.executeStatement(any(ExecuteStatementRequest.class))).thenReturn(resp);
+    when(stmtApi.getStatementResultChunkN("stmt-expired", 0L)).thenReturn(refreshedChunk);
+
+    DatabricksSqlHelper helper =
+        new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
+
+    List<List<String>> rows = new ArrayList<>();
+    try (CloseableIterable<List<String>> iter =
+        helper.executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SELECT 1")) {
+      for (List<String> row : iter) {
+        rows.add(row);
+      }
+    }
+
+    assertEquals(1, rows.size());
+    assertEquals(Collections.singletonList("refreshed_row"), rows.get(0));
   }
 }

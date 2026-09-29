@@ -50,6 +50,25 @@ public class DatabricksHiveMetastoreMetadataConnectorTest {
   }
 
   @Test
+  public void validate_rejectsAssessmentFlag() throws IOException {
+    DatabricksHiveMetastoreMetadataConnector connector =
+        new DatabricksHiveMetastoreMetadataConnector();
+    ConnectorArguments arguments =
+        new ConnectorArguments(
+            "--connector",
+            CONNECTOR_NAME,
+            "--url",
+            "https://adb-123.4.azuredatabricks.net",
+            "--warehouse",
+            "wh-1",
+            "--assessment");
+
+    MetadataDumperUsageException exception =
+        assertThrows(MetadataDumperUsageException.class, () -> connector.validate(arguments));
+    assertTrue(exception.getMessage().contains("--assessment"));
+  }
+
+  @Test
   public void validate_requiresWarehouse() throws IOException {
     DatabricksHiveMetastoreMetadataConnector connector =
         new DatabricksHiveMetastoreMetadataConnector();
