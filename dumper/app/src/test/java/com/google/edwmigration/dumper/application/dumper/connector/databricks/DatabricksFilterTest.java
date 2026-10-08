@@ -42,13 +42,28 @@ public class DatabricksFilterTest {
   }
 
   @Test
-  public void defaultFilter_acceptsAllCatalogs() {
+  public void defaultFilter_acceptsAllCatalogsExceptDatabricksManagedCatalogs() {
     DatabricksFilter filter = new DatabricksFilter(ImmutableList.of(), ImmutableList.of());
 
     assertTrue(filter.acceptsCatalog(HIVE_METASTORE_CATALOG));
     assertTrue(filter.acceptsCatalog("Main"));
+    assertFalse(filter.acceptsCatalog("system"));
+    assertFalse(filter.acceptsCatalog("Samples"));
+    assertFalse(filter.acceptsCatalog("__Databricks_Internal"));
     assertFalse(filter.acceptsCatalog(" "));
     assertFalse(filter.acceptsCatalog(null));
+  }
+
+  @Test
+  public void catalogFilter_acceptsDatabricksManagedCatalogsWhenListed() {
+    DatabricksFilter filter =
+        new DatabricksFilter(
+            ImmutableList.of("System", "samples", "__databricks_internal"), ImmutableList.of());
+
+    assertTrue(filter.acceptsCatalog("system"));
+    assertTrue(filter.acceptsCatalog("SAMPLES"));
+    assertTrue(filter.acceptsCatalog("__DATABRICKS_INTERNAL"));
+    assertFalse(filter.acceptsCatalog("main"));
   }
 
   @Test
@@ -70,6 +85,24 @@ public class DatabricksFilterTest {
     assertTrue(filter.acceptsCatalog(HIVE_METASTORE_CATALOG));
     assertTrue(filter.acceptsCatalog("MAIN"));
     assertFalse(filter.acceptsCatalog("samples"));
+  }
+
+  @Test
+  public void acceptsAnyCatalogExcept_isTrueForEmptyOrOtherCatalogs() {
+    assertTrue(
+        new DatabricksFilter(ImmutableList.of(), ImmutableList.of())
+            .acceptsAnyCatalogExcept(HIVE_METASTORE_CATALOG));
+    assertTrue(
+        new DatabricksFilter(ImmutableList.of(HIVE_METASTORE_CATALOG, "main"), ImmutableList.of())
+            .acceptsAnyCatalogExcept(HIVE_METASTORE_CATALOG));
+  }
+
+  @Test
+  public void acceptsAnyCatalogExcept_isFalseWhenOnlyThatCatalogIsListed() {
+    DatabricksFilter filter =
+        new DatabricksFilter(ImmutableList.of(" Hive_Metastore "), ImmutableList.of());
+
+    assertFalse(filter.acceptsAnyCatalogExcept(HIVE_METASTORE_CATALOG));
   }
 
   @Test

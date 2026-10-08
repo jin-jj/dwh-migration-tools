@@ -696,7 +696,7 @@ final class DatabricksHiveMetastoreTableParser {
 
   /** Returns the check constraints in the {@code delta.constraints.<name>} table properties. */
   @Nonnull
-  private static ImmutableList<ParsedTableConstraint> parseDeltaCheckConstraints(
+  static ImmutableList<ParsedTableConstraint> parseDeltaCheckConstraints(
       @Nonnull Map<String, String> tableProperties) {
     ImmutableList.Builder<ParsedTableConstraint> constraints = ImmutableList.builder();
     for (Map.Entry<String, String> property : tableProperties.entrySet()) {

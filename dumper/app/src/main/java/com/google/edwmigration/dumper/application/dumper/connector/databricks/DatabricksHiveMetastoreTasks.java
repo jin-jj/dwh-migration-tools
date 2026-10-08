@@ -403,7 +403,8 @@ final class DatabricksHiveMetastoreTasks {
               toJsonOrEmpty(tbl.tableProperties),
               tbl.numBuckets,
               toJsonOrEmpty(tbl.bucketColumns),
-              toJsonOrEmpty(tbl.sortColumns));
+              toJsonOrEmpty(tbl.sortColumns),
+              "");
         }
       }
       return null;

@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataConnector.DatabricksProperty.HIVE_METASTORE_ONLY;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataConnector.DatabricksProperty.MAX_CONCURRENT_STATEMENTS;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataConnector.MAX_CONCURRENT_STATEMENTS_RANGE;
 import static org.junit.Assert.assertEquals;
@@ -25,9 +26,13 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMultiset;
+import com.google.common.collect.ImmutableSet;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
 import com.google.edwmigration.dumper.application.dumper.ConnectorRepository;
 import com.google.edwmigration.dumper.application.dumper.MetadataDumperUsageException;
+import com.google.edwmigration.dumper.application.dumper.task.DumpMetadataTask;
+import com.google.edwmigration.dumper.application.dumper.task.FormatTask;
 import com.google.edwmigration.dumper.application.dumper.task.Task;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -43,6 +48,28 @@ public class DatabricksMetadataConnectorTest {
   private static final String CONNECTOR_NAME = DatabricksMetadataConnector.CONNECTOR_NAME;
   private static final String URL = "https://workspace.cloud.databricks.com";
   private static final String WAREHOUSE = "wh-123";
+
+  private static final ImmutableList<String> UNITY_CATALOG_ENTRIES =
+      ImmutableList.of(
+          DatabricksMetadataDumpFormat.UNITY_CATALOG_CATALOGS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.UNITY_CATALOG_SCHEMATA_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.UNITY_CATALOG_TABLES_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.UNITY_CATALOG_COLUMNS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.UNITY_CATALOG_VIEWS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.UNITY_CATALOG_TABLE_CONSTRAINTS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.UNITY_CATALOG_FUNCTIONS_ENTRY_NAME);
+
+  private static final ImmutableList<String> HIVE_METASTORE_ENTRIES =
+      ImmutableList.of(
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_CATALOGS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_SCHEMATA_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_TABLES_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_COLUMNS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_VIEWS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_TABLE_CONSTRAINTS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_DDLS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTIONS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTION_DDLS_ENTRY_NAME);
 
   private final DatabricksMetadataConnector connector = new DatabricksMetadataConnector();
 
@@ -111,41 +138,102 @@ public class DatabricksMetadataConnectorTest {
   }
 
   @Test
-  public void validate_rejectsDatabaseListWithoutHiveMetastore() throws IOException {
+  public void validate_acceptsDatabaseListWithoutHiveMetastore() throws IOException {
+    connector.validate(arguments("--database", "main"));
+  }
+
+  @Test
+  public void validate_rejectsHiveMetastoreOnlyWithDatabaseListWithoutHiveMetastore()
+      throws IOException {
     String catalog = "main";
-    ConnectorArguments arguments = arguments("--database", catalog);
+    ConnectorArguments arguments =
+        arguments("--database", catalog, hiveMetastoreOnlyDefinition("true"));
 
     MetadataDumperUsageException exception =
         assertThrows(MetadataDumperUsageException.class, () -> connector.validate(arguments));
     assertTrue(exception.getMessage().contains(catalog));
-    assertTrue(exception.getMessage().contains(HIVE_METASTORE_CATALOG));
+    assertTrue(exception.getMessage().contains(HIVE_METASTORE_ONLY.getName()));
   }
 
   @Test
-  public void addTasksTo_addsHiveMetastoreTasks() throws Exception {
-    ImmutableList<String> expectedEntries =
-        ImmutableList.of(
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_CATALOGS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_SCHEMATA_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_TABLES_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_COLUMNS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_VIEWS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_TABLE_CONSTRAINTS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_DDLS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTIONS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTION_DDLS_ENTRY_NAME);
-    int metadataAndFormatTaskCount = 2;
+  public void validate_rejectsHiveMetastoreOnlyThatIsNotABoolean() throws IOException {
+    String value = "yes";
+    ConnectorArguments arguments = arguments(hiveMetastoreOnlyDefinition(value));
 
+    MetadataDumperUsageException exception =
+        assertThrows(MetadataDumperUsageException.class, () -> connector.validate(arguments));
+    assertTrue(exception.getMessage().contains(HIVE_METASTORE_ONLY.getName()));
+    assertTrue(exception.getMessage().contains(value));
+  }
+
+  @Test
+  public void hiveMetastoreOnly_isPrefixedWithConnectorName() {
+    assertEquals(CONNECTOR_NAME + ".hive-metastore-only", HIVE_METASTORE_ONLY.getName());
+  }
+
+  @Test
+  public void addTasksTo_addsUnityCatalogAndHiveMetastoreTasksByDefault() throws IOException {
+    assertEquals(
+        ImmutableMultiset.<String>builder()
+            .addAll(UNITY_CATALOG_ENTRIES)
+            .addAll(HIVE_METASTORE_ENTRIES)
+            .build(),
+        dataTargetPaths(arguments()));
+  }
+
+  @Test
+  public void addTasksTo_addsOnlyHiveMetastoreTasksWhenHiveMetastoreOnly() throws IOException {
+    assertEquals(
+        ImmutableMultiset.copyOf(HIVE_METASTORE_ENTRIES),
+        dataTargetPaths(arguments(hiveMetastoreOnlyDefinition("TRUE"))));
+  }
+
+  @Test
+  public void addTasksTo_addsBothTasksWhenNotHiveMetastoreOnly() throws IOException {
+    assertEquals(
+        ImmutableMultiset.<String>builder()
+            .addAll(UNITY_CATALOG_ENTRIES)
+            .addAll(HIVE_METASTORE_ENTRIES)
+            .build(),
+        dataTargetPaths(arguments(hiveMetastoreOnlyDefinition("false"))));
+  }
+
+  @Test
+  public void addTasksTo_addsOnlyUnityCatalogTasksForDatabaseListWithoutHiveMetastore()
+      throws IOException {
+    assertEquals(
+        ImmutableMultiset.copyOf(UNITY_CATALOG_ENTRIES),
+        dataTargetPaths(arguments("--database", "main")));
+  }
+
+  @Test
+  public void addTasksTo_addsOnlyHiveMetastoreTasksForDatabaseListOfHiveMetastore()
+      throws IOException {
+    assertEquals(
+        ImmutableMultiset.copyOf(HIVE_METASTORE_ENTRIES),
+        dataTargetPaths(arguments("--database", HIVE_METASTORE_CATALOG.toUpperCase(Locale.ROOT))));
+  }
+
+  /** Returns the target paths of the tasks, without those of the metadata and format tasks. */
+  private ImmutableMultiset<String> dataTargetPaths(ConnectorArguments arguments) {
     List<Task<?>> tasks = new ArrayList<>();
-    connector.addTasksTo(tasks, arguments());
-
-    assertEquals(metadataAndFormatTaskCount + expectedEntries.size(), tasks.size());
-    List<String> targetPaths = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+    ImmutableSet<String> bookkeepingPaths =
+        ImmutableSet.of(
+            new DumpMetadataTask(arguments, DatabricksMetadataDumpFormat.FORMAT_NAME)
+                .getTargetPath(),
+            new FormatTask(DatabricksMetadataDumpFormat.FORMAT_NAME).getTargetPath());
+    ImmutableMultiset.Builder<String> targetPaths = ImmutableMultiset.<String>builder();
     for (Task<?> task : tasks) {
-      targetPaths.add(task.getTargetPath());
+      if (!bookkeepingPaths.contains(task.getTargetPath())) {
+        targetPaths.add(task.getTargetPath());
+      }
     }
+    return targetPaths.build();
+  }
 
-    assertTrue(targetPaths.containsAll(expectedEntries));
+  private static String hiveMetastoreOnlyDefinition(String value) {
+    return "-D" + HIVE_METASTORE_ONLY.getName() + "=" + value;
   }
 
   private static ConnectorArguments arguments(String... extraArguments) throws IOException {

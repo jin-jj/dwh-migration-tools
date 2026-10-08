@@ -43,6 +43,14 @@ import com.google.edwmigration.dumper.application.dumper.connector.databricks.Da
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreTablesTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreViewsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.HiveMetastoreSessionCache;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogTasks.DatabricksUnityCatalogCatalogsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogTasks.DatabricksUnityCatalogColumnsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogTasks.DatabricksUnityCatalogFunctionsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogTasks.DatabricksUnityCatalogSchemataTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogTasks.DatabricksUnityCatalogTableConstraintsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogTasks.DatabricksUnityCatalogTablesTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogTasks.DatabricksUnityCatalogViewsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogTasks.UnityCatalogSessionCache;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import com.google.edwmigration.dumper.application.dumper.task.DumpMetadataTask;
 import com.google.edwmigration.dumper.application.dumper.task.FormatTask;
@@ -54,15 +62,23 @@ import javax.annotation.Nonnull;
 /**
  * Databricks metadata connector.
  *
+ * <p>Dumps the catalogs, schemas, tables, views, columns, table constraints and functions of the
+ * Unity Catalog catalogs with the Unity Catalog REST API. The information_schema of each catalog,
+ * queried on the SQL warehouse, tells which tables to request for their primary and foreign keys.
+ *
  * <p>Dumps the schemas, tables, views, columns, table constraints and functions of the legacy
  * {@code hive_metastore} catalog with {@code SHOW SCHEMAS}, {@code DESCRIBE SCHEMA EXTENDED},
  * {@code SHOW TABLE EXTENDED}, {@code DESCRIBE TABLE}, {@code SHOW USER FUNCTIONS} and {@code
  * DESCRIBE FUNCTION EXTENDED}, run on a Databricks SQL warehouse. It also dumps the {@code SHOW
  * CREATE TABLE} output of the tables and views, and builds the {@code CREATE FUNCTION} statements
- * of the functions. The files are described in {@link DatabricksMetadataDumpFormat}.
+ * of the functions.
+ *
+ * <p>The files are described in {@link DatabricksMetadataDumpFormat}.
  */
 @AutoService(Connector.class)
-@Description("Dumps metadata from the Databricks hive_metastore catalog using a SQL warehouse.")
+@Description(
+    "Dumps metadata from the Databricks Unity Catalog catalogs using the Unity Catalog API, and from"
+        + " the hive_metastore catalog using a SQL warehouse.")
 @RespectsInput(
     order = 100,
     arg = ConnectorArguments.OPT_URI,
@@ -74,13 +90,17 @@ import javax.annotation.Nonnull;
 @RespectsInput(
     order = 300,
     arg = ConnectorArguments.OPT_WAREHOUSE,
-    description = "The ID of the Databricks SQL warehouse that runs the metadata statements.")
+    description =
+        "The ID of the Databricks SQL warehouse that runs the metadata statements of the"
+            + " hive_metastore catalog, and the information_schema queries of the Unity Catalog"
+            + " catalogs.")
 @RespectsInput(
     order = 600,
     arg = ConnectorArguments.OPT_DATABASE,
     description =
-        "The list of catalogs to dump, separated by commas. Only the hive_metastore catalog is"
-            + " supported.")
+        "The list of catalogs to dump, separated by commas, such as main,hive_metastore. By"
+            + " default, every catalog except the system, samples and __databricks_internal"
+            + " catalogs.")
 @RespectsArgumentSchemaPredicate
 public class DatabricksMetadataConnector extends AbstractConnector implements MetadataConnector {
 
@@ -99,12 +119,16 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
   enum DatabricksProperty implements ConnectorProperty {
     MAX_CONCURRENT_STATEMENTS(
         "max-concurrent-statements",
-        "Max number of SQL statements, such as DESCRIBE TABLE for each table, that run"
-            + " concurrently on the SQL warehouse. Allowed range: "
+        "Max number of SQL statements and Unity Catalog API requests, such as DESCRIBE TABLE or"
+            + " a Unity Catalog table request, that run concurrently. Allowed range: "
             + MAX_CONCURRENT_STATEMENTS_RANGE
             + ". Default: "
             + DEFAULT_MAX_CONCURRENT_STATEMENTS
-            + ".");
+            + "."),
+    HIVE_METASTORE_ONLY(
+        "hive-metastore-only",
+        "Whether to dump only the hive_metastore catalog and skip the Unity Catalog catalogs."
+            + " Allowed values: true, false. Default: false.");
 
     private final String name;
     private final String description;
@@ -144,18 +168,19 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     DatabricksClientFactory.requireUrl(arguments);
     DatabricksClientFactory.requireWarehouse(arguments);
     parseMaxConcurrentStatements(arguments);
-    if (!DatabricksFilter.fromArguments(arguments).acceptsCatalog(HIVE_METASTORE_CATALOG)) {
+    if (parseHiveMetastoreOnly(arguments)
+        && !DatabricksFilter.fromArguments(arguments).acceptsCatalog(HIVE_METASTORE_CATALOG)) {
       throw new MetadataDumperUsageException(
           String.format(
-              "Nothing to dump: --%s lists %s, but the '%s' connector dumps only the %s catalog."
-                  + " Add %s to --%s or remove --%s.",
+              "Nothing to dump: -D%s=true dumps only the %s catalog, but --%s lists %s. Add %s to"
+                  + " --%s or remove -D%s.",
+              DatabricksProperty.HIVE_METASTORE_ONLY.getName(),
+              HIVE_METASTORE_CATALOG,
               ConnectorArguments.OPT_DATABASE,
               arguments.getDatabases(),
-              getName(),
-              HIVE_METASTORE_CATALOG,
               HIVE_METASTORE_CATALOG,
               ConnectorArguments.OPT_DATABASE,
-              ConnectorArguments.OPT_DATABASE));
+              DatabricksProperty.HIVE_METASTORE_ONLY.getName()));
     }
   }
 
@@ -169,17 +194,32 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     out.add(new DumpMetadataTask(arguments, DatabricksMetadataDumpFormat.FORMAT_NAME));
     out.add(new FormatTask(DatabricksMetadataDumpFormat.FORMAT_NAME));
 
-    HiveMetastoreSessionCache sessionCache = new HiveMetastoreSessionCache();
-    out.add(new DatabricksHiveMetastoreCatalogsTask(sessionCache));
-    out.add(new DatabricksHiveMetastoreSchemataTask(sessionCache));
-    out.add(new DatabricksHiveMetastoreTablesTask(sessionCache));
-    out.add(new DatabricksHiveMetastoreColumnsTask(sessionCache));
-    out.add(new DatabricksHiveMetastoreViewsTask(sessionCache));
-    out.add(new DatabricksHiveMetastoreTableConstraintsTask(sessionCache));
-    out.add(new DatabricksHiveMetastoreDdlsTask(sessionCache));
-    HiveMetastoreFunctionCache functionCache = new HiveMetastoreFunctionCache(sessionCache);
-    out.add(new DatabricksHiveMetastoreFunctionsTask(functionCache));
-    out.add(new DatabricksHiveMetastoreFunctionDdlsTask(functionCache));
+    DatabricksFilter filter = DatabricksFilter.fromArguments(arguments);
+    if (!parseHiveMetastoreOnly(arguments)
+        && filter.acceptsAnyCatalogExcept(HIVE_METASTORE_CATALOG)) {
+      UnityCatalogSessionCache unityCatalogCache = new UnityCatalogSessionCache();
+      out.add(new DatabricksUnityCatalogCatalogsTask(unityCatalogCache));
+      out.add(new DatabricksUnityCatalogSchemataTask(unityCatalogCache));
+      out.add(new DatabricksUnityCatalogTablesTask(unityCatalogCache));
+      out.add(new DatabricksUnityCatalogColumnsTask(unityCatalogCache));
+      out.add(new DatabricksUnityCatalogViewsTask(unityCatalogCache));
+      out.add(new DatabricksUnityCatalogTableConstraintsTask(unityCatalogCache));
+      out.add(new DatabricksUnityCatalogFunctionsTask(unityCatalogCache));
+    }
+
+    if (filter.acceptsCatalog(HIVE_METASTORE_CATALOG)) {
+      HiveMetastoreSessionCache sessionCache = new HiveMetastoreSessionCache();
+      out.add(new DatabricksHiveMetastoreCatalogsTask(sessionCache));
+      out.add(new DatabricksHiveMetastoreSchemataTask(sessionCache));
+      out.add(new DatabricksHiveMetastoreTablesTask(sessionCache));
+      out.add(new DatabricksHiveMetastoreColumnsTask(sessionCache));
+      out.add(new DatabricksHiveMetastoreViewsTask(sessionCache));
+      out.add(new DatabricksHiveMetastoreTableConstraintsTask(sessionCache));
+      out.add(new DatabricksHiveMetastoreDdlsTask(sessionCache));
+      HiveMetastoreFunctionCache functionCache = new HiveMetastoreFunctionCache(sessionCache);
+      out.add(new DatabricksHiveMetastoreFunctionsTask(functionCache));
+      out.add(new DatabricksHiveMetastoreFunctionDdlsTask(functionCache));
+    }
   }
 
   @Override
@@ -191,6 +231,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     WorkspaceClient client = DatabricksClientFactory.createWorkspaceClient(arguments);
     return new DatabricksHandle(
         new DatabricksSqlHelper(client, warehouseId),
+        new DatabricksRestHelper(client),
         DatabricksFilter.fromArguments(arguments),
         parseMaxConcurrentStatements(arguments));
   }
@@ -202,5 +243,25 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
                 DatabricksProperty.MAX_CONCURRENT_STATEMENTS,
                 MAX_CONCURRENT_STATEMENTS_RANGE)
             .orElse(DEFAULT_MAX_CONCURRENT_STATEMENTS));
+  }
+
+  /** Returns the value of {@link DatabricksProperty#HIVE_METASTORE_ONLY}, false if absent. */
+  private static boolean parseHiveMetastoreOnly(@Nonnull ConnectorArguments arguments) {
+    String value = arguments.getDefinition(DatabricksProperty.HIVE_METASTORE_ONLY);
+    if (value == null || value.trim().isEmpty()) {
+      return false;
+    }
+
+    String trimmed = value.trim();
+    if (Boolean.TRUE.toString().equalsIgnoreCase(trimmed)) {
+      return true;
+    }
+    if (Boolean.FALSE.toString().equalsIgnoreCase(trimmed)) {
+      return false;
+    }
+    throw new MetadataDumperUsageException(
+        String.format(
+            "Option '%s' accepts only true or false. Actual: '%s'.",
+            DatabricksProperty.HIVE_METASTORE_ONLY.getName(), value));
   }
 }

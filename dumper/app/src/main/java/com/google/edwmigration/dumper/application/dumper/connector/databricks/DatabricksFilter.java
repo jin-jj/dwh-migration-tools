@@ -26,13 +26,23 @@ import javax.annotation.Nonnull;
 
 /**
  * Case-insensitive filter of the catalogs and schemas to dump. The catalogs come from {@code
- * --database} and the schemas from {@code --schema}; an empty list accepts every name. {@code
+ * --database} and the schemas from {@code --schema}; an empty list accepts every name, except the
+ * {@code system}, {@code samples} and {@code __databricks_internal} catalogs that Databricks
+ * manages itself, which are accepted only if {@code --database} lists them. {@code
  * information_schema} is never accepted.
  */
 final class DatabricksFilter {
 
   static final String HIVE_METASTORE_CATALOG = "hive_metastore";
   private static final String INFORMATION_SCHEMA = "information_schema";
+
+  /**
+   * The catalogs that hold the system tables, the sample datasets and the internal tables of
+   * Databricks, such as the tables behind the materialized views and streaming tables of pipelines,
+   * rather than the data of the workspace.
+   */
+  private static final ImmutableSet<String> UNLISTED_EXCLUDED_CATALOGS =
+      ImmutableSet.of("system", "samples", "__databricks_internal");
 
   private final ImmutableSet<String> includedCatalogs;
   private final ImmutableSet<String> includedSchemas;
@@ -73,7 +83,28 @@ final class DatabricksFilter {
       return false;
     }
 
-    return includedCatalogs.isEmpty() || includedCatalogs.contains(normalized);
+    if (includedCatalogs.isEmpty()) {
+      return !UNLISTED_EXCLUDED_CATALOGS.contains(normalized);
+    }
+    return includedCatalogs.contains(normalized);
+  }
+
+  /**
+   * Returns whether the filter may accept a catalog other than {@code catalogName}, such as a Unity
+   * Catalog catalog other than {@code hive_metastore}.
+   */
+  boolean acceptsAnyCatalogExcept(@Nonnull String catalogName) {
+    String normalized = normalize(catalogName);
+    if (includedCatalogs.isEmpty()) {
+      return true;
+    }
+
+    for (String includedCatalog : includedCatalogs) {
+      if (!includedCatalog.equals(normalized)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   boolean acceptsSchema(@CheckForNull String schemaName) {

@@ -32,6 +32,14 @@ interface DatabricksMetadataDumpFormat {
 
   String FORMAT_NAME = "databricks.dump.zip";
 
+  String UNITY_CATALOG_CATALOGS_ENTRY_NAME = "catalogs.csv";
+  String UNITY_CATALOG_SCHEMATA_ENTRY_NAME = "schemata.csv";
+  String UNITY_CATALOG_TABLES_ENTRY_NAME = "tables.csv";
+  String UNITY_CATALOG_COLUMNS_ENTRY_NAME = "columns.csv";
+  String UNITY_CATALOG_VIEWS_ENTRY_NAME = "views.csv";
+  String UNITY_CATALOG_TABLE_CONSTRAINTS_ENTRY_NAME = "table_constraints.csv";
+  String UNITY_CATALOG_FUNCTIONS_ENTRY_NAME = "functions.csv";
+
   String HIVE_METASTORE_CATALOGS_ENTRY_NAME = "catalogs-hms.csv";
   String HIVE_METASTORE_SCHEMATA_ENTRY_NAME = "schemata-hms.csv";
   String HIVE_METASTORE_TABLES_ENTRY_NAME = "tables-hms.csv";
@@ -118,10 +126,17 @@ interface DatabricksMetadataDumpFormat {
    *   <li>{@code StorageProperties} and {@code TableProperties}: JSON objects. {@code SHOW TABLE
    *       EXTENDED} prints them as {@code [key=value, ...]} without escaping, so for {@code
    *       hive_metastore} an entry ends before the next {@code , key=} outside of parentheses and
-   *       brackets, and a value that contains such text is split.
+   *       brackets, and a value that contains such text is split. For Unity Catalog, {@code
+   *       TableProperties} also has the {@code view.*} properties of a view, such as the SQL
+   *       configuration when the view was created, which {@code SHOW TABLE EXTENDED} hides.
    *   <li>{@code NumBuckets}, {@code BucketColumns} and {@code SortColumns}: the bucketing of a
    *       {@code hive_metastore} table, as in {@code CLUSTERED BY (a) SORTED BY (b) INTO 4
    *       BUCKETS}. The columns are JSON arrays of names.
+   *   <li>{@code RowFilter}: a JSON object of the row filter of a Unity Catalog table, as in {@code
+   *       WITH ROW FILTER f ON (region, 'admin')}: {@code function}, the qualified name of the
+   *       filter function, and {@code inputColumns}, its arguments, which are column names or
+   *       literals. {@code inputArguments} has the arguments as objects with a {@code column} or a
+   *       {@code constant}, if Databricks provides them.
    * </ul>
    */
   enum TablesHeader {
@@ -144,7 +159,8 @@ interface DatabricksMetadataDumpFormat {
     TableProperties,
     NumBuckets,
     BucketColumns,
-    SortColumns
+    SortColumns,
+    RowFilter
   }
 
   /**
@@ -164,9 +180,14 @@ interface DatabricksMetadataDumpFormat {
    *   <li>{@code ColumnDefault}, {@code GenerationExpression}, {@code IdentityGeneration} ({@code
    *       ALWAYS} or {@code BY DEFAULT}), {@code IdentityStart} and {@code IdentityIncrement}: the
    *       {@code DEFAULT}, {@code GENERATED ALWAYS AS} and {@code GENERATED ... AS IDENTITY}
-   *       clauses of a Unity Catalog column. {@code SHOW TABLE EXTENDED} and {@code DESCRIBE TABLE}
-   *       don't show them, so for {@code hive_metastore} they are empty; the DDL files show them.
-   *   <li>{@code Mask}: a JSON object of the column mask of a Unity Catalog column.
+   *       clauses of a Unity Catalog column, from the metadata of the column in its {@code
+   *       type_json}. {@code SHOW TABLE EXTENDED} and {@code DESCRIBE TABLE} don't show them, so
+   *       for {@code hive_metastore} they are empty; the DDL files show them.
+   *   <li>{@code Mask}: a JSON object of the column mask of a Unity Catalog column, as in {@code
+   *       MASK f USING COLUMNS (region)}: {@code function}, the qualified name of the mask
+   *       function, and {@code usingColumns}, its other arguments. {@code usingArguments} has the
+   *       arguments as objects with a {@code column} or a {@code constant}, if Databricks provides
+   *       them.
    * </ul>
    */
   enum ColumnsHeader {
@@ -190,15 +211,21 @@ interface DatabricksMetadataDumpFormat {
   /**
    * Columns of the views files, which are needed to resolve the names in the view text.
    *
+   * <p>A views file has a row for each view, materialized view and metric view, and for each other
+   * table with a defining query, such as a streaming table. {@code ViewDefinition} is empty if
+   * Databricks doesn't return the query, as for some materialized views.
+   *
    * <ul>
    *   <li>{@code ViewCatalogAndNamespace}: the current catalog and schema when the view was
    *       created, such as {@code spark_catalog.default}, for the unqualified names in the view
-   *       text.
+   *       text. A part is quoted with backticks if it isn't a plain identifier.
    *   <li>{@code ViewQueryOutputColumns}: a JSON array of the names of the columns of the view
    *       query, which the view columns are mapped to.
    *   <li>{@code ViewSchemaMode}: such as {@code BINDING} or {@code COMPENSATION}.
    *   <li>{@code SqlPath}: the SQL path for the unqualified function names in the view text.
    * </ul>
+   *
+   * <p>For Unity Catalog, the first three come from the {@code view.*} table properties.
    */
   enum ViewsHeader {
     TableCatalog,
@@ -219,6 +246,13 @@ interface DatabricksMetadataDumpFormat {
    * and {@code rely} for a primary key, with {@code timeseriesColumns}; and {@code columns}, {@code
    * referencedTable}, {@code referencedColumns} and {@code rely} for a foreign key. {@code
    * hive_metastore} has only the check constraints of Delta tables.
+   *
+   * <p>The check constraints come from the {@code delta.constraints.*} table properties and are
+   * written first. Unity Catalog lists tables without their primary and foreign keys, so they are
+   * read with a request for each table that has keys in information_schema, and written after the
+   * check constraints. If the information_schema of a catalog can't be read, each table of the
+   * catalog other than a view is requested. A table whose request fails has only its check
+   * constraints.
    */
   enum TableConstraintsHeader {
     TableCatalog,
@@ -248,7 +282,11 @@ interface DatabricksMetadataDumpFormat {
    *       the unqualified function names in the body. They and {@code UpdatedAt} are empty for
    *       {@code hive_metastore}.
    *   <li>{@code ClassName}: the class of a Hive function, as in {@code CREATE FUNCTION f AS
-   *       'com.acme.Udf'}. {@code Handler}: the handler class of a Python table function.
+   *       'com.acme.Udf'}, which only {@code hive_metastore} has. {@code Handler}: the handler of a
+   *       Python table function, or the {@code external_name} of a Unity Catalog function.
+   *   <li>{@code Properties}: a JSON object of the properties of a Unity Catalog function.
+   *       Databricks returns them as JSON text, which is written unchanged if it isn't a JSON
+   *       object.
    * </ul>
    */
   enum FunctionsHeader {
@@ -269,7 +307,8 @@ interface DatabricksMetadataDumpFormat {
     CreatedAt,
     UpdatedAt,
     ClassName,
-    Handler
+    Handler,
+    Properties
   }
 
   /**

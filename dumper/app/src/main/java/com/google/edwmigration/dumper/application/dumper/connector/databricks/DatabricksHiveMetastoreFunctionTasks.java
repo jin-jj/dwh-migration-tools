@@ -196,7 +196,8 @@ final class DatabricksHiveMetastoreFunctionTasks {
               function.createdAt,
               "",
               function.className,
-              function.handler);
+              function.handler,
+              "");
         }
       }
       return null;

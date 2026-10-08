@@ -236,7 +236,8 @@ public class DatabricksHiveMetastoreFunctionTasksTest {
         function.createdAt,
         UNITY_CATALOG_ONLY,
         function.className,
-        function.handler);
+        function.handler,
+        UNITY_CATALOG_ONLY);
   }
 
   private static List<Map<String, String>> parseJsonArray(String json) throws IOException {

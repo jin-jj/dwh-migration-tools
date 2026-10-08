@@ -34,6 +34,7 @@ import com.google.common.io.ByteSink;
 import com.google.common.io.Files;
 import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
 import java.io.File;
+import java.io.IOException;
 import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -67,7 +68,12 @@ final class DatabricksStatementStubs {
     try (DatabricksHandle handle = newHandle(statements, filter)) {
       body.run(Files.asByteSink(output), handle);
     }
-    String csv = Files.asCharSource(output, UTF_8).read();
+    return readRecords(output);
+  }
+
+  /** Returns the records of a CSV file with a header, as the tasks write it. */
+  static List<CSVRecord> readRecords(File file) throws IOException {
+    String csv = Files.asCharSource(file, UTF_8).read();
     try (CSVParser parser =
         AbstractTask.FORMAT
             .builder()
@@ -86,9 +92,15 @@ final class DatabricksStatementStubs {
   static DatabricksHandle newHandle(StatementExecutionAPI statements, DatabricksFilter filter) {
     WorkspaceClient client = mock(WorkspaceClient.class);
     when(client.statementExecution()).thenReturn(statements);
+    return newHandle(client, new DatabricksRestHelper(client), filter);
+  }
+
+  /** Returns a handle that sends SQL statements and REST requests with {@code client}. */
+  static DatabricksHandle newHandle(
+      WorkspaceClient client, DatabricksRestHelper restHelper, DatabricksFilter filter) {
     DatabricksSqlHelper sqlHelper =
         new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
-    return new DatabricksHandle(sqlHelper, filter, MAX_CONCURRENT_STATEMENTS);
+    return new DatabricksHandle(sqlHelper, restHelper, filter, MAX_CONCURRENT_STATEMENTS);
   }
 
   /** Mocks the Statement Execution API to answer each SQL statement from the map. */

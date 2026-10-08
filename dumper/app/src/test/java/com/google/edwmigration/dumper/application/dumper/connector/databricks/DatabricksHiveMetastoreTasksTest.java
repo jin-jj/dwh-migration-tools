@@ -279,6 +279,7 @@ public class DatabricksHiveMetastoreTasksTest {
     assertEquals("", record.get(TablesHeader.NumBuckets));
     assertEquals("", record.get(TablesHeader.BucketColumns));
     assertEquals("", record.get(TablesHeader.SortColumns));
+    assertEquals("", record.get(TablesHeader.RowFilter));
   }
 
   @Test

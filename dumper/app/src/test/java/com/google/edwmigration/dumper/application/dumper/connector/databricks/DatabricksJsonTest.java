@@ -16,8 +16,10 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksJson.sortJsonObjectKeys;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksJson.toJsonOrEmpty;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,5 +70,46 @@ public class DatabricksJsonTest {
     assertEquals("", toJsonOrEmpty(ImmutableMap.of()));
     assertEquals("", toJsonOrEmpty((Collection<?>) null));
     assertEquals("", toJsonOrEmpty(ImmutableList.of()));
+  }
+
+  @Test
+  public void sortJsonObjectKeys_sortsTheKeysOfNestedObjects() throws IOException {
+    ImmutableMap<String, Object> nested = ImmutableMap.of("z", 1, "m", ImmutableList.of("b", "a"));
+    ImmutableMap<String, Object> values = ImmutableMap.of("owner", "finance", "config", nested);
+
+    LinkedHashMap<String, Object> written =
+        JSON.readValue(
+            sortJsonObjectKeys(JSON.writeValueAsString(values)),
+            new TypeReference<LinkedHashMap<String, Object>>() {});
+
+    assertEquals(values, written);
+    assertEquals(
+        Ordering.natural().sortedCopy(values.keySet()), ImmutableList.copyOf(written.keySet()));
+    Map<?, ?> writtenNested = (Map<?, ?>) written.get("config");
+    assertEquals(
+        Ordering.natural().sortedCopy(nested.keySet()),
+        ImmutableList.copyOf(writtenNested.keySet()));
+  }
+
+  @Test
+  public void sortJsonObjectKeys_keepsTheDigitsOfDecimals() {
+    String decimal = "1.10";
+
+    assertTrue(sortJsonObjectKeys("{\"rate\":" + decimal + "}").contains(decimal));
+  }
+
+  @Test
+  public void sortJsonObjectKeys_keepsTextThatIsNotAJsonObjectUnchanged() {
+    for (String text :
+        ImmutableList.of("[1,2]", "not json", "{\"a\":1,\"a\":2}", "{\"a\":1} trailing")) {
+      assertEquals(text, sortJsonObjectKeys(text));
+    }
+  }
+
+  @Test
+  public void sortJsonObjectKeys_writesEmptyStringForNullBlankOrEmptyObject() {
+    assertEquals("", sortJsonObjectKeys(null));
+    assertEquals("", sortJsonObjectKeys(" "));
+    assertEquals("", sortJsonObjectKeys("{}"));
   }
 }

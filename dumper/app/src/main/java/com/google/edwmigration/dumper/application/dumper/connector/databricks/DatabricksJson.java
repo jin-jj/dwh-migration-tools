@@ -16,10 +16,15 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Collection;
 import java.util.Map;
@@ -36,6 +41,17 @@ final class DatabricksJson {
 
   private static final ObjectWriter WRITER =
       new ObjectMapper().configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true).writer();
+
+  /**
+   * Reads a JSON object, keeping the digits of its decimal numbers. Text that can't be written back
+   * without a loss, such as an object with a duplicate key or with trailing text, is rejected.
+   */
+  private static final ObjectReader OBJECT_READER =
+      new ObjectMapper()
+          .configure(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS, true)
+          .configure(DeserializationFeature.FAIL_ON_TRAILING_TOKENS, true)
+          .configure(JsonParser.Feature.STRICT_DUPLICATE_DETECTION, true)
+          .readerFor(new TypeReference<Map<String, Object>>() {});
 
   private DatabricksJson() {}
 
@@ -55,6 +71,27 @@ final class DatabricksJson {
       return "";
     }
     return write(values);
+  }
+
+  /**
+   * Returns the JSON text of an object with its keys sorted, such as the properties that Databricks
+   * returns as text, or the text unchanged if it isn't a JSON object. Returns an empty string if
+   * the text is null, blank or an empty object.
+   */
+  @Nonnull
+  static String sortJsonObjectKeys(@CheckForNull String text) {
+    if (text == null || text.trim().isEmpty()) {
+      return "";
+    }
+
+    Map<String, Object> values;
+    try {
+      values = OBJECT_READER.readValue(text);
+    } catch (IOException e) {
+      // The text is kept as Databricks returned it, so no information is lost.
+      return text;
+    }
+    return toJsonOrEmpty(values);
   }
 
   @Nonnull

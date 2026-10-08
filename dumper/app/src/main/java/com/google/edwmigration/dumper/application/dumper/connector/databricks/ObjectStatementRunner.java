@@ -37,8 +37,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Runs one SQL statement per object, such as {@code SHOW TABLE EXTENDED} for each schema, on a
- * bounded number of threads, and passes the results to a consumer in input order.
+ * Runs one SQL statement or Unity Catalog API request per object, such as {@code SHOW TABLE
+ * EXTENDED} or a table listing request for each schema, on a bounded number of threads, and passes
+ * the results to a consumer in input order.
  *
  * <p>The consumer runs on the calling thread, so it can write to a file without synchronization.
  * Only a few statements per thread are submitted ahead of the consumer, so a slow statement doesn't
