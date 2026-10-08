@@ -32,6 +32,8 @@ import com.google.edwmigration.dumper.application.dumper.connector.AbstractConne
 import com.google.edwmigration.dumper.application.dumper.connector.Connector;
 import com.google.edwmigration.dumper.application.dumper.connector.ConnectorProperty;
 import com.google.edwmigration.dumper.application.dumper.connector.MetadataConnector;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDdlTasks.DatabricksHiveMetastoreDdlsTask;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDdlTasks.DatabricksHiveMetastoreFunctionDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreFunctionTasks.DatabricksHiveMetastoreFunctionsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreFunctionTasks.HiveMetastoreFunctionCache;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreCatalogsTask;
@@ -55,8 +57,9 @@ import javax.annotation.Nonnull;
  * <p>Dumps the schemas, tables, views, columns, table constraints and functions of the legacy
  * {@code hive_metastore} catalog with {@code SHOW SCHEMAS}, {@code DESCRIBE SCHEMA EXTENDED},
  * {@code SHOW TABLE EXTENDED}, {@code DESCRIBE TABLE}, {@code SHOW USER FUNCTIONS} and {@code
- * DESCRIBE FUNCTION EXTENDED}, run on a Databricks SQL warehouse. The files are described in {@link
- * DatabricksMetadataDumpFormat}.
+ * DESCRIBE FUNCTION EXTENDED}, run on a Databricks SQL warehouse. It also dumps the {@code SHOW
+ * CREATE TABLE} output of the tables and views, and builds the {@code CREATE FUNCTION} statements
+ * of the functions. The files are described in {@link DatabricksMetadataDumpFormat}.
  */
 @AutoService(Connector.class)
 @Description("Dumps metadata from the Databricks hive_metastore catalog using a SQL warehouse.")
@@ -173,8 +176,10 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     out.add(new DatabricksHiveMetastoreColumnsTask(sessionCache));
     out.add(new DatabricksHiveMetastoreViewsTask(sessionCache));
     out.add(new DatabricksHiveMetastoreTableConstraintsTask(sessionCache));
+    out.add(new DatabricksHiveMetastoreDdlsTask(sessionCache));
     HiveMetastoreFunctionCache functionCache = new HiveMetastoreFunctionCache(sessionCache);
     out.add(new DatabricksHiveMetastoreFunctionsTask(functionCache));
+    out.add(new DatabricksHiveMetastoreFunctionDdlsTask(functionCache));
   }
 
   @Override

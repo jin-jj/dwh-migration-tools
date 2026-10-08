@@ -39,6 +39,8 @@ interface DatabricksMetadataDumpFormat {
   String HIVE_METASTORE_VIEWS_ENTRY_NAME = "views-hms.csv";
   String HIVE_METASTORE_TABLE_CONSTRAINTS_ENTRY_NAME = "table_constraints-hms.csv";
   String HIVE_METASTORE_FUNCTIONS_ENTRY_NAME = "functions-hms.csv";
+  String HIVE_METASTORE_DDLS_ENTRY_NAME = "ddls-hms.csv";
+  String HIVE_METASTORE_FUNCTION_DDLS_ENTRY_NAME = "function_ddls-hms.csv";
 
   /**
    * Columns of the catalogs files.
@@ -163,7 +165,7 @@ interface DatabricksMetadataDumpFormat {
    *       ALWAYS} or {@code BY DEFAULT}), {@code IdentityStart} and {@code IdentityIncrement}: the
    *       {@code DEFAULT}, {@code GENERATED ALWAYS AS} and {@code GENERATED ... AS IDENTITY}
    *       clauses of a Unity Catalog column. {@code SHOW TABLE EXTENDED} and {@code DESCRIBE TABLE}
-   *       don't show them, so for {@code hive_metastore} they are empty.
+   *       don't show them, so for {@code hive_metastore} they are empty; the DDL files show them.
    *   <li>{@code Mask}: a JSON object of the column mask of a Unity Catalog column.
    * </ul>
    */
@@ -268,5 +270,38 @@ interface DatabricksMetadataDumpFormat {
     UpdatedAt,
     ClassName,
     Handler
+  }
+
+  /**
+   * Columns of the DDL files, with the {@code SHOW CREATE TABLE} output of each table and view.
+   *
+   * <p>For {@code hive_metastore}, the DDL of a Delta table also shows the column defaults,
+   * generated columns and identity columns that the columns file leaves empty.
+   *
+   * <p>Databricks rejects {@code SHOW CREATE TABLE} for some {@code hive_metastore} tables, such as
+   * Hive tables with an unsupported SerDe configuration. Those tables are left out; their storage
+   * is described in the tables file.
+   */
+  enum DdlsHeader {
+    TableCatalog,
+    TableSchema,
+    TableName,
+    TableType,
+    Ddl
+  }
+
+  /**
+   * Columns of the function DDL files, with the {@code CREATE FUNCTION} statement of each function
+   * that has a body or a class.
+   *
+   * <p>Databricks has no {@code SHOW CREATE FUNCTION}, so the statement is built from the values in
+   * the functions file. A function whose parameters could not be split is written with the
+   * parameter text as {@code DESCRIBE FUNCTION EXTENDED} printed it.
+   */
+  enum FunctionDdlsHeader {
+    FunctionCatalog,
+    FunctionSchema,
+    FunctionName,
+    Ddl
   }
 }

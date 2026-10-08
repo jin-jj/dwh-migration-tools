@@ -131,7 +131,9 @@ public class DatabricksMetadataConnectorTest {
             DatabricksMetadataDumpFormat.HIVE_METASTORE_COLUMNS_ENTRY_NAME,
             DatabricksMetadataDumpFormat.HIVE_METASTORE_VIEWS_ENTRY_NAME,
             DatabricksMetadataDumpFormat.HIVE_METASTORE_TABLE_CONSTRAINTS_ENTRY_NAME,
-            DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTIONS_ENTRY_NAME);
+            DatabricksMetadataDumpFormat.HIVE_METASTORE_DDLS_ENTRY_NAME,
+            DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTIONS_ENTRY_NAME,
+            DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTION_DDLS_ENTRY_NAME);
     int metadataAndFormatTaskCount = 2;
 
     List<Task<?>> tasks = new ArrayList<>();
