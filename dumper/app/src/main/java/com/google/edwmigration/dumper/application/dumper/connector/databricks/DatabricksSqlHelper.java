@@ -93,12 +93,7 @@ final class DatabricksSqlHelper {
       @Nonnull String warehouseId,
       @Nonnull DatabricksChunkDownloader chunkDownloader,
       long pollIntervalMs) {
-    this(
-        workspaceClient,
-        warehouseId,
-        chunkDownloader,
-        pollIntervalMs,
-        DEFAULT_STATEMENT_TIMEOUT);
+    this(workspaceClient, warehouseId, chunkDownloader, pollIntervalMs, DEFAULT_STATEMENT_TIMEOUT);
   }
 
   @VisibleForTesting
@@ -112,7 +107,8 @@ final class DatabricksSqlHelper {
     this.warehouseId = Preconditions.checkNotNull(warehouseId, "Warehouse ID was null.");
     this.chunkDownloader = Preconditions.checkNotNull(chunkDownloader, "ChunkDownloader was null.");
     this.pollIntervalMs = pollIntervalMs;
-    this.statementTimeout = Preconditions.checkNotNull(statementTimeout, "StatementTimeout was null.");
+    this.statementTimeout =
+        Preconditions.checkNotNull(statementTimeout, "StatementTimeout was null.");
   }
 
   @Nonnull
@@ -145,12 +141,11 @@ final class DatabricksSqlHelper {
         throw new DatabricksSqlException(
             "Statement is in RUNNING/PENDING state without a statementId.");
       }
-      if (Instant.now().isAfter(deadline)) {
+      if (!Instant.now().isBefore(deadline)) {
         cancelQuietly(statementId);
         throw new DatabricksSqlException(
             String.format(
-                "Timed out waiting for SQL statement %s after %s.",
-                statementId, statementTimeout));
+                "Timed out waiting for SQL statement %s after %s.", statementId, statementTimeout));
       }
       sleepForPoll(statementId);
       try {
@@ -254,6 +249,15 @@ final class DatabricksSqlHelper {
   @Nonnull
   static String quoteIdentifier(@Nonnull String identifier) {
     return "`" + identifier.replace("`", "``") + "`";
+  }
+
+  /**
+   * Quotes a SQL string literal. Backslashes and single quotes are escaped with a backslash, as in
+   * the output of {@code SHOW CREATE TABLE}.
+   */
+  @Nonnull
+  static String quoteStringLiteral(@Nonnull String value) {
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
   }
 
   private final class ChunkRowIterator implements Iterator<List<String>> {
