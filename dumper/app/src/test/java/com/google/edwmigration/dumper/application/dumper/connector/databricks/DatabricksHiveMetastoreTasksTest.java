@@ -18,32 +18,28 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.parseSchemaProperties;
-import static java.nio.charset.StandardCharsets.UTF_8;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.acceptAllFilter;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.failed;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.mockStatements;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.newHandle;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.succeeded;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.succeededRows;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
-import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
-import com.databricks.sdk.service.sql.ResultData;
-import com.databricks.sdk.service.sql.ServiceError;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
 import com.databricks.sdk.service.sql.StatementResponse;
-import com.databricks.sdk.service.sql.StatementState;
-import com.databricks.sdk.service.sql.StatementStatus;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.io.ByteSink;
-import com.google.common.io.Files;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreCatalogsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreColumnsTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.DatabricksHiveMetastoreSchemataTask;
@@ -57,17 +53,13 @@ import com.google.edwmigration.dumper.application.dumper.connector.databricks.Da
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.TableConstraintsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.TablesHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.ViewsHeader;
-import com.google.edwmigration.dumper.application.dumper.task.AbstractTask;
-import java.io.File;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.TaskBody;
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
 import org.junit.Rule;
 import org.junit.Test;
@@ -81,7 +73,6 @@ public class DatabricksHiveMetastoreTasksTest {
   private static final String SCHEMA = "legacy";
   private static final String SHOW_SCHEMAS = "SHOW SCHEMAS";
   private static final String SHOW_TABLES = "SHOW TABLE EXTENDED IN `legacy` LIKE '*'";
-  private static final int MAX_CONCURRENT_STATEMENTS = 4;
   private static final String VIEW_CATALOG_AND_NAMESPACE = "spark_catalog.legacy";
   private static final String VIEW_SCHEMA_MODE = "COMPENSATION";
   private static final ImmutableList<String> VIEW_QUERY_OUTPUT_COLUMNS = ImmutableList.of("id");
@@ -806,11 +797,6 @@ public class DatabricksHiveMetastoreTasksTest {
     verify(statements, times(1)).executeStatement(any(ExecuteStatementRequest.class));
   }
 
-  private interface TaskBody {
-
-    void run(ByteSink sink, DatabricksHandle handle) throws Exception;
-  }
-
   private List<CSVRecord> runTask(StatementExecutionAPI statements, TaskBody body)
       throws Exception {
     return runTask(statements, acceptAllFilter(), body);
@@ -818,50 +804,7 @@ public class DatabricksHiveMetastoreTasksTest {
 
   private List<CSVRecord> runTask(
       StatementExecutionAPI statements, DatabricksFilter filter, TaskBody body) throws Exception {
-    File output = tempFolder.newFile();
-    try (DatabricksHandle handle = newHandle(statements, filter)) {
-      body.run(Files.asByteSink(output), handle);
-    }
-    String csv = Files.asCharSource(output, UTF_8).read();
-    try (CSVParser parser =
-        AbstractTask.FORMAT
-            .builder()
-            .setHeader()
-            .setSkipHeaderRecord(true)
-            .get()
-            .parse(new StringReader(csv))) {
-      return parser.getRecords();
-    }
-  }
-
-  private static DatabricksFilter acceptAllFilter() {
-    return new DatabricksFilter(ImmutableList.of(), ImmutableList.of());
-  }
-
-  private static DatabricksHandle newHandle(
-      StatementExecutionAPI statements, DatabricksFilter filter) {
-    WorkspaceClient client = mock(WorkspaceClient.class);
-    when(client.statementExecution()).thenReturn(statements);
-    DatabricksSqlHelper sqlHelper =
-        new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
-    return new DatabricksHandle(sqlHelper, filter, MAX_CONCURRENT_STATEMENTS);
-  }
-
-  /** Mocks the Statement Execution API to answer each SQL statement from the map. */
-  private static StatementExecutionAPI mockStatements(
-      Map<String, StatementResponse> responsesBySql) {
-    StatementExecutionAPI statements = mock(StatementExecutionAPI.class);
-    when(statements.executeStatement(any(ExecuteStatementRequest.class)))
-        .thenAnswer(
-            invocation -> {
-              ExecuteStatementRequest request = invocation.getArgument(0);
-              StatementResponse response = responsesBySql.get(request.getStatement());
-              if (response == null) {
-                throw new IllegalArgumentException("Unexpected SQL: " + request.getStatement());
-              }
-              return response;
-            });
-    return statements;
+    return DatabricksStatementStubs.runTask(tempFolder.newFile(), statements, filter, body);
   }
 
   private static Map<String, String> parseJsonObject(String json) throws IOException {
@@ -953,33 +896,5 @@ public class DatabricksHiveMetastoreTasksTest {
         + "\n"
         + "Schema: root\n"
         + " |-- id: integer (nullable = true)\n";
-  }
-
-  private static StatementResponse succeeded(String... singleColumnRows) {
-    List<List<String>> tableRows = new ArrayList<>();
-    for (String value : singleColumnRows) {
-      tableRows.add(ImmutableList.of(value));
-    }
-    return succeededRows(tableRows);
-  }
-
-  private static StatementResponse succeededRows(List<? extends List<String>> tableRows) {
-    return new StatementResponse()
-        .setStatementId("stmt-ok")
-        .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
-        .setResult(new ResultData().setDataArray(rows(tableRows)));
-  }
-
-  private static Collection<Collection<String>> rows(List<? extends List<String>> tableRows) {
-    return new ArrayList<Collection<String>>(tableRows);
-  }
-
-  private static StatementResponse failed(String message) {
-    return new StatementResponse()
-        .setStatementId("stmt-failed")
-        .setStatus(
-            new StatementStatus()
-                .setState(StatementState.FAILED)
-                .setError(new ServiceError().setMessage(message)));
   }
 }

@@ -413,11 +413,12 @@ final class DatabricksHiveMetastoreTableParser {
   }
 
   /**
-   * Returns a {@code Created Time} value, such as {@code Sun Sep 27 21:19:25 UTC 2026}, as an ISO
-   * 8601 instant, such as {@code 2026-09-27T21:19:25Z}, or unchanged if it has another format.
+   * Returns a time that Spark prints with {@code java.util.Date#toString}, such as the {@code
+   * Created Time} {@code Sun Sep 27 21:19:25 UTC 2026}, as an ISO 8601 instant, such as {@code
+   * 2026-09-27T21:19:25Z}, or unchanged if it has another format.
    */
   @Nonnull
-  private static String formatCreatedTime(@Nonnull String createdTime) {
+  static String formatCreatedTime(@Nonnull String createdTime) {
     try {
       return ZonedDateTime.parse(createdTime, CREATED_TIME_FORMATTER).toInstant().toString();
     } catch (DateTimeParseException e) {

@@ -38,6 +38,7 @@ interface DatabricksMetadataDumpFormat {
   String HIVE_METASTORE_COLUMNS_ENTRY_NAME = "columns-hms.csv";
   String HIVE_METASTORE_VIEWS_ENTRY_NAME = "views-hms.csv";
   String HIVE_METASTORE_TABLE_CONSTRAINTS_ENTRY_NAME = "table_constraints-hms.csv";
+  String HIVE_METASTORE_FUNCTIONS_ENTRY_NAME = "functions-hms.csv";
 
   /**
    * Columns of the catalogs files.
@@ -224,5 +225,48 @@ interface DatabricksMetadataDumpFormat {
     ConstraintName,
     ConstraintType,
     ConstraintDetails
+  }
+
+  /**
+   * Columns of the functions files.
+   *
+   * <ul>
+   *   <li>{@code DataType}: the return type, such as {@code INT}, or {@code TABLE(...)} with the
+   *       columns of a table function.
+   *   <li>{@code InputParams} and {@code ReturnParams}: JSON arrays of the parameters and of the
+   *       columns of a table function. Each element has a {@code name} and a {@code type}, and may
+   *       have a {@code mode}, such as {@code IN}, a {@code default} SQL expression and a {@code
+   *       comment}. A parameter that could not be split has an empty {@code name} and its whole
+   *       text as {@code type}. {@code ReturnParams} is empty for other functions.
+   *   <li>{@code RoutineDefinition} and {@code RoutineLanguage}: the body and its language, such as
+   *       {@code SQL} or {@code PYTHON}.
+   *   <li>{@code IsDeterministic}: {@code true} or {@code false}. {@code SqlDataAccess}: such as
+   *       {@code CONTAINS SQL} or {@code READS SQL DATA}.
+   *   <li>{@code SecurityType} and {@code SqlPath}: such as {@code DEFINER}, and the SQL path for
+   *       the unqualified function names in the body. They and {@code UpdatedAt} are empty for
+   *       {@code hive_metastore}.
+   *   <li>{@code ClassName}: the class of a Hive function, as in {@code CREATE FUNCTION f AS
+   *       'com.acme.Udf'}. {@code Handler}: the handler class of a Python table function.
+   * </ul>
+   */
+  enum FunctionsHeader {
+    FunctionCatalog,
+    FunctionSchema,
+    FunctionName,
+    DataType,
+    InputParams,
+    ReturnParams,
+    RoutineDefinition,
+    RoutineLanguage,
+    Comment,
+    Owner,
+    IsDeterministic,
+    SqlDataAccess,
+    SecurityType,
+    SqlPath,
+    CreatedAt,
+    UpdatedAt,
+    ClassName,
+    Handler
   }
 }
