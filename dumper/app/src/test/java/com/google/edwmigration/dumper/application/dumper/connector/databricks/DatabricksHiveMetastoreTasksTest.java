@@ -25,6 +25,7 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.succeeded;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.succeededRows;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -96,7 +97,7 @@ public class DatabricksHiveMetastoreTasksTest {
     for (CatalogsHeader column : CatalogsHeader.values()) {
       if (column == CatalogsHeader.CatalogName) {
         assertEquals(HIVE_METASTORE_CATALOG, record.get(column));
-      } else if (column != CatalogsHeader.Comment) {
+      } else {
         assertEquals(column.name(), "", record.get(column));
       }
     }
@@ -759,6 +760,72 @@ public class DatabricksHiveMetastoreTasksTest {
               details.get("expression")));
     }
     assertEquals(expected.build(), written.build());
+  }
+
+  @Test
+  public void tasks_writeHiveMetastoreAsCatalogWhenSparkCatalogIsPrinted() throws Exception {
+    String printedCatalog = "spark_catalog";
+    String tableInformation =
+        String.join(
+            "\n",
+            "Catalog: " + printedCatalog,
+            "Database: legacy",
+            "Table: orders",
+            "Type: MANAGED",
+            "Provider: delta",
+            "Table Properties: [delta.constraints.positive_amount=amount > 0]",
+            "Schema: root",
+            " |-- amount: integer (nullable = true)",
+            "");
+    String viewInformation =
+        String.join(
+            "\n",
+            "Catalog: " + printedCatalog,
+            "Database: legacy",
+            "Table: order_amounts",
+            "Type: VIEW",
+            "View Text: SELECT amount FROM legacy.orders",
+            "Schema: root",
+            " |-- amount: integer (nullable = true)",
+            "");
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                succeededRows(
+                    ImmutableList.of(
+                        ImmutableList.of(SCHEMA, "orders", "false", tableInformation),
+                        ImmutableList.of(SCHEMA, "order_amounts", "false", viewInformation))),
+                "DESCRIBE TABLE `legacy`.`orders`",
+                succeededRows(ImmutableList.of(Arrays.asList("amount", "int", null))),
+                "DESCRIBE TABLE `legacy`.`order_amounts`",
+                succeededRows(ImmutableList.of(Arrays.asList("amount", "int", null)))));
+    HiveMetastoreSessionCache cache = new HiveMetastoreSessionCache();
+    ImmutableMap<Enum<?>, TaskBody> tasksByCatalogColumn =
+        ImmutableMap.<Enum<?>, TaskBody>of(
+            TablesHeader.TableCatalog,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreTablesTask(cache).doRun(null, sink, handle),
+            ColumnsHeader.TableCatalog,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreColumnsTask(cache).doRun(null, sink, handle),
+            ViewsHeader.TableCatalog,
+            (sink, handle) -> new DatabricksHiveMetastoreViewsTask(cache).doRun(null, sink, handle),
+            TableConstraintsHeader.TableCatalog,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreTableConstraintsTask(cache).doRun(null, sink, handle));
+
+    for (Map.Entry<Enum<?>, TaskBody> task : tasksByCatalogColumn.entrySet()) {
+      List<CSVRecord> records = runTask(statements, task.getValue());
+
+      String header = task.getKey().getDeclaringClass().getSimpleName();
+      assertFalse(header, records.isEmpty());
+      for (CSVRecord record : records) {
+        assertEquals(header, HIVE_METASTORE_CATALOG, record.get(task.getKey()));
+      }
+    }
   }
 
   @Test

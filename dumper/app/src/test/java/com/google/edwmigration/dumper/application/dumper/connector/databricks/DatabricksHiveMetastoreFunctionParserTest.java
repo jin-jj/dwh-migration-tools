@@ -20,6 +20,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import com.databricks.sdk.service.catalog.FunctionParameterMode;
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreFunctionParser.ParsedFunction;
 import java.time.ZoneOffset;
@@ -259,6 +260,25 @@ public class DatabricksHiveMetastoreFunctionParserTest {
   }
 
   @Test
+  public void parseDescribeFunctionExtended_writesInModeForParametersButNotTableColumns() {
+    String inputMode = FunctionParameterMode.IN.name();
+    ParsedFunction tableFunction =
+        parseFunction(
+            "f_rows",
+            "Type:          TABLE",
+            "Input:         n INT    'rows'",
+            "               x STRING 'open comment",
+            "Returns:       id INT",
+            "Body:          SELECT n AS id");
+    ParsedFunction unsplittable =
+        parseFunction("f_odd", "Input:         x", "Returns:       INT", "Body:          1");
+
+    assertEquals(ImmutableList.of(inputMode, inputMode), modes(tableFunction.inputParams));
+    assertEquals(ImmutableList.of("null"), modes(tableFunction.returnParams));
+    assertEquals(ImmutableList.of(inputMode), modes(unsplittable.inputParams));
+  }
+
+  @Test
   public void parseDescribeFunctionExtended_parsesPythonScalarFunctionAndKeepsIndentation() {
     String body =
         "            if not input_text:\n"
@@ -337,5 +357,14 @@ public class DatabricksHiveMetastoreFunctionParserTest {
               String.valueOf(parameter.comment)));
     }
     return described.build();
+  }
+
+  /** Returns the mode of each parameter, with an absent mode as null. */
+  private static ImmutableList<String> modes(List<DatabricksFunctionParameter> parameters) {
+    ImmutableList.Builder<String> modes = ImmutableList.builder();
+    for (DatabricksFunctionParameter parameter : parameters) {
+      modes.add(String.valueOf(parameter.mode));
+    }
+    return modes.build();
   }
 }

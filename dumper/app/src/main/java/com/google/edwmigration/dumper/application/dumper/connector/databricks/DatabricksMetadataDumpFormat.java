@@ -22,9 +22,13 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
  * <p>The {@code hive_metastore} catalog and the Unity Catalog catalogs are written to separate
  * files with the same columns, such as {@code tables-hms.csv} and {@code tables.csv}, so that each
  * task fails on its own and the files of both sources can be concatenated. A column that a source
- * doesn't provide is empty in the files of that source.
+ * doesn't provide is empty in the files of that source. The {@code CatalogName}, {@code
+ * TableCatalog} and {@code FunctionCatalog} columns of the {@code hive_metastore} files are always
+ * {@code hive_metastore}, even where Databricks prints {@code spark_catalog}.
  *
- * <p>Times are ISO 8601 instants, such as {@code 2026-09-27T21:19:25Z}. Columns that hold a map,
+ * <p>Times are ISO 8601 instants, such as {@code 2026-09-27T21:19:25Z}. Unity Catalog times can
+ * have milliseconds, such as {@code 2026-09-27T21:19:25.123Z}, and {@code hive_metastore} times are
+ * whole seconds. A {@code hive_metastore} time in another format is empty. Columns that hold a map,
  * such as {@code Properties}, are JSON objects with sorted keys, and columns that hold a list are
  * JSON arrays. An absent or empty map or list is an empty string.
  */
@@ -52,6 +56,8 @@ interface DatabricksMetadataDumpFormat {
 
   /**
    * Columns of the catalogs files.
+   *
+   * <p>The {@code hive_metastore} catalogs file has one row, with only the {@code CatalogName}.
    *
    * <ul>
    *   <li>{@code SecurableType} and {@code CatalogType}: the Unity Catalog securable type, such as
@@ -115,7 +121,10 @@ interface DatabricksMetadataDumpFormat {
    *   <li>{@code SecurableType} and {@code SecurableKind}: the Unity Catalog securable type and
    *       kind, such as {@code TABLE} and {@code TABLE_DELTA}. Empty for {@code hive_metastore},
    *       whose tables are not Unity Catalog securables.
-   *   <li>{@code DataSourceFormat}: such as {@code DELTA}, {@code PARQUET} or {@code HIVE}.
+   *   <li>{@code DataSourceFormat}: such as {@code DELTA}, {@code PARQUET} or {@code HIVE}. For
+   *       {@code hive_metastore}, the provider of the table in upper case, or the name of the
+   *       format for a class name that Spark accepts for a built-in format, such as {@code
+   *       org.apache.spark.sql.parquet}. Another class name is kept as is.
    *   <li>{@code StorageLocation}: where the data of the table is stored.
    *   <li>{@code UpdatedAt}: empty for {@code hive_metastore}, because {@code SHOW TABLE EXTENDED}
    *       has no update time.
@@ -218,10 +227,14 @@ interface DatabricksMetadataDumpFormat {
    * <ul>
    *   <li>{@code ViewCatalogAndNamespace}: the current catalog and schema when the view was
    *       created, such as {@code spark_catalog.default}, for the unqualified names in the view
-   *       text. A part is quoted with backticks if it isn't a plain identifier.
+   *       text. A part is quoted with backticks if it isn't a plain identifier. The catalog {@code
+   *       spark_catalog} is {@code hive_metastore}.
    *   <li>{@code ViewQueryOutputColumns}: a JSON array of the names of the columns of the view
    *       query, which the view columns are mapped to.
-   *   <li>{@code ViewSchemaMode}: such as {@code BINDING} or {@code COMPENSATION}.
+   *   <li>{@code ViewSchemaMode}: such as {@code BINDING} or {@code COMPENSATION}. For {@code
+   *       hive_metastore}, the mode that {@code SHOW TABLE EXTENDED} prints, which may be a default
+   *       for a view that recorded none. For Unity Catalog, the recorded mode, or empty if the view
+   *       recorded none.
    *   <li>{@code SqlPath}: the SQL path for the unqualified function names in the view text.
    * </ul>
    *
@@ -248,9 +261,11 @@ interface DatabricksMetadataDumpFormat {
    * hive_metastore} has only the check constraints of Delta tables.
    *
    * <p>The check constraints come from the {@code delta.constraints.*} table properties and are
-   * written first. Unity Catalog lists tables without their primary and foreign keys, so they are
-   * read with a request for each table that has keys in information_schema, and written after the
-   * check constraints. If the information_schema of a catalog can't be read, each table of the
+   * written first. For {@code hive_metastore}, they come from the printed table properties, so an
+   * expression that contains {@code , key=} outside of parentheses is split, as in {@code
+   * TableProperties}. Unity Catalog lists tables without their primary and foreign keys, so they
+   * are read with a request for each table that has keys in information_schema, and written after
+   * the check constraints. If the information_schema of a catalog can't be read, each table of the
    * catalog other than a view is requested. A table whose request fails has only its check
    * constraints.
    */
@@ -273,7 +288,9 @@ interface DatabricksMetadataDumpFormat {
    *       columns of a table function. Each element has a {@code name} and a {@code type}, and may
    *       have a {@code mode}, such as {@code IN}, a {@code default} SQL expression and a {@code
    *       comment}. A parameter that could not be split has an empty {@code name} and its whole
-   *       text as {@code type}. {@code ReturnParams} is empty for other functions.
+   *       text as {@code type}. {@code ReturnParams} is empty for other functions. For {@code
+   *       hive_metastore}, every parameter has the mode {@code IN}, and the columns of a table
+   *       function have none.
    *   <li>{@code RoutineDefinition} and {@code RoutineLanguage}: the body and its language, such as
    *       {@code SQL} or {@code PYTHON}.
    *   <li>{@code IsDeterministic}: {@code true} or {@code false}. {@code SqlDataAccess}: such as

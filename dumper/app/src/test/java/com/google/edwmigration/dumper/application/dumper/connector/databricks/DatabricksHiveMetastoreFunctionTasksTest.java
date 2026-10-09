@@ -113,7 +113,8 @@ public class DatabricksHiveMetastoreFunctionTasksTest {
     }
     assertEquals(expected, written);
     assertEquals(
-        ImmutableList.of(ImmutableMap.of("name", "x", "type", "INT", "comment", "the input")),
+        ImmutableList.of(
+            ImmutableMap.of("name", "x", "type", "INT", "mode", "IN", "comment", "the input")),
         parseJsonArray(records.get(0).get(FunctionsHeader.InputParams)));
     assertEquals(
         ImmutableList.of(ImmutableMap.of("name", "id", "type", "BIGINT", "comment", "the id")),

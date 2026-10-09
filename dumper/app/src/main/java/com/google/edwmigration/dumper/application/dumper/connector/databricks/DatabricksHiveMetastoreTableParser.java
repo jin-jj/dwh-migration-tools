@@ -18,6 +18,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.common.base.CharMatcher.whitespace;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
@@ -34,12 +35,17 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Parses the {@code SHOW TABLE EXTENDED} and {@code DESCRIBE TABLE} output of Databricks {@code
  * hive_metastore} tables.
  */
 final class DatabricksHiveMetastoreTableParser {
+
+  private static final Logger logger =
+      LoggerFactory.getLogger(DatabricksHiveMetastoreTableParser.class);
 
   /** The prefix of every field line in a {@code Schema} tree. */
   private static final String SCHEMA_TREE_LINE_PREFIX = " |";
@@ -83,8 +89,46 @@ final class DatabricksHiveMetastoreTableParser {
       Pattern.compile("\\b(?:var)?char\\(\\d+\\)", Pattern.CASE_INSENSITIVE);
 
   /** The format of {@code java.util.Date#toString}, which Spark uses for {@code Created Time}. */
+  private static final String CREATED_TIME_PATTERN = "EEE MMM dd HH:mm:ss zzz yyyy";
+
   private static final DateTimeFormatter CREATED_TIME_FORMATTER =
-      DateTimeFormatter.ofPattern("EEE MMM dd HH:mm:ss zzz yyyy", Locale.US);
+      DateTimeFormatter.ofPattern(CREATED_TIME_PATTERN, Locale.US);
+
+  /**
+   * The format names of the class and package names that Spark accepts for its built-in data
+   * sources, by lower-case name, such as {@code PARQUET} for {@code org.apache.spark.sql.parquet}.
+   * A table keeps the provider that it was created with, so older tables may have these names.
+   */
+  private static final ImmutableMap<String, String> FORMAT_NAMES_BY_PROVIDER_CLASS =
+      ImmutableMap.<String, String>builder()
+          .put("org.apache.spark.sql.parquet", "PARQUET")
+          .put("org.apache.spark.sql.parquet.defaultsource", "PARQUET")
+          .put("org.apache.spark.sql.execution.datasources.parquet", "PARQUET")
+          .put("org.apache.spark.sql.execution.datasources.parquet.defaultsource", "PARQUET")
+          .put("org.apache.spark.sql.execution.datasources.parquet.parquetfileformat", "PARQUET")
+          .put("org.apache.spark.sql.json", "JSON")
+          .put("org.apache.spark.sql.json.defaultsource", "JSON")
+          .put("org.apache.spark.sql.execution.datasources.json", "JSON")
+          .put("org.apache.spark.sql.execution.datasources.json.defaultsource", "JSON")
+          .put("org.apache.spark.sql.execution.datasources.json.jsonfileformat", "JSON")
+          .put("org.apache.spark.sql.hive.orc", "ORC")
+          .put("org.apache.spark.sql.hive.orc.defaultsource", "ORC")
+          .put("org.apache.spark.sql.hive.orc.orcfileformat", "ORC")
+          .put("org.apache.spark.sql.execution.datasources.orc", "ORC")
+          .put("org.apache.spark.sql.execution.datasources.orc.defaultsource", "ORC")
+          .put("org.apache.spark.sql.execution.datasources.orc.orcfileformat", "ORC")
+          .put("com.databricks.spark.csv", "CSV")
+          .put("org.apache.spark.sql.execution.datasources.csv.csvfileformat", "CSV")
+          .put("com.databricks.spark.avro", "AVRO")
+          .put("org.apache.spark.sql.avro.avrofileformat", "AVRO")
+          .put("org.apache.spark.sql.execution.datasources.text.textfileformat", "TEXT")
+          .put("org.apache.spark.sql.delta.sources.deltadatasource", "DELTA")
+          .put("org.apache.spark.sql.jdbc", "JDBC")
+          .put("org.apache.spark.sql.jdbc.defaultsource", "JDBC")
+          .put("org.apache.spark.sql.execution.datasources.jdbc", "JDBC")
+          .put("org.apache.spark.sql.execution.datasources.jdbc.defaultsource", "JDBC")
+          .put("org.apache.spark.sql.execution.datasources.jdbc.jdbcrelationprovider", "JDBC")
+          .build();
 
   private static final String DELTA_CONSTRAINTS_PREFIX = "delta.constraints.";
 
@@ -223,9 +267,13 @@ final class DatabricksHiveMetastoreTableParser {
     }
   }
 
-  /** A table or view parsed from its {@code SHOW TABLE EXTENDED} information. */
+  /**
+   * A table or view parsed from its {@code SHOW TABLE EXTENDED} information.
+   *
+   * <p>The {@code Catalog} that Spark prints, which may be {@code spark_catalog}, isn't kept: the
+   * files always name the catalog {@code hive_metastore}.
+   */
   static final class ParsedTableExtended {
-    final String catalogName;
     final String schemaName;
     final String tableName;
     final String tableType;
@@ -254,15 +302,17 @@ final class DatabricksHiveMetastoreTableParser {
         @Nonnull String defaultSchema,
         @Nonnull String defaultTable,
         @Nonnull ImmutableMap<String, String> values) {
-      this.catalogName = valueOrDefault(values, "Catalog", DatabricksFilter.HIVE_METASTORE_CATALOG);
       this.schemaName = valueOrDefault(values, "Database", defaultSchema);
       this.tableName = valueOrDefault(values, "Table", defaultTable);
       this.tableType = values.getOrDefault("Type", "");
-      this.dataSourceFormat = values.getOrDefault("Provider", "").toUpperCase(Locale.ROOT);
+      this.dataSourceFormat = formatDataSourceFormat(values.getOrDefault("Provider", ""));
       this.storageLocation = values.getOrDefault("Location", "");
       this.comment = values.getOrDefault("Comment", "");
       this.owner = values.getOrDefault("Owner", "");
-      this.createdAt = formatCreatedTime(values.getOrDefault("Created Time", ""));
+      this.createdAt =
+          formatCreatedTime(
+              values.getOrDefault("Created Time", ""),
+              quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName));
       this.serdeLibrary = values.getOrDefault("Serde Library", "");
       this.inputFormat = values.getOrDefault("InputFormat", "");
       this.outputFormat = values.getOrDefault("OutputFormat", "");
@@ -415,16 +465,44 @@ final class DatabricksHiveMetastoreTableParser {
   /**
    * Returns a time that Spark prints with {@code java.util.Date#toString}, such as the {@code
    * Created Time} {@code Sun Sep 27 21:19:25 UTC 2026}, as an ISO 8601 instant, such as {@code
-   * 2026-09-27T21:19:25Z}, or unchanged if it has another format.
+   * 2026-09-27T21:19:25Z}. A time in another format is logged and returned as an empty string, so
+   * that the {@code CreatedAt} columns hold only instants, as for Unity Catalog.
+   *
+   * @param objectName the quoted name of the table or function, for the warning
    */
   @Nonnull
-  static String formatCreatedTime(@Nonnull String createdTime) {
+  static String formatCreatedTime(@Nonnull String createdTime, @Nonnull String objectName) {
+    if (createdTime.isEmpty()) {
+      return "";
+    }
+
     try {
       return ZonedDateTime.parse(createdTime, CREATED_TIME_FORMATTER).toInstant().toString();
     } catch (DateTimeParseException e) {
-      // The value is kept as Databricks printed it, so no information is lost.
-      return createdTime;
+      logger.warn(
+          "Writing {} without CreatedAt because its created time '{}' doesn't match '{}'.",
+          objectName,
+          createdTime,
+          CREATED_TIME_PATTERN);
+      return "";
     }
+  }
+
+  /**
+   * Returns the data source format of a table from its {@code Provider}, as Unity Catalog names the
+   * formats: a short name in upper case, such as {@code PARQUET} for {@code parquet}. A class or
+   * package name that Spark accepts for a built-in format, such as {@code
+   * org.apache.spark.sql.parquet}, gets the name of that format. Another class name, such as that
+   * of a custom data source, is kept as is, because class names are case-sensitive.
+   */
+  @Nonnull
+  static String formatDataSourceFormat(@Nonnull String provider) {
+    String formatName = FORMAT_NAMES_BY_PROVIDER_CLASS.get(provider.toLowerCase(Locale.ROOT));
+    if (formatName != null) {
+      return formatName;
+    }
+
+    return provider.contains(".") ? provider : provider.toUpperCase(Locale.ROOT);
   }
 
   /**

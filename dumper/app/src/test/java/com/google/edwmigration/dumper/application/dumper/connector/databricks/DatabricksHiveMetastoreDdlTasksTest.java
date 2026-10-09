@@ -164,6 +164,29 @@ public class DatabricksHiveMetastoreDdlTasksTest {
   }
 
   @Test
+  public void ddlsTask_writesHiveMetastoreAsCatalogWhenSparkCatalogIsPrinted() throws Exception {
+    StatementExecutionAPI statements =
+        mockStatements(
+            ImmutableMap.of(
+                SHOW_SCHEMAS,
+                succeeded(SCHEMA),
+                SHOW_TABLES,
+                showTablesInCatalog("spark_catalog", "delta_tbl"),
+                showCreateTable("delta_tbl"),
+                succeeded("CREATE TABLE spark_catalog.legacy.delta_tbl (id INT) USING delta")));
+    HiveMetastoreSessionCache sessionCache = new HiveMetastoreSessionCache();
+
+    List<CSVRecord> records =
+        runTask(
+            statements,
+            (sink, handle) ->
+                new DatabricksHiveMetastoreDdlsTask(sessionCache).doRun(null, sink, handle));
+
+    assertEquals(1, records.size());
+    assertEquals(HIVE_METASTORE_CATALOG, records.get(0).get(DdlsHeader.TableCatalog));
+  }
+
+  @Test
   public void functionDdlsTask_writesDdlOfFunctionsWithBodyOrClass() throws Exception {
     ImmutableList<String> sqlLines =
         ImmutableList.of("Input: x INT", "Returns: INT", "Deterministic: true", "Body: x * 2");
@@ -273,12 +296,21 @@ public class DatabricksHiveMetastoreDdlTasksTest {
 
   /** Returns the {@code SHOW TABLE EXTENDED} result of managed Delta tables with an int column. */
   private static StatementResponse showTables(String... tableNames) {
+    return showTablesInCatalog(HIVE_METASTORE_CATALOG, tableNames);
+  }
+
+  /**
+   * Returns the {@code SHOW TABLE EXTENDED} result of managed Delta tables with an int column,
+   * whose {@code Catalog} line prints {@code printedCatalog}.
+   */
+  private static StatementResponse showTablesInCatalog(
+      String printedCatalog, String... tableNames) {
     List<List<String>> rows = new ArrayList<>();
     for (String tableName : tableNames) {
       String information =
           String.join(
               "\n",
-              "Catalog: " + HIVE_METASTORE_CATALOG,
+              "Catalog: " + printedCatalog,
               "Database: " + SCHEMA,
               "Table: " + tableName,
               "Type: MANAGED",

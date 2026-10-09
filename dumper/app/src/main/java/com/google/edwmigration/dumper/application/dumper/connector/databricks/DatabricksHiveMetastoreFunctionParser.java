@@ -18,6 +18,7 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.common.base.CharMatcher.whitespace;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.formatCreatedTime;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
@@ -54,6 +55,12 @@ final class DatabricksHiveMetastoreFunctionParser {
   private static final String SQL_LANGUAGE = "SQL";
 
   private static final String DEFAULT_KEYWORD = "DEFAULT";
+
+  /**
+   * The mode of every parameter of a {@code hive_metastore} function, as Unity Catalog reports it
+   * for an input parameter. The columns that a table function returns have no mode.
+   */
+  private static final String INPUT_PARAMETER_MODE = "IN";
 
   /** Characters that leave a SQL expression waiting for another operand, as in {@code 'a' ||}. */
   private static final String OPERATOR_CHARACTERS = "|+-*/%=<>!&^~,(:";
@@ -112,9 +119,9 @@ final class DatabricksHiveMetastoreFunctionParser {
       this.handler = description.value("handler");
       this.isTableFunction =
           TABLE_FUNCTION_TYPE.equalsIgnoreCase(description.value("type")) || !handler.isEmpty();
-      this.inputParams = parseSectionRows(description.inputRows);
+      this.inputParams = parseSectionRows(description.inputRows, INPUT_PARAMETER_MODE);
       this.returnParams =
-          isTableFunction ? parseSectionRows(description.returnRows) : ImmutableList.of();
+          isTableFunction ? parseSectionRows(description.returnRows, null) : ImmutableList.of();
       this.dataType = formatDataType(isTableFunction, description.returnRows, returnParams);
       String body = Strings.nullToEmpty(description.body);
       String language = description.value("language");
@@ -128,7 +135,10 @@ final class DatabricksHiveMetastoreFunctionParser {
       this.isDeterministic = description.value("deterministic").toLowerCase(Locale.ROOT);
       this.sqlDataAccess =
           description.value("data access").replaceAll("\\s+", " ").toUpperCase(Locale.ROOT);
-      this.createdAt = formatCreatedTime(description.value("create time"));
+      this.createdAt =
+          formatCreatedTime(
+              description.value("create time"),
+              quoteIdentifier(schemaName) + "." + quoteIdentifier(functionName));
       this.className = description.value("class");
     }
   }
@@ -306,10 +316,12 @@ final class DatabricksHiveMetastoreFunctionParser {
    * columns padded to their widest value. Names and comments are printed without escaping, so a
    * name ends where the type column starts in every row, and the comment is the quoted text at the
    * end of a row. A name that contains a space is only recognized in a section with several rows.
+   *
+   * @param mode the mode of each parameter, such as {@code IN}, or null for none
    */
   @Nonnull
   private static ImmutableList<DatabricksFunctionParameter> parseSectionRows(
-      @Nonnull List<String> rows) {
+      @Nonnull List<String> rows, @CheckForNull String mode) {
     ImmutableList<String> aligned = alignSectionRows(rows);
     if (aligned.isEmpty() || (aligned.size() == 1 && aligned.get(0).trim().equals("()"))) {
       return ImmutableList.of();
@@ -324,9 +336,10 @@ final class DatabricksHiveMetastoreFunctionParser {
     for (String row : aligned) {
       String name = typeStart < 0 ? "" : row.substring(nameStart, typeStart).trim();
       if (name.isEmpty()) {
-        parameters.add(DatabricksFunctionParameter.newBuilder("", row.trim()).build());
+        parameters.add(
+            DatabricksFunctionParameter.newBuilder("", row.trim()).setMode(mode).build());
       } else {
-        parameters.add(parseTypeDefaultAndComment(name, row.substring(typeStart).trim()));
+        parameters.add(parseTypeDefaultAndComment(name, row.substring(typeStart).trim(), mode));
       }
     }
     return parameters.build();
@@ -365,11 +378,12 @@ final class DatabricksHiveMetastoreFunctionParser {
    */
   @Nonnull
   private static DatabricksFunctionParameter parseTypeDefaultAndComment(
-      @Nonnull String name, @Nonnull String value) {
+      @Nonnull String name, @Nonnull String value, @CheckForNull String mode) {
     int typeEnd = findTypeEnd(value);
     String rest = value.substring(typeEnd).trim();
     DatabricksFunctionParameter.Builder parameter =
-        DatabricksFunctionParameter.newBuilder(name, value.substring(0, typeEnd).trim());
+        DatabricksFunctionParameter.newBuilder(name, value.substring(0, typeEnd).trim())
+            .setMode(mode);
     if (startsWithKeyword(rest, DEFAULT_KEYWORD)) {
       String expression = rest.substring(DEFAULT_KEYWORD.length()).trim();
       int commentStart = findTrailingComment(expression);
@@ -383,7 +397,7 @@ final class DatabricksHiveMetastoreFunctionParser {
     } else if (isQuotedText(rest)) {
       parameter.setComment(rest.substring(1, rest.length() - 1));
     } else if (!rest.isEmpty()) {
-      return DatabricksFunctionParameter.newBuilder(name, value).build();
+      return DatabricksFunctionParameter.newBuilder(name, value).setMode(mode).build();
     }
     return parameter.build();
   }

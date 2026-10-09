@@ -97,7 +97,11 @@ final class DatabricksHiveMetastoreDdlTasks {
                 (table, ddl) -> {
                   if (!ddl.isEmpty()) {
                     csv.printRecord(
-                        table.catalogName, table.schemaName, table.tableName, table.tableType, ddl);
+                        HIVE_METASTORE_CATALOG,
+                        table.schemaName,
+                        table.tableName,
+                        table.tableType,
+                        ddl);
                   }
                 });
       }

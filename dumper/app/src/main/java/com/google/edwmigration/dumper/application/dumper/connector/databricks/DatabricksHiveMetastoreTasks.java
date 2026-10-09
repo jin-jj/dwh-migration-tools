@@ -60,9 +60,6 @@ final class DatabricksHiveMetastoreTasks {
 
   private static final Logger logger = LoggerFactory.getLogger(DatabricksHiveMetastoreTasks.class);
 
-  /** The comment of the {@code hive_metastore} row in the catalogs file. */
-  private static final String HIVE_METASTORE_CATALOG_COMMENT = "Legacy Hive Metastore";
-
   /** The prefix and suffix of the {@code Properties} of {@code DESCRIBE SCHEMA EXTENDED}. */
   private static final String SCHEMA_PROPERTIES_PREFIX = "((";
 
@@ -248,7 +245,6 @@ final class DatabricksHiveMetastoreTasks {
           CSVPrinter csv = FORMAT.withHeader(CatalogsHeader.class).print(writer)) {
         Object[] record = new Object[CatalogsHeader.values().length];
         record[CatalogsHeader.CatalogName.ordinal()] = HIVE_METASTORE_CATALOG;
-        record[CatalogsHeader.Comment.ordinal()] = HIVE_METASTORE_CATALOG_COMMENT;
         csv.printRecord(record);
       }
       return null;
@@ -384,7 +380,7 @@ final class DatabricksHiveMetastoreTasks {
           CSVPrinter csv = FORMAT.withHeader(TablesHeader.class).print(writer)) {
         for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
           csv.printRecord(
-              tbl.catalogName,
+              HIVE_METASTORE_CATALOG,
               tbl.schemaName,
               tbl.tableName,
               tbl.tableType,
@@ -448,7 +444,7 @@ final class DatabricksHiveMetastoreTasks {
                 (table, columns) -> {
                   for (ParsedColumn column : columns) {
                     csv.printRecord(
-                        table.catalogName,
+                        HIVE_METASTORE_CATALOG,
                         table.schemaName,
                         table.tableName,
                         String.valueOf(column.ordinalPosition),
@@ -526,7 +522,7 @@ final class DatabricksHiveMetastoreTasks {
         for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
           if (tbl.viewDefinition != null || isView(tbl)) {
             csv.printRecord(
-                tbl.catalogName,
+                HIVE_METASTORE_CATALOG,
                 tbl.schemaName,
                 tbl.tableName,
                 tbl.viewDefinition != null ? tbl.viewDefinition : "",
@@ -563,7 +559,7 @@ final class DatabricksHiveMetastoreTasks {
         for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
           for (ParsedTableConstraint tc : tbl.constraints) {
             csv.printRecord(
-                tbl.catalogName,
+                HIVE_METASTORE_CATALOG,
                 tbl.schemaName,
                 tbl.tableName,
                 tc.constraintName,

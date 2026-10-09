@@ -16,6 +16,7 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.formatDataSourceFormat;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.parseBracketedProperties;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.parseDescribeTableColumns;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.parseIdentifierList;
@@ -24,6 +25,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import com.databricks.sdk.service.catalog.DataSourceFormat;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -87,7 +89,6 @@ public class DatabricksHiveMetastoreTableParserTest {
 
     ParsedTableExtended parsed =
         DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "events", blob);
-    assertEquals("hive_metastore", parsed.catalogName);
     assertEquals("legacy_db", parsed.schemaName);
     assertEquals("events", parsed.tableName);
     assertEquals("EXTERNAL", parsed.tableType);
@@ -132,7 +133,6 @@ public class DatabricksHiveMetastoreTableParserTest {
     ParsedTableExtended parsed =
         DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "events", null);
 
-    assertEquals(DatabricksFilter.HIVE_METASTORE_CATALOG, parsed.catalogName);
     assertEquals("legacy_db", parsed.schemaName);
     assertEquals("events", parsed.tableName);
     assertEquals("", parsed.tableType);
@@ -431,15 +431,14 @@ public class DatabricksHiveMetastoreTableParserTest {
   }
 
   @Test
-  public void parseShowTableExtended_keepsCreatedTimeInOtherFormat() {
-    String createdTime = "2026-09-27 21:19:25";
+  public void parseShowTableExtended_writesEmptyCreatedTimeInOtherFormat() {
     String blob =
         String.join(
             "\n",
             "Catalog: hive_metastore",
             "Database: legacy_db",
             "Table: events",
-            "Created Time: " + createdTime,
+            "Created Time: 2026-09-27 21:19:25",
             "Type: MANAGED",
             "Schema: root",
             " |-- id: integer (nullable = true)",
@@ -448,7 +447,37 @@ public class DatabricksHiveMetastoreTableParserTest {
     ParsedTableExtended parsed =
         DatabricksHiveMetastoreTableParser.parseShowTableExtended("legacy_db", "events", blob);
 
-    assertEquals(createdTime, parsed.createdAt);
+    assertEquals("", parsed.createdAt);
+  }
+
+  @Test
+  public void formatDataSourceFormat_writesUnityCatalogFormatNames() {
+    String customSource = "com.acme.spark.CustomSource";
+    ImmutableMap<String, String> formatsByProvider =
+        ImmutableMap.<String, String>builder()
+            .put("delta", DataSourceFormat.DELTA.name())
+            .put("hive", DataSourceFormat.HIVE.name())
+            .put("Parquet", DataSourceFormat.PARQUET.name())
+            .put("org.apache.spark.sql.parquet", DataSourceFormat.PARQUET.name())
+            .put(
+                "org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat",
+                DataSourceFormat.PARQUET.name())
+            .put("org.apache.spark.sql.json", DataSourceFormat.JSON.name())
+            .put("org.apache.spark.sql.hive.orc", DataSourceFormat.ORC.name())
+            .put("com.databricks.spark.csv", DataSourceFormat.CSV.name())
+            .put("com.databricks.spark.avro", DataSourceFormat.AVRO.name())
+            .put(
+                "org.apache.spark.sql.execution.datasources.text.TextFileFormat",
+                DataSourceFormat.TEXT.name())
+            .put("org.apache.spark.sql.jdbc", "JDBC")
+            .put("binaryFile", "BINARYFILE")
+            .put(customSource, customSource)
+            .put("", "")
+            .build();
+
+    for (Map.Entry<String, String> entry : formatsByProvider.entrySet()) {
+      assertEquals(entry.getKey(), entry.getValue(), formatDataSourceFormat(entry.getKey()));
+    }
   }
 
   @Test
