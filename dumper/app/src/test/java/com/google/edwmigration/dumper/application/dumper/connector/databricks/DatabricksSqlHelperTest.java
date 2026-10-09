@@ -22,10 +22,12 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
+import com.databricks.sdk.service.sql.QueryTag;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.ServiceError;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
@@ -41,6 +43,7 @@ import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.mockito.ArgumentCaptor;
 
 @RunWith(JUnit4.class)
 public class DatabricksSqlHelperTest {
@@ -77,6 +80,16 @@ public class DatabricksSqlHelperTest {
     assertEquals(2, rows.size());
     assertEquals(Arrays.asList("cat1", "schema1"), rows.get(0));
     assertEquals(Arrays.asList("cat1", "schema2"), rows.get(1));
+
+    ArgumentCaptor<ExecuteStatementRequest> requestCaptor =
+        ArgumentCaptor.forClass(ExecuteStatementRequest.class);
+    verify(statementAPI).executeStatement(requestCaptor.capture());
+    assertEquals(
+        Collections.singletonList(
+            new QueryTag()
+                .setKey(DatabricksHandle.QUERY_TAG_KEY)
+                .setValue(DatabricksHandle.CLIENT_APPLICATION)),
+        new ArrayList<>(requestCaptor.getValue().getQueryTags()));
   }
 
   @Test

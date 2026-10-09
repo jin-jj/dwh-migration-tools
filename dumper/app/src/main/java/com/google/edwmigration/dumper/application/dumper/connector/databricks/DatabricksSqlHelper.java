@@ -21,6 +21,7 @@ import com.databricks.sdk.service.sql.Disposition;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ExternalLink;
 import com.databricks.sdk.service.sql.Format;
+import com.databricks.sdk.service.sql.QueryTag;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
@@ -76,6 +77,11 @@ final class DatabricksSqlHelper {
   private static final String INSUFFICIENT_PRIVILEGE_SQLSTATE = "42501";
   private static final String RETRY_AFTER = "Retry-After";
   private static final byte[] GZIP_MAGIC = {(byte) 0x1f, (byte) 0x8b};
+  private static final ImmutableList<QueryTag> QUERY_TAGS =
+      ImmutableList.of(
+          new QueryTag()
+              .setKey(DatabricksHandle.QUERY_TAG_KEY)
+              .setValue(DatabricksHandle.CLIENT_APPLICATION));
 
   private DatabricksSqlHelper() {}
 
@@ -168,7 +174,8 @@ final class DatabricksSqlHelper {
       throws SQLException {
     if (!handle.hasWarehouseId()) {
       throw new SQLException(
-          "A SQL warehouse is required to execute Databricks statements. Pass --warehouse.");
+          "No SQL warehouse is available in this workspace (neither --warehouse was provided nor"
+              + " could one be auto-selected via GET /api/2.0/sql/warehouses).");
     }
     ExecuteStatementRequest request =
         new ExecuteStatementRequest()
@@ -176,7 +183,8 @@ final class DatabricksSqlHelper {
             .setStatement(sql)
             .setDisposition(disposition)
             .setFormat(format)
-            .setWaitTimeout(WAIT_TIMEOUT);
+            .setWaitTimeout(WAIT_TIMEOUT)
+            .setQueryTags(QUERY_TAGS);
     if (catalog != null) {
       request.setCatalog(catalog);
     }

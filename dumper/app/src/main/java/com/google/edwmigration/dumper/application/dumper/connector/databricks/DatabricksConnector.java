@@ -250,6 +250,7 @@ public class DatabricksConnector extends AbstractConnector
   @Nonnull
   @Override
   public Handle open(@Nonnull ConnectorArguments arguments) throws Exception {
+    DatabricksHandle.registerUserAgent();
     DatabricksConfig config = new DatabricksConfig();
     if (arguments.hasUri()) {
       config.setHost(arguments.getUri());

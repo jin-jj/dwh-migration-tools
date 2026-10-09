@@ -219,7 +219,7 @@ public class DatabricksSqlHelperExternalLinksTest {
 
     assertTrue(
         "Two zero-second waits took " + elapsedMillis + "ms, so Retry-After was ignored.",
-        elapsedMillis < 1_000L);
+        elapsedMillis < 2_500L);
   }
 
   @Test

@@ -38,13 +38,13 @@ If per-catalog queries encounter catalogs where the user lacks `USE CATALOG` per
 #### Prerequisites
 - Workspace URL (e.g. `https://<workspace-host>`).
 - Personal Access Token (PAT) or OAuth token. Can be provided via `--password <token>`, standard Databricks environment variables (`DATABRICKS_HOST`, `DATABRICKS_TOKEN`), or `~/.databrickscfg`.
-- SQL Warehouse ID via `--warehouse <id>`.
+- SQL Warehouse ID via `--warehouse <id>` (required unless `-Ddatabricks.metadata.strategy=rest-only` is set).
 
 #### Examples
 
-Dump metadata using Databricks SQL Warehouse (default: system tables with fallback to per-catalog):
+Dump metadata using Databricks SQL Warehouse (default: system tables with fallback to per-catalog and REST):
 ```bash
-./bin/dwh-dumper --connector databricks --url https://<workspace-host> --password <token> --warehouse <warehouse-id>
+./bin/dwh-migration-dumper --connector databricks --url https://<workspace-host> --password <token> --warehouse <warehouse-id>
 ```
 
 Dump metadata using only system tables:
@@ -119,5 +119,68 @@ The legacy `hive_metastore` catalog is dumped alongside, into `catalogs-hms.csv`
 
 When the REST tier runs, the dump also contains `tables-raw.jsonl`: the Unity Catalog `TableInfo` objects verbatim, one JSON document per line. The CSVs are a projection of these, so the raw entry carries what they drop — the column array, Delta table properties and features, `type_json`, and the securable kind — for consumers that want more than the assessment does. It costs nothing, because the REST tier walks the metastore once and shares the result; it is absent from dumps that never reach the REST tier, because no other tier has these objects to publish.
 
+### Databricks Logs Connector (Query History)
+
+The `databricks-logs` connector extracts historical query logs using a two-tier strategy:
+1. **Tier 1 (`system.query.history` via SQL Warehouse, default primary):** Queries Unity Catalog's operational system table (`365-day` retention, streamed via `EXTERNAL_LINKS`). Supports filtering by `--workspace-id` when multiple workspaces share a metastore.
+2. **Tier 2 (`GET /api/2.0/sql/history/queries` Workspace REST API, automatic fallback):** Automatically used when the caller lacks permissions on `system.query.history` **or** when `system.query.history` returns `<REDACTED>` for `statement_text` (because the caller is not an Account Admin or member of `databricks_pii_access`). This is the same workspace-scoped API that powers the Databricks **SQL -> Query History** UI (`30-day` retention) and returns unredacted `query_text` under standard Workspace RBAC (`CAN VIEW` on the warehouse or Workspace Admin).
+
+You can also force a specific strategy via `-Ddatabricks.logs.strategy`:
+- `system-then-rest` (default): Try `system.query.history` first; automatically fall back to the Workspace Query History REST API if inaccessible or redacted.
+- `system-only`: Only query `system.query.history` (requires `--warehouse`).
+- `rest-only`: Directly query the Workspace Query History REST API (`GET /api/2.0/sql/history/queries`). Does **not** require `--warehouse` or `system` catalog access.
+
+#### Prerequisites
+- Workspace URL (`--url https://<workspace-host>`).
+- Personal Access Token (PAT) or OAuth token (`--password <token>`).
+- SQL Warehouse ID (`--warehouse <id>`) — required for `system-then-rest` and `system-only`; optional when `-Ddatabricks.logs.strategy=rest-only`.
+- Optional Workspace ID (`--workspace-id <id>` or `-Ddatabricks.logs.workspace-id=<id>`) — filters `system.query.history` to the specified workspace ID(s) (comma-separated) and populates the `WorkspaceId` column in REST fallback.
+- Permissions:
+  - **For Tier 1 (`system.query.history`):** `CAN_USE` on the SQL warehouse, `USE CATALOG system`, `USE SCHEMA system.query`, `SELECT ON system.query.history`, and membership in the `databricks_pii_access` account group (or Account Admin) for unredacted `statement_text`.
+  - **For Tier 2 (Workspace Query History REST API fallback / `rest-only`):** Workspace user with `CAN VIEW` / `CAN MONITOR` on the SQL warehouse (or Workspace Admin) to see unredacted queries across users in that workspace.
+
+#### Examples
+
+Dump the last 7 days of query history (automatically falls back to REST API if `system` catalog is inaccessible or `<REDACTED>`):
+```bash
+./bin/dwh-migration-dumper --connector databricks-logs --url https://<workspace-host> --password <token> --warehouse <warehouse-id> --query-log-days 7
+```
+
+Filter `system.query.history` to a specific workspace ID (or comma-separated list of workspace IDs):
+```bash
+./bin/dwh-migration-dumper --connector databricks-logs --url https://<workspace-host> --password <token> --warehouse <warehouse-id> \
+  --workspace-id 1234567890123456 --query-log-days 7
+```
+
+Dump query history directly via the Workspace Query History REST API (no `--warehouse` or `system` catalog needed):
+```bash
+./bin/dwh-migration-dumper --connector databricks-logs --url https://<workspace-host> --password <token> \
+  -Ddatabricks.logs.strategy=rest-only --workspace-id 1234567890123456 --query-log-days 7
+```
+
+Dump query history for a specific date range:
+```bash
+./bin/dwh-migration-dumper --connector databricks-logs --url https://<workspace-host> --password <token> --warehouse <warehouse-id> \
+  --query-log-start "2026-03-01 00:00:00" --query-log-end "2026-03-07 00:00:00"
+```
+
+Apply a custom WHERE filter on `system.query.history`:
+```bash
+./bin/dwh-migration-dumper --connector databricks-logs --url https://<workspace-host> --password <token> --warehouse <warehouse-id> \
+  --query-log-days 7 -Ddatabricks.logs.where="execution_status = 'FINISHED'"
+```
+
+#### `--assessment` is not accepted
+
+Like the metadata connector, `databricks-logs` rejects `--assessment`. It extracts query execution logs for SQL translation and workload migration without requiring proprietary assessment telemetry formats.
+
+#### Output
+
+The dump produces `databricks.logs.zip` (default archive file `dwh-migration-databricks-logs.zip`) containing:
+- `compilerworks-metadata.yaml`
+- `compilerworks-format.txt`
+- `query_history_<timestamp>.csv` rotated hourly, with 22 columns: `AccountId`, `WorkspaceId`, `StatementId`, `SessionId`, `ExecutedBy`, `StatementText`, `StatementType`, `ExecutionStatus`, `ErrorMessage`, `WarehouseId`, `ComputeType`, `StartTime`, `EndTime`, `TotalDurationMs`, `CompilationDurationMs`, `ExecutionDurationMs`, `WaitingAtCapacityDurationMs`, `ReadBytes`, `ReadRows`, `WrittenBytes`, `WrittenRows`, `SpilledLocalBytes`.
+
 [BQMS]: https://cloud.google.com/bigquery/docs/migration-intro
+
 

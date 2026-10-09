@@ -93,6 +93,7 @@ public class ConnectorArguments extends DefaultArguments {
   public static final String OPT_CLUSTER = "cluster";
   public static final String OPT_ROLE = "role";
   public static final String OPT_WAREHOUSE = "warehouse";
+  public static final String OPT_WORKSPACE_ID = "workspace-id";
   public static final String OPT_DATABASE = "database";
   public static final String OPT_SCHEMA = "schema";
   public static final String OPT_OUTPUT = "output";
@@ -208,6 +209,14 @@ public class ConnectorArguments extends DefaultArguments {
           .accepts(
               OPT_WAREHOUSE,
               "Virtual warehouse to use once connected (for providers such as Snowflake)")
+          .withRequiredArg()
+          .ofType(String.class);
+  private final OptionSpec<String> optionWorkspaceId =
+      parser
+          .accepts(
+              OPT_WORKSPACE_ID,
+              "Databricks workspace ID to filter account-level system tables (e.g."
+                  + " system.query.history)")
           .withRequiredArg()
           .ofType(String.class);
   private final OptionSpec<String> optionDatabase =
@@ -722,6 +731,11 @@ public class ConnectorArguments extends DefaultArguments {
   @CheckForNull
   public String getWarehouse() {
     return getOptions().valueOf(optionWarehouse);
+  }
+
+  @CheckForNull
+  public String getWorkspaceId() {
+    return getOptions().valueOf(optionWorkspaceId);
   }
 
   @CheckForNull

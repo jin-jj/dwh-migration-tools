@@ -132,6 +132,14 @@ enum DatabricksInput {
     return this != REST_ONLY;
   }
 
+  /**
+   * Returns whether this strategy includes the Unity Catalog REST API as a fallback or primary
+   * tier.
+   */
+  boolean hasRestFallback() {
+    return this == SYSTEM_THEN_CATALOG_THEN_REST || this == REST_ONLY;
+  }
+
   @Nonnull
   abstract ImmutableList<Task<?>> tasks(
       AbstractTask<?> systemTask, AbstractTask<?> catalogTask, AbstractTask<?> restTask);

@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import com.databricks.sdk.WorkspaceClient;
+import com.databricks.sdk.core.UserAgent;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.RateLimiter;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
@@ -26,11 +27,26 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
 /** Handle for Databricks SQL Warehouse metadata dumper. */
 public class DatabricksHandle implements Handle {
+
+  /**
+   * Product identifier registered on {@link UserAgent} and attached to SQL statements via {@code
+   * query_tags} so Databricks records Dumper queries under {@code client_application =
+   * "dwh-migration-dumper"} in {@code system.query.history}.
+   */
+  static final String CLIENT_APPLICATION = "dwh-migration-dumper";
+
+  static final String CLIENT_VERSION = "1.0.0";
+  static final String QUERY_TAG_KEY = "source";
+
+  static {
+    registerUserAgent();
+  }
 
   /**
    * Databricks does not publish a per-second limit for the Unity Catalog listing endpoints, so this
@@ -46,9 +62,15 @@ public class DatabricksHandle implements Handle {
 
   private final Set<String> inaccessibleCatalogs = Collections.synchronizedSet(new HashSet<>());
 
+  private final AtomicBoolean systemQueryHistoryUnavailable = new AtomicBoolean(false);
+
   private final Object tableListingLock = new Object();
 
   @CheckForNull private Path tableListing;
+
+  static void registerUserAgent() {
+    UserAgent.withProduct(CLIENT_APPLICATION, CLIENT_VERSION);
+  }
 
   public DatabricksHandle(@Nonnull WorkspaceClient client, @Nonnull String warehouseId) {
     this(client, warehouseId, DEFAULT_REST_REQUESTS_PER_SECOND);
@@ -62,6 +84,7 @@ public class DatabricksHandle implements Handle {
         restRequestsPerSecond > 0,
         "REST requests per second must be positive, but was %s",
         restRequestsPerSecond);
+    registerUserAgent();
     this.client = client;
     this.warehouseId = warehouseId;
     this.restRateLimiter = RateLimiter.create(restRequestsPerSecond);
@@ -92,6 +115,20 @@ public class DatabricksHandle implements Handle {
 
   public boolean isCatalogInaccessible(@Nonnull String catalog) {
     return inaccessibleCatalogs.contains(catalog.toLowerCase());
+  }
+
+  /**
+   * Marks {@code system.query.history} as unavailable (due to missing permissions or redacted query
+   * text) so subsequent interval tasks fall back directly to the Query History REST API.
+   *
+   * @return {@code true} if this call transitioned the state to unavailable.
+   */
+  public boolean markSystemQueryHistoryUnavailable() {
+    return systemQueryHistoryUnavailable.compareAndSet(false, true);
+  }
+
+  public boolean isSystemQueryHistoryUnavailable() {
+    return systemQueryHistoryUnavailable.get();
   }
 
   /** Writes the Unity Catalog table listing to a file. */
