@@ -26,6 +26,7 @@ import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ExecuteStatementRequestOnWaitTimeout;
 import com.databricks.sdk.service.sql.ExternalLink;
 import com.databricks.sdk.service.sql.Format;
+import com.databricks.sdk.service.sql.QueryTag;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.ResultManifest;
 import com.databricks.sdk.service.sql.ServiceError;
@@ -34,6 +35,7 @@ import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Duration;
@@ -62,6 +64,17 @@ final class DatabricksSqlHelper {
   private static final Duration DEFAULT_STATEMENT_TIMEOUT = Duration.ofMinutes(30);
   private static final long LINK_EXPIRATION_SKEW_SECONDS = 30L;
   private static final int DEFAULT_HTTP_TIMEOUT_SECONDS = 60;
+
+  /**
+   * The key and value of the query tag of the statements of the dumper. The query history records
+   * the tags of each statement, so the logs connector leaves the statements of the dumper out.
+   */
+  static final String QUERY_TAG_KEY = "source";
+
+  static final String QUERY_TAG_VALUE = "dwh-migration-dumper";
+
+  private static final ImmutableList<QueryTag> QUERY_TAGS =
+      ImmutableList.of(new QueryTag().setKey(QUERY_TAG_KEY).setValue(QUERY_TAG_VALUE));
 
   private final WorkspaceClient workspaceClient;
   private final String warehouseId;
@@ -124,7 +137,8 @@ final class DatabricksSqlHelper {
             .setDisposition(Disposition.EXTERNAL_LINKS)
             .setFormat(Format.JSON_ARRAY)
             .setWaitTimeout(DEFAULT_WAIT_TIMEOUT)
-            .setOnWaitTimeout(ExecuteStatementRequestOnWaitTimeout.CONTINUE);
+            .setOnWaitTimeout(ExecuteStatementRequestOnWaitTimeout.CONTINUE)
+            .setQueryTags(QUERY_TAGS);
 
     StatementResponse response;
     try {

@@ -23,7 +23,9 @@ import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -36,6 +38,7 @@ import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.sql.CancelExecutionRequest;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ExternalLink;
+import com.databricks.sdk.service.sql.QueryTag;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.ResultManifest;
 import com.databricks.sdk.service.sql.ServiceError;
@@ -60,6 +63,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.mockito.ArgumentCaptor;
 
 @RunWith(JUnit4.class)
 public class DatabricksChunkDownloaderAndSqlHelperTest {
@@ -291,6 +295,31 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
             "SQL statement stmt-denied failed in state %s (SQLSTATE: %s, errorCode: %s): %s",
             StatementState.FAILED, sqlState, ServiceErrorCode.BAD_REQUEST.name(), errorMessage),
         ex.getMessage());
+  }
+
+  @Test
+  public void sqlHelper_tagsEachStatementAsAStatementOfTheDumper() throws Exception {
+    WorkspaceClient client = mock(WorkspaceClient.class);
+    StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
+    when(client.statementExecution()).thenReturn(stmtApi);
+    when(stmtApi.executeStatement(any(ExecuteStatementRequest.class)))
+        .thenReturn(
+            new StatementResponse()
+                .setStatementId("stmt-tagged")
+                .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED)));
+    DatabricksSqlHelper helper =
+        new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
+
+    try (CloseableIterable<List<String>> rows = helper.executeSqlInCatalog(CATALOG, "SELECT 1")) {
+      assertFalse(rows.iterator().hasNext());
+    }
+
+    ArgumentCaptor<ExecuteStatementRequest> request =
+        ArgumentCaptor.forClass(ExecuteStatementRequest.class);
+    verify(stmtApi).executeStatement(request.capture());
+    QueryTag tag = getOnlyElement(request.getValue().getQueryTags());
+    assertEquals(DatabricksSqlHelper.QUERY_TAG_KEY, tag.getKey());
+    assertEquals(DatabricksSqlHelper.QUERY_TAG_VALUE, tag.getValue());
   }
 
   @Test

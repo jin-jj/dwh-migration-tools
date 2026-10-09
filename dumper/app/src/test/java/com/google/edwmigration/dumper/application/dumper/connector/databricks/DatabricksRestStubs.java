@@ -38,6 +38,7 @@ final class DatabricksRestStubs {
   static final String SCHEMAS_PATH = "/api/2.1/unity-catalog/schemas";
   static final String TABLES_PATH = "/api/2.1/unity-catalog/tables";
   static final String FUNCTIONS_PATH = "/api/2.1/unity-catalog/functions";
+  static final String QUERY_HISTORY_PATH = "/api/2.0/sql/history/queries";
 
   /** A request rate that doesn't slow the tests down. */
   static final double UNTHROTTLED_REQUESTS_PER_SECOND = 1_000_000.0;

@@ -20,15 +20,19 @@ import static com.github.tomakehurst.wiremock.client.WireMock.absent;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.CURRENT_USER_PATH;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.INITIAL_BACKOFF_MILLIS;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.MAX_ATTEMPTS;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.MAX_BACKOFF_MILLIS;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.WORKSPACE_ID_HEADER;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.backoffMillis;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.isRetryable;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.CATALOGS_PATH;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.FUNCTIONS_PATH;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.QUERY_HISTORY_PATH;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.SCHEMAS_PATH;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.TABLES_PATH;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.UNTHROTTLED_REQUESTS_PER_SECOND;
@@ -38,6 +42,7 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.throttled;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -49,12 +54,18 @@ import com.databricks.sdk.service.catalog.ListSchemasResponse;
 import com.databricks.sdk.service.catalog.ListTablesResponse;
 import com.databricks.sdk.service.catalog.SchemaInfo;
 import com.databricks.sdk.service.catalog.TableInfo;
+import com.databricks.sdk.service.sql.ListQueriesResponse;
+import com.databricks.sdk.service.sql.QueryInfo;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksChunkDownloader.Sleeper;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.AfterClass;
@@ -284,6 +295,80 @@ public class DatabricksRestHelperTest {
 
     assertThrows(InterruptedIOException.class, restHelper::listCatalogs);
     assertTrue(Thread.interrupted());
+  }
+
+  @Test
+  public void findWorkspaceId_readsTheWorkspaceIdHeader() throws Exception {
+    String workspaceId = "1234567890123456";
+    server.stubFor(
+        get(urlPathEqualTo(CURRENT_USER_PATH))
+            .willReturn(
+                okJson("{\"userName\": \"user@example.com\"}")
+                    .withHeader(WORKSPACE_ID_HEADER, workspaceId)));
+
+    assertEquals(workspaceId, newRestHelper().findWorkspaceId());
+  }
+
+  @Test
+  public void findWorkspaceId_returnsNullWithoutTheHeader() throws Exception {
+    server.stubFor(get(urlPathEqualTo(CURRENT_USER_PATH)).willReturn(okJson("{}")));
+
+    assertNull(newRestHelper().findWorkspaceId());
+  }
+
+  @Test
+  public void listQueryHistory_requestsTheEndedQueriesOfTheRangePageByPage() throws Exception {
+    long startTimeMillis = Instant.parse("2026-10-09T13:00:00Z").toEpochMilli();
+    long endTimeMillis = startTimeMillis + Duration.ofHours(1).toMillis();
+    String secondPageToken = "page-2";
+    server.stubFor(
+        get(urlPathEqualTo(QUERY_HISTORY_PATH))
+            .withQueryParam("page_token", absent())
+            .willReturn(
+                okModel(
+                    new ListQueriesResponse()
+                        .setRes(ImmutableList.of(new QueryInfo().setQueryId("q-1")))
+                        .setHasNextPage(true)
+                        .setNextPageToken(secondPageToken))));
+    server.stubFor(
+        get(urlPathEqualTo(QUERY_HISTORY_PATH))
+            .withQueryParam("page_token", equalTo(secondPageToken))
+            .willReturn(
+                okModel(
+                    new ListQueriesResponse()
+                        .setRes(ImmutableList.of(new QueryInfo().setQueryId("q-2")))
+                        .setHasNextPage(false)
+                        .setNextPageToken("page-3"))));
+    List<List<String>> pages = new ArrayList<>();
+
+    newRestHelper()
+        .listQueryHistory(
+            startTimeMillis,
+            endTimeMillis,
+            queries -> {
+              List<String> queryIds = new ArrayList<>();
+              for (QueryInfo query : queries) {
+                queryIds.add(query.getQueryId());
+              }
+              pages.add(queryIds);
+            });
+
+    assertEquals(ImmutableList.of(ImmutableList.of("q-1"), ImmutableList.of("q-2")), pages);
+    List<LoggedRequest> requests =
+        server.findAll(getRequestedFor(urlPathEqualTo(QUERY_HISTORY_PATH)));
+    assertEquals(2, requests.size());
+    for (LoggedRequest request : requests) {
+      assertEquals(
+          String.valueOf(startTimeMillis),
+          request.queryParameter("filter_by.query_start_time_range.start_time_ms").firstValue());
+      assertEquals(
+          String.valueOf(endTimeMillis),
+          request.queryParameter("filter_by.query_start_time_range.end_time_ms").firstValue());
+      assertEquals(
+          ImmutableSet.of("FINISHED", "FAILED", "CANCELED"),
+          ImmutableSet.copyOf(request.queryParameter("filter_by.statuses").values()));
+      assertEquals("true", request.queryParameter("include_metrics").firstValue());
+    }
   }
 
   @Test

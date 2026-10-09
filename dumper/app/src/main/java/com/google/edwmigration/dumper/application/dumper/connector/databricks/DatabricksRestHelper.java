@@ -20,6 +20,7 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksError;
+import com.databricks.sdk.core.http.Request;
 import com.databricks.sdk.service.catalog.CatalogInfo;
 import com.databricks.sdk.service.catalog.FunctionInfo;
 import com.databricks.sdk.service.catalog.GetTableRequest;
@@ -33,6 +34,14 @@ import com.databricks.sdk.service.catalog.ListTablesRequest;
 import com.databricks.sdk.service.catalog.ListTablesResponse;
 import com.databricks.sdk.service.catalog.SchemaInfo;
 import com.databricks.sdk.service.catalog.TableInfo;
+import com.databricks.sdk.service.sql.ListQueriesResponse;
+import com.databricks.sdk.service.sql.ListQueryHistoryRequest;
+import com.databricks.sdk.service.sql.QueryFilter;
+import com.databricks.sdk.service.sql.QueryInfo;
+import com.databricks.sdk.service.sql.QueryStatus;
+import com.databricks.sdk.service.sql.TimeRange;
+import com.databricks.sdk.support.Header;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
@@ -43,6 +52,8 @@ import com.google.common.util.concurrent.RateLimiter;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksChunkDownloader.Sleeper;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.io.UncheckedIOException;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
@@ -54,15 +65,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Reads Unity Catalog metadata with the Databricks REST API.
+ * Reads Unity Catalog metadata, the query history and the workspace ID with the Databricks REST
+ * API.
  *
  * <p>Databricks limits the rate of requests to a workspace, so each request waits for a permit of a
  * rate limiter that the tasks share. The SDK retries a throttled request a few times; if it still
  * fails, the request is retried here, after a backoff with jitter so that the requests that were
  * throttled together don't retry together.
  *
- * <p>A list request asks for the page size that the server configures, as the API reference
- * recommends, and the page tokens are followed to the last page.
+ * <p>A Unity Catalog list request asks for the page size that the server configures, as the API
+ * reference recommends, and the page tokens are followed to the last page.
  */
 @ThreadSafe
 final class DatabricksRestHelper {
@@ -78,6 +90,22 @@ final class DatabricksRestHelper {
   /** The {@code max_results} that makes the server choose the page size. */
   private static final long SERVER_PAGE_SIZE = 0L;
 
+  /**
+   * The page size of the query history, which is the default of the API. The API reference allows
+   * fewer than 1,000 queries per page, and advises small pages when the metrics are included.
+   */
+  private static final long QUERY_HISTORY_PAGE_SIZE = 100L;
+
+  /** The statuses of the queries that ended, which are the statuses in system.query.history. */
+  private static final ImmutableList<QueryStatus> ENDED_QUERY_STATUSES =
+      ImmutableList.of(QueryStatus.FINISHED, QueryStatus.FAILED, QueryStatus.CANCELED);
+
+  /** The current user endpoint, whose response has the {@link #WORKSPACE_ID_HEADER} header. */
+  static final String CURRENT_USER_PATH = "/api/2.0/preview/scim/v2/Me";
+
+  /** The response header that has the ID of the workspace. */
+  static final String WORKSPACE_ID_HEADER = "X-Databricks-Org-Id";
+
   /** The attempts of a request that keeps failing with a retryable status. */
   static final int MAX_ATTEMPTS = 5;
 
@@ -87,6 +115,26 @@ final class DatabricksRestHelper {
 
   /** The HTTP statuses of a request that may succeed later: too many requests and unavailable. */
   private static final ImmutableSet<Integer> RETRYABLE_STATUS_CODES = ImmutableSet.of(429, 503);
+
+  /** Receives the items of one page, such as the queries of a page of the query history. */
+  interface PageConsumer<T> {
+
+    void accept(@Nonnull ImmutableList<T> items) throws IOException;
+  }
+
+  /**
+   * The response of {@link #CURRENT_USER_PATH}, of which only the workspace ID header is read. The
+   * class and its constructor are public because the SDK creates the response by reflection.
+   */
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public static final class WorkspaceIdResponse {
+
+    @Header(WORKSPACE_ID_HEADER)
+    @CheckForNull
+    private String workspaceId;
+
+    public WorkspaceIdResponse() {}
+  }
 
   /** Sends one request, and returns its response, which is null if the response body is empty. */
   private interface Call<T> {
@@ -244,6 +292,68 @@ final class DatabricksRestHelper {
                 .get(new GetTableRequest().setFullName(fullName).setIncludeBrowse(true)));
   }
 
+  /**
+   * Returns the ID of the workspace, which Databricks sends in the {@link #WORKSPACE_ID_HEADER}
+   * header of its responses, or null if the response of the current user request has no such
+   * header.
+   */
+  @CheckForNull
+  String findWorkspaceId() throws IOException {
+    WorkspaceIdResponse response =
+        callWithRetry(
+            "Finding the workspace ID",
+            () -> {
+              Request request =
+                  new Request("GET", CURRENT_USER_PATH).withHeader("Accept", "application/json");
+              try {
+                return client.apiClient().execute(request, WorkspaceIdResponse.class);
+              } catch (IOException e) {
+                throw new UncheckedIOException(e);
+              }
+            });
+    String workspaceId = response.workspaceId;
+    return workspaceId == null || workspaceId.trim().isEmpty() ? null : workspaceId.trim();
+  }
+
+  /**
+   * Lists the queries of the workspace that started from {@code startTimeMillis}, inclusive, to
+   * {@code endTimeMillis}, exclusive, and that ended, with their metrics. Each page is passed to
+   * {@code consumer} as it arrives, so the history is never held in memory.
+   */
+  void listQueryHistory(
+      long startTimeMillis, long endTimeMillis, @Nonnull PageConsumer<QueryInfo> consumer)
+      throws IOException {
+    Preconditions.checkNotNull(consumer, "PageConsumer was null.");
+    QueryFilter filter =
+        new QueryFilter()
+            .setQueryStartTimeRange(
+                new TimeRange().setStartTimeMs(startTimeMillis).setEndTimeMs(endTimeMillis))
+            .setStatuses(ENDED_QUERY_STATUSES);
+    forEachPage(
+        String.format(
+            "Listing the query history from %s to %s",
+            Instant.ofEpochMilli(startTimeMillis), Instant.ofEpochMilli(endTimeMillis)),
+        pageToken -> {
+          ListQueriesResponse response =
+              client
+                  .queryHistory()
+                  .list(
+                      new ListQueryHistoryRequest()
+                          .setFilterBy(filter)
+                          .setIncludeMetrics(true)
+                          .setMaxResults(QUERY_HISTORY_PAGE_SIZE)
+                          .setPageToken(pageToken));
+          if (response == null) {
+            return null;
+          }
+
+          String nextPageToken =
+              Boolean.FALSE.equals(response.getHasNextPage()) ? null : response.getNextPageToken();
+          return new Page<>(response.getRes(), nextPageToken);
+        },
+        consumer);
+  }
+
   @Nonnull
   private static String quoteSchemaName(@Nonnull String catalogName, @Nonnull String schemaName) {
     return quoteIdentifier(catalogName) + "." + quoteIdentifier(schemaName);
@@ -253,15 +363,25 @@ final class DatabricksRestHelper {
   private <T> ImmutableList<T> listAllPages(
       @Nonnull String description, @Nonnull PageFetcher<T> fetcher) throws IOException {
     ImmutableList.Builder<T> items = ImmutableList.builder();
+    forEachPage(description, fetcher, items::addAll);
+    return items.build();
+  }
+
+  /** Fetches the pages in order, from the first to the last, and passes each to the consumer. */
+  private <T> void forEachPage(
+      @Nonnull String description,
+      @Nonnull PageFetcher<T> fetcher,
+      @Nonnull PageConsumer<T> consumer)
+      throws IOException {
     Set<String> seenPageTokens = new HashSet<>();
     String pageToken = null;
     while (true) {
       String requestedPageToken = pageToken;
       Page<T> page = callWithRetry(description, () -> fetcher.fetch(requestedPageToken));
-      items.addAll(page.items);
+      consumer.accept(page.items);
       pageToken = page.nextPageToken;
       if (Strings.isNullOrEmpty(pageToken)) {
-        return items.build();
+        return;
       }
 
       if (!seenPageTokens.add(pageToken)) {
