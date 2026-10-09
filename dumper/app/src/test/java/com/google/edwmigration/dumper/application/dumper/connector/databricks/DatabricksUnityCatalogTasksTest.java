@@ -326,6 +326,28 @@ public class DatabricksUnityCatalogTasksTest {
   }
 
   @Test
+  public void tablesTask_writesTheSecurableKindOfDeltaSharingForeignTables() throws Exception {
+    stubTables(
+        table("shared_orders")
+            .setTableType(TableType.FOREIGN)
+            .setSecurableKindManifest(
+                new SecurableKindManifest()
+                    .setSecurableType(SecurableType.TABLE)
+                    .setSecurableKind(SecurableKind.TABLE_FOREIGN_DELTA_DELTASHARING)));
+
+    CSVRecord table =
+        getOnlyElement(
+            runTask(
+                (sink, handle) ->
+                    new DatabricksUnityCatalogTablesTask(new UnityCatalogSessionCache())
+                        .doRun(null, sink, handle)));
+
+    assertEquals(
+        SecurableKind.TABLE_FOREIGN_DELTA_DELTASHARING.name(),
+        table.get(TablesHeader.SecurableKind));
+  }
+
+  @Test
   public void columnsTask_writesColumnsInPositionOrderWithTheirClauses() throws Exception {
     String maskFunction = "main.security.mask_status";
     ColumnInfo id =
