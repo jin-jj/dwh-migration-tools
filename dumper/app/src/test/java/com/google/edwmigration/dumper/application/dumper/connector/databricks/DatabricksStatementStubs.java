@@ -22,8 +22,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.databricks.sdk.WorkspaceClient;
+import com.databricks.sdk.service.sql.ColumnInfo;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ResultData;
+import com.databricks.sdk.service.sql.ResultManifest;
+import com.databricks.sdk.service.sql.ResultSchema;
 import com.databricks.sdk.service.sql.ServiceError;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
 import com.databricks.sdk.service.sql.StatementResponse;
@@ -132,6 +135,20 @@ final class DatabricksStatementStubs {
         .setStatementId("stmt-ok")
         .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
         .setResult(new ResultData().setDataArray(new ArrayList<Collection<String>>(tableRows)));
+  }
+
+  /** Returns a successful response whose manifest names the columns, as Databricks returns it. */
+  static StatementResponse succeededWithColumns(
+      List<String> columnNames, List<? extends List<String>> tableRows) {
+    List<ColumnInfo> columns = new ArrayList<>();
+    for (int position = 0; position < columnNames.size(); position++) {
+      columns.add(new ColumnInfo().setName(columnNames.get(position)).setPosition((long) position));
+    }
+    return succeededRows(tableRows)
+        .setManifest(
+            new ResultManifest()
+                .setSchema(
+                    new ResultSchema().setColumns(columns).setColumnCount((long) columns.size())));
   }
 
   static StatementResponse failed(String message) {

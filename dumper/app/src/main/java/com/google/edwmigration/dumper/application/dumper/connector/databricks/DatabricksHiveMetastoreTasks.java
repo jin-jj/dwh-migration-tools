@@ -17,8 +17,9 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.parseDescribeTableColumns;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.withDescribedColumns;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.parseDeltaPartitionColumns;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.parseDescribeTableJson;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.undescribedTable;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksJson.toJsonOrEmpty;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cell;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
@@ -29,8 +30,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.ByteSink;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.ParsedColumn;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.ParsedTable;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.ParsedTableConstraint;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.ParsedTableExtended;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.CatalogsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.ColumnsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataDumpFormat.SchemataHeader;
@@ -44,6 +45,8 @@ import com.google.edwmigration.dumper.application.dumper.task.TaskRunContext;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.io.Writer;
+import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,7 +57,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Extraction tasks for the legacy {@code hive_metastore} catalog using {@code SHOW SCHEMAS}, {@code
- * DESCRIBE SCHEMA EXTENDED}, {@code SHOW TABLE EXTENDED} and {@code DESCRIBE TABLE}.
+ * DESCRIBE SCHEMA EXTENDED}, {@code SHOW TABLES}, {@code DESCRIBE TABLE EXTENDED ... AS JSON}, and
+ * {@code DESCRIBE DETAIL} for the partition columns of Delta tables.
  */
 final class DatabricksHiveMetastoreTasks {
 
@@ -68,6 +72,12 @@ final class DatabricksHiveMetastoreTasks {
   /** The separator between two {@code (key,value)} entries of schema properties. */
   private static final String SCHEMA_PROPERTIES_SEPARATOR = "), (";
 
+  /** The statement that describes each table and view, for log messages. */
+  private static final String DESCRIBE_TABLE_STATEMENT = "DESCRIBE TABLE EXTENDED AS JSON";
+
+  /** The column of {@code DESCRIBE DETAIL} with the partition columns of a Delta table. */
+  private static final String PARTITION_COLUMNS_DETAIL = "partitionColumns";
+
   private DatabricksHiveMetastoreTasks() {}
 
   /**
@@ -80,7 +90,7 @@ final class DatabricksHiveMetastoreTasks {
 
     private final Memoized<ImmutableList<String>> schemas =
         new Memoized<>("Listing hive_metastore schemas");
-    private final Memoized<ImmutableList<ParsedTableExtended>> tables =
+    private final Memoized<ImmutableList<ParsedTable>> tables =
         new Memoized<>("Listing hive_metastore tables");
 
     @Nonnull
@@ -89,7 +99,7 @@ final class DatabricksHiveMetastoreTasks {
     }
 
     @Nonnull
-    ImmutableList<ParsedTableExtended> listParsedTables(@Nonnull DatabricksHandle handle)
+    ImmutableList<ParsedTable> listParsedTables(@Nonnull DatabricksHandle handle)
         throws IOException {
       return tables.load(() -> loadTables(handle));
     }
@@ -110,61 +120,138 @@ final class DatabricksHiveMetastoreTasks {
       return builder.build();
     }
 
+    /**
+     * Lists the tables and views of each schema with {@code SHOW TABLES} and describes each of them
+     * with {@code DESCRIBE TABLE EXTENDED ... AS JSON}. A table that can't be described is kept
+     * with only its schema and name, so that the tables file still lists it and the DDL file still
+     * gets its {@code SHOW CREATE TABLE} output.
+     */
     @Nonnull
-    private ImmutableList<ParsedTableExtended> loadTables(@Nonnull DatabricksHandle handle)
+    private ImmutableList<ParsedTable> loadTables(@Nonnull DatabricksHandle handle)
         throws IOException {
-      ImmutableList.Builder<ParsedTableExtended> builder = ImmutableList.builder();
+      ImmutableList.Builder<ParsedTable> listedTablesBuilder = ImmutableList.builder();
       handle
           .statementRunner()
           .runInOrder(
-              "SHOW TABLE EXTENDED",
+              "SHOW TABLES",
               listSchemas(handle),
               DatabricksSqlHelper::quoteIdentifier,
-              schema -> showTableExtended(handle, schema),
-              (schema, schemaTables) -> builder.addAll(schemaTables));
+              schema -> showTables(handle, schema),
+              (schema, schemaTables) -> listedTablesBuilder.addAll(schemaTables));
+      ImmutableList<ParsedTable> listedTables = listedTablesBuilder.build();
+
+      // Keyed by the listed table. ParsedTable doesn't override equals, so this only makes the
+      // identity comparison explicit.
+      Map<ParsedTable, ParsedTable> describedTables = new IdentityHashMap<>();
+      handle
+          .statementRunner()
+          .runInOrder(
+              DESCRIBE_TABLE_STATEMENT,
+              listedTables,
+              DatabricksHiveMetastoreTasks::quoteTableName,
+              table -> describeTable(handle, table),
+              describedTables::put);
+
+      ImmutableList.Builder<ParsedTable> builder = ImmutableList.builder();
+      for (ParsedTable listedTable : listedTables) {
+        ParsedTable table = describedTables.get(listedTable);
+        if (table == null) {
+          logger.warn(
+              "Writing {} with only its name because {} failed for it.",
+              quoteTableName(listedTable),
+              DESCRIBE_TABLE_STATEMENT);
+          builder.add(listedTable);
+          continue;
+        }
+
+        if (table.columns.isEmpty() && !isView(table)) {
+          logger.warn(
+              "Table {} has no columns in {}.", quoteTableName(table), DESCRIBE_TABLE_STATEMENT);
+        }
+        builder.add(table);
+      }
       return builder.build();
     }
 
+    /** Returns the tables and views of a schema, with only their names. */
     @Nonnull
-    private static ImmutableList<ParsedTableExtended> showTableExtended(
+    private static ImmutableList<ParsedTable> showTables(
         @Nonnull DatabricksHandle handle, @Nonnull String schema) throws IOException {
-      String query = String.format("SHOW TABLE EXTENDED IN %s LIKE '*'", quoteIdentifier(schema));
-      ImmutableList.Builder<ParsedTableExtended> builder = ImmutableList.builder();
+      String query = "SHOW TABLES IN " + quoteIdentifier(schema);
+      ImmutableList.Builder<ParsedTable> builder = ImmutableList.builder();
       try (CloseableIterable<List<String>> rows =
           handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
+        // The columns are the schema, the table name and whether the table is a temporary view,
+        // which SHOW TABLES lists in every schema.
         for (List<String> row : rows) {
-          if (row == null || row.isEmpty()) {
+          String tableName = cellOrEmpty(row, 1);
+          if (tableName.isEmpty() || "true".equalsIgnoreCase(cell(row, 2))) {
             continue;
           }
-          String isTemp = row.size() > 2 ? cell(row, 2) : null;
-          if ("true".equalsIgnoreCase(isTemp)) {
-            continue;
-          }
-          String rowSchema = row.size() > 1 ? cellOrEmpty(row, 0) : schema;
-          String rowTable = row.size() > 1 ? cellOrEmpty(row, 1) : "";
-          String infoBlob = row.size() > 3 ? cell(row, 3) : cell(row, row.size() - 1);
-          ParsedTableExtended table =
-              DatabricksHiveMetastoreTableParser.parseShowTableExtended(
-                  rowSchema.isEmpty() ? schema : rowSchema, rowTable, infoBlob);
-          if (table.columns.isEmpty() && !isView(table)) {
-            logger.warn(
-                "Table {} has no columns in SHOW TABLE EXTENDED. Its storage may be unreadable,"
-                    + " in which case its CreatedAt is the time of this query.",
-                quoteTableName(table));
-          }
-          builder.add(table);
+
+          builder.add(undescribedTable(schema, tableName));
         }
       }
       return builder.build();
     }
+
+    /**
+     * Describes a table or view that {@code SHOW TABLES} listed. A Delta table also gets its
+     * partition columns from {@code DESCRIBE DETAIL}, because {@code DESCRIBE TABLE ... AS JSON}
+     * doesn't report them.
+     */
+    @Nonnull
+    private static ParsedTable describeTable(
+        @Nonnull DatabricksHandle handle, @Nonnull ParsedTable listedTable) throws IOException {
+      String query = "DESCRIBE TABLE EXTENDED " + quoteTableName(listedTable) + " AS JSON";
+      ParsedTable table;
+      try (CloseableIterable<List<String>> rows =
+          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
+        Iterator<List<String>> iterator = rows.iterator();
+        String json = iterator.hasNext() ? cell(iterator.next(), 0) : null;
+        table = parseDescribeTableJson(listedTable.schemaName, listedTable.tableName, json);
+      }
+      return table.isDelta() ? withDeltaPartitionColumns(handle, table) : table;
+    }
+
+    /**
+     * Returns a Delta table with the partition columns that {@code DESCRIBE DETAIL} reports. If it
+     * fails, the table is returned with unknown partitioning, so that its DDL is dumped instead.
+     */
+    @Nonnull
+    private static ParsedTable withDeltaPartitionColumns(
+        @Nonnull DatabricksHandle handle, @Nonnull ParsedTable table) {
+      String query = "DESCRIBE DETAIL " + quoteTableName(table);
+      try {
+        ImmutableMap<String, String> detail =
+            handle.sqlHelper().executeSqlInCatalogForFirstRow(HIVE_METASTORE_CATALOG, query);
+        return table.withPartitionColumns(
+            parseDeltaPartitionColumns(detail.get(PARTITION_COLUMNS_DETAIL)));
+      } catch (IOException e) {
+        return withUnknownPartitioning(table, e);
+      } catch (UncheckedIOException e) {
+        return withUnknownPartitioning(table, e.getCause());
+      }
+    }
+
+    @Nonnull
+    private static ParsedTable withUnknownPartitioning(
+        @Nonnull ParsedTable table, @Nonnull IOException failure) {
+      logger.warn(
+          "Writing the columns of {} without partition indexes, and dumping its DDL instead,"
+              + " because DESCRIBE DETAIL failed: {}",
+          quoteTableName(table),
+          failure.getMessage());
+      return table;
+    }
   }
 
   @Nonnull
-  static String quoteTableName(@Nonnull ParsedTableExtended table) {
+  static String quoteTableName(@Nonnull ParsedTable table) {
     return quoteIdentifier(table.schemaName) + "." + quoteIdentifier(table.tableName);
   }
 
-  private static boolean isView(@Nonnull ParsedTableExtended table) {
+  private static boolean isView(@Nonnull ParsedTable table) {
     return "VIEW".equalsIgnoreCase(table.tableType);
   }
 
@@ -378,7 +465,7 @@ final class DatabricksHiveMetastoreTasks {
       DatabricksHandle dbxHandle = (DatabricksHandle) handle;
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(TablesHeader.class).print(writer)) {
-        for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
+        for (ParsedTable tbl : sessionCache.listParsedTables(dbxHandle)) {
           csv.printRecord(
               HIVE_METASTORE_CATALOG,
               tbl.schemaName,
@@ -408,11 +495,8 @@ final class DatabricksHiveMetastoreTasks {
   }
 
   /**
-   * Writes the columns of each table and view in {@code hive_metastore}.
-   *
-   * <p>{@code SHOW TABLE EXTENDED} omits column comments and reports {@code CHAR} and {@code
-   * VARCHAR} columns as {@code string}, so {@code DESCRIBE TABLE} runs for each table and view to
-   * find the comments and the lengths.
+   * Writes the columns of each table and view in {@code hive_metastore}, as {@code DESCRIBE TABLE
+   * EXTENDED ... AS JSON} reports them.
    */
   static final class DatabricksHiveMetastoreColumnsTask
       extends AbstractDatabricksHiveMetastoreTask {
@@ -431,73 +515,30 @@ final class DatabricksHiveMetastoreTasks {
     protected Void doRun(TaskRunContext context, @Nonnull ByteSink sink, @Nonnull Handle handle)
         throws Exception {
       DatabricksHandle dbxHandle = (DatabricksHandle) handle;
-      ImmutableList<ParsedTableExtended> tables = sessionCache.listParsedTables(dbxHandle);
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(ColumnsHeader.class).print(writer)) {
-        dbxHandle
-            .statementRunner()
-            .runInOrder(
-                "DESCRIBE TABLE",
-                tables,
-                DatabricksHiveMetastoreTasks::quoteTableName,
-                table -> describeColumns(dbxHandle, table),
-                (table, columns) -> {
-                  for (ParsedColumn column : columns) {
-                    csv.printRecord(
-                        HIVE_METASTORE_CATALOG,
-                        table.schemaName,
-                        table.tableName,
-                        String.valueOf(column.ordinalPosition),
-                        column.columnName,
-                        column.dataType,
-                        column.isNullable,
-                        column.comment,
-                        column.partitionIndex,
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        "");
-                  }
-                });
+        for (ParsedTable table : sessionCache.listParsedTables(dbxHandle)) {
+          for (ParsedColumn column : table.columns) {
+            csv.printRecord(
+                HIVE_METASTORE_CATALOG,
+                table.schemaName,
+                table.tableName,
+                String.valueOf(column.ordinalPosition),
+                column.columnName,
+                column.dataType,
+                column.isNullable,
+                column.comment,
+                column.partitionIndex,
+                column.defaultExpression,
+                "",
+                "",
+                "",
+                "",
+                "");
+          }
+        }
       }
       return null;
-    }
-
-    /**
-     * Returns the columns of a table with their comments and the lengths of their {@code CHAR} and
-     * {@code VARCHAR} types. The columns are already known from {@code SHOW TABLE EXTENDED}, so if
-     * {@code DESCRIBE TABLE} fails, they are returned without comments and with {@code string}
-     * types.
-     */
-    @Nonnull
-    private static ImmutableList<ParsedColumn> describeColumns(
-        @Nonnull DatabricksHandle handle, @Nonnull ParsedTableExtended table) {
-      if (table.columns.isEmpty()) {
-        return table.columns;
-      }
-
-      String query = "DESCRIBE TABLE " + quoteTableName(table);
-      try (CloseableIterable<List<String>> rows =
-          handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query)) {
-        return withDescribedColumns(table.columns, parseDescribeTableColumns(rows));
-      } catch (IOException e) {
-        return undescribedColumns(table, e);
-      } catch (UncheckedIOException e) {
-        return undescribedColumns(table, e.getCause());
-      }
-    }
-
-    @Nonnull
-    private static ImmutableList<ParsedColumn> undescribedColumns(
-        @Nonnull ParsedTableExtended table, @Nonnull IOException failure) {
-      logger.warn(
-          "Writing the columns of {} without comments, and their CHAR and VARCHAR types as string,"
-              + " because DESCRIBE TABLE failed: {}",
-          quoteTableName(table),
-          failure.getMessage());
-      return table.columns;
     }
   }
 
@@ -519,7 +560,7 @@ final class DatabricksHiveMetastoreTasks {
       DatabricksHandle dbxHandle = (DatabricksHandle) handle;
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(ViewsHeader.class).print(writer)) {
-        for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
+        for (ParsedTable tbl : sessionCache.listParsedTables(dbxHandle)) {
           if (tbl.viewDefinition != null || isView(tbl)) {
             csv.printRecord(
                 HIVE_METASTORE_CATALOG,
@@ -556,7 +597,7 @@ final class DatabricksHiveMetastoreTasks {
       DatabricksHandle dbxHandle = (DatabricksHandle) handle;
       try (Writer writer = sink.asCharSink(UTF_8).openBufferedStream();
           CSVPrinter csv = FORMAT.withHeader(TableConstraintsHeader.class).print(writer)) {
-        for (ParsedTableExtended tbl : sessionCache.listParsedTables(dbxHandle)) {
+        for (ParsedTable tbl : sessionCache.listParsedTables(dbxHandle)) {
           for (ParsedTableConstraint tc : tbl.constraints) {
             csv.printRecord(
                 HIVE_METASTORE_CATALOG,

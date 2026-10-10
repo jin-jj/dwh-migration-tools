@@ -16,83 +16,51 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
-import static com.google.common.base.CharMatcher.whitespace;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.cellOrEmpty;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
 
-import com.google.common.base.Strings;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
+import java.io.IOException;
+import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Parses the {@code SHOW TABLE EXTENDED} and {@code DESCRIBE TABLE} output of Databricks {@code
- * hive_metastore} tables.
+ * Parses the {@code DESCRIBE TABLE EXTENDED ... AS JSON} output of Databricks {@code
+ * hive_metastore} tables and views, and the partition columns that {@code DESCRIBE DETAIL} reports
+ * for Delta tables.
  */
 final class DatabricksHiveMetastoreTableParser {
 
   private static final Logger logger =
       LoggerFactory.getLogger(DatabricksHiveMetastoreTableParser.class);
 
-  /** The prefix of every field line in a {@code Schema} tree. */
-  private static final String SCHEMA_TREE_LINE_PREFIX = " |";
-
-  /** The indentation that each nesting level adds to a field line in a {@code Schema} tree. */
-  private static final String SCHEMA_TREE_INDENT = "    |";
-
-  /** The marker between the indentation and the field in a {@code Schema} tree line. */
-  private static final String SCHEMA_TREE_FIELD_MARKER = "-- ";
-
-  /** The separator between the name and the type of a field in a {@code Schema} tree line. */
-  private static final String SCHEMA_TREE_TYPE_SEPARATOR = ": ";
+  private static final ObjectReader JSON_READER = new ObjectMapper().readerFor(JsonNode.class);
 
   /**
-   * Matches the nullability that ends a {@code Schema} tree line, such as {@code (nullable =
-   * true)}.
+   * The type names of {@code DESCRIBE TABLE ... AS JSON} that the columns files write in another
+   * way, such as {@code timestamp} for {@code timestamp_ltz}, as Unity Catalog does.
    */
-  private static final Pattern SCHEMA_TREE_NULLABILITY_PATTERN =
-      Pattern.compile(" \\((?:nullable|containsNull|valueContainsNull) = (true|false)\\)$");
+  private static final ImmutableMap<String, String> TYPE_NAMES =
+      ImmutableMap.of(
+          "byte", "tinyint",
+          "short", "smallint",
+          "integer", "int",
+          "long", "bigint",
+          "timestamp_ltz", "timestamp");
 
-  private static final String STRUCT_TYPE_NAME = "struct";
-
-  /**
-   * The Spark type names of the types whose element, key, value or field types are nested lines.
-   */
-  private static final ImmutableSet<String> NESTED_TYPE_NAMES =
-      ImmutableSet.of("array", "map", STRUCT_TYPE_NAME);
-
-  /**
-   * The Spark type names that differ in Hive type syntax, such as {@code long} for {@code bigint}.
-   */
-  private static final ImmutableMap<String, String> HIVE_TYPE_NAMES =
-      ImmutableMap.of("byte", "tinyint", "short", "smallint", "integer", "int", "long", "bigint");
-
-  private static final String STRING_TYPE_NAME = "string";
-
-  /**
-   * Matches a {@code CHAR} or {@code VARCHAR} type with its length, such as {@code varchar(20)}.
-   */
-  private static final Pattern CHAR_VARCHAR_TYPE_PATTERN =
-      Pattern.compile("\\b(?:var)?char\\(\\d+\\)", Pattern.CASE_INSENSITIVE);
-
-  /** The format of {@code java.util.Date#toString}, which Spark uses for {@code Created Time}. */
-  private static final String CREATED_TIME_PATTERN = "EEE MMM dd HH:mm:ss zzz yyyy";
-
-  private static final DateTimeFormatter CREATED_TIME_FORMATTER =
-      DateTimeFormatter.ofPattern(CREATED_TIME_PATTERN, Locale.US);
+  /** The collation of a {@code string} type that is written without {@code collate}. */
+  private static final String DEFAULT_COLLATION = "UTF8_BINARY";
 
   /**
    * The format names of the class and package names that Spark accepts for its built-in data
@@ -134,69 +102,12 @@ final class DatabricksHiveMetastoreTableParser {
 
   private static final String CHECK_CONSTRAINT_TYPE = "CHECK";
 
-  /**
-   * Matches the key that starts a property entry, such as {@code delta.minReaderVersion=}. A key
-   * has no whitespace, so the text after {@code , } in a value such as {@code x IN (1, 2)} doesn't
-   * start an entry.
-   */
-  private static final Pattern PROPERTY_KEY_PATTERN = Pattern.compile("[^\\s=,()\\[\\]]+=");
-
-  /** The separator between the entries of a list in {@code SHOW TABLE EXTENDED} output. */
-  private static final String LIST_SEPARATOR = ", ";
-
-  /**
-   * The keys of Spark's {@code CatalogTable.toLinkedHashMap}, in the order that {@code SHOW TABLE
-   * EXTENDED} prints them. The metric view key {@code Language} is left out, because {@code
-   * hive_metastore} has no metric views and a comment line such as {@code Language: English} would
-   * otherwise end a comment.
-   */
-  private static final ImmutableList<String> TABLE_KEYS_IN_ORDER =
-      ImmutableList.of(
-          "Catalog",
-          "Database",
-          "Table",
-          "Owner",
-          "Created Time",
-          "Last Access",
-          "Created By",
-          "Type",
-          "Provider",
-          "Num Buckets",
-          "Bucket Columns",
-          "Sort Columns",
-          "Comment",
-          "Collation",
-          "View Text",
-          "View Original Text",
-          "View Schema Mode",
-          "View Catalog and Namespace",
-          "SQL Path",
-          "View Query Output Columns",
-          "Table Properties",
-          "Statistics",
-          "Location",
-          "Serde Name",
-          "Serde Library",
-          "InputFormat",
-          "OutputFormat",
-          "Compressed",
-          "Storage Properties",
-          "Partition Provider",
-          "Partition Columns",
-          "Schema");
-
-  /** The keys whose values Spark prints verbatim, so that a value may span lines. */
-  private static final ImmutableSet<String> MULTI_LINE_TABLE_KEYS =
-      ImmutableSet.of(
-          "Comment", "View Text", "View Original Text", "Table Properties", "Storage Properties");
+  /** The data source format of Delta tables, as {@link #formatDataSourceFormat} writes it. */
+  private static final String DELTA_FORMAT = "DELTA";
 
   private DatabricksHiveMetastoreTableParser() {}
 
-  /**
-   * A parsed column from the {@code SHOW TABLE EXTENDED} {@code Schema} tree. The {@code Schema}
-   * tree has no column comments, so a parsed column has an empty comment until it is combined with
-   * {@code DESCRIBE TABLE} output.
-   */
+  /** A column of a table or view. */
   static final class ParsedColumn {
     final int ordinalPosition;
     final String columnName;
@@ -205,37 +116,24 @@ final class DatabricksHiveMetastoreTableParser {
     final String partitionIndex;
     final String comment;
 
+    /** The SQL expression of the {@code DEFAULT} clause, or empty. */
+    final String defaultExpression;
+
     ParsedColumn(
         int ordinalPosition,
-        String columnName,
-        String dataType,
-        String isNullable,
-        String partitionIndex,
-        String comment) {
+        @Nonnull String columnName,
+        @Nonnull String dataType,
+        @Nonnull String isNullable,
+        @Nonnull String partitionIndex,
+        @Nonnull String comment,
+        @Nonnull String defaultExpression) {
       this.ordinalPosition = ordinalPosition;
       this.columnName = columnName;
       this.dataType = dataType;
       this.isNullable = isNullable;
       this.partitionIndex = partitionIndex;
       this.comment = comment;
-    }
-
-    /** Returns this column with another data type and comment. */
-    @Nonnull
-    ParsedColumn withDataTypeAndComment(@Nonnull String dataType, @Nonnull String comment) {
-      return new ParsedColumn(
-          ordinalPosition, columnName, dataType, isNullable, partitionIndex, comment);
-    }
-  }
-
-  /** The type and comment of a column in {@code DESCRIBE TABLE} output. */
-  static final class DescribedColumn {
-    final String dataType;
-    final String comment;
-
-    DescribedColumn(@Nonnull String dataType, @Nonnull String comment) {
-      this.dataType = dataType;
-      this.comment = comment;
+      this.defaultExpression = defaultExpression;
     }
   }
 
@@ -252,30 +150,20 @@ final class DatabricksHiveMetastoreTableParser {
     }
   }
 
-  /** A field line of a {@code Schema} tree, such as {@code |-- id: integer (nullable = true)}. */
-  private static final class SchemaTreeLine {
-    final int depth;
-    final String name;
-    final String typeName;
-    final boolean nullable;
-
-    SchemaTreeLine(int depth, String name, String typeName, boolean nullable) {
-      this.depth = depth;
-      this.name = name;
-      this.typeName = typeName;
-      this.nullable = nullable;
-    }
-  }
-
   /**
-   * A table or view parsed from its {@code SHOW TABLE EXTENDED} information.
+   * A table or view parsed from its {@code DESCRIBE TABLE EXTENDED ... AS JSON} output.
    *
-   * <p>The {@code Catalog} that Spark prints, which may be {@code spark_catalog}, isn't kept: the
-   * files always name the catalog {@code hive_metastore}.
+   * <p>The catalog that Databricks reports, which may be {@code spark_catalog}, isn't kept: the
+   * files always name the catalog {@code hive_metastore}. A table that couldn't be described has
+   * only its schema and name.
    */
-  static final class ParsedTableExtended {
+  static final class ParsedTable {
     final String schemaName;
     final String tableName;
+
+    /** Whether the table was described, so that the values other than the names are known. */
+    final boolean described;
+
     final String tableType;
     final String dataSourceFormat;
     final String storageLocation;
@@ -298,198 +186,230 @@ final class DatabricksHiveMetastoreTableParser {
     final ImmutableList<ParsedColumn> columns;
     final ImmutableList<ParsedTableConstraint> constraints;
 
-    private ParsedTableExtended(
-        @Nonnull String defaultSchema,
-        @Nonnull String defaultTable,
-        @Nonnull ImmutableMap<String, String> values) {
-      this.schemaName = valueOrDefault(values, "Database", defaultSchema);
-      this.tableName = valueOrDefault(values, "Table", defaultTable);
-      this.tableType = values.getOrDefault("Type", "");
-      this.dataSourceFormat = formatDataSourceFormat(values.getOrDefault("Provider", ""));
-      this.storageLocation = values.getOrDefault("Location", "");
-      this.comment = values.getOrDefault("Comment", "");
-      this.owner = values.getOrDefault("Owner", "");
+    /**
+     * Whether the partition indexes of the columns are known. {@code DESCRIBE TABLE ... AS JSON}
+     * doesn't report the partition columns of a Delta table, so they are unknown until {@link
+     * #withPartitionColumns} sets them.
+     */
+    final boolean partitioningKnown;
+
+    private ParsedTable(@Nonnull String schemaName, @Nonnull String tableName) {
+      this.schemaName = schemaName;
+      this.tableName = tableName;
+      this.described = false;
+      this.tableType = "";
+      this.dataSourceFormat = "";
+      this.storageLocation = "";
+      this.comment = "";
+      this.owner = "";
+      this.createdAt = "";
+      this.serdeLibrary = "";
+      this.inputFormat = "";
+      this.outputFormat = "";
+      this.storageProperties = ImmutableMap.of();
+      this.tableProperties = ImmutableMap.of();
+      this.numBuckets = "";
+      this.bucketColumns = ImmutableList.of();
+      this.sortColumns = ImmutableList.of();
+      this.viewDefinition = null;
+      this.viewCatalogAndNamespace = "";
+      this.viewQueryOutputColumns = ImmutableList.of();
+      this.viewSchemaMode = "";
+      this.sqlPath = "";
+      this.columns = ImmutableList.of();
+      this.constraints = ImmutableList.of();
+      this.partitioningKnown = false;
+    }
+
+    private ParsedTable(
+        @Nonnull String schemaName, @Nonnull String tableName, @Nonnull JsonNode description) {
+      this.schemaName = schemaName;
+      this.tableName = tableName;
+      this.described = true;
+      this.tableType = text(description, "type");
+      this.dataSourceFormat = formatDataSourceFormat(text(description, "provider"));
+      this.storageLocation = text(description, "location");
+      this.comment = text(description, "comment");
+      this.owner = text(description, "owner");
       this.createdAt =
           formatCreatedTime(
-              values.getOrDefault("Created Time", ""),
+              text(description, "created_time"),
               quoteIdentifier(schemaName) + "." + quoteIdentifier(tableName));
-      this.serdeLibrary = values.getOrDefault("Serde Library", "");
-      this.inputFormat = values.getOrDefault("InputFormat", "");
-      this.outputFormat = values.getOrDefault("OutputFormat", "");
-      this.storageProperties =
-          parseBracketedProperties(values.getOrDefault("Storage Properties", ""));
-      this.tableProperties = parseBracketedProperties(values.getOrDefault("Table Properties", ""));
-      this.numBuckets = values.getOrDefault("Num Buckets", "");
-      this.bucketColumns = parseIdentifierList(values.getOrDefault("Bucket Columns", ""));
-      this.sortColumns = parseIdentifierList(values.getOrDefault("Sort Columns", ""));
-      this.viewDefinition = values.get("View Text");
-      this.viewCatalogAndNamespace = values.getOrDefault("View Catalog and Namespace", "");
-      this.viewQueryOutputColumns =
-          parseIdentifierList(values.getOrDefault("View Query Output Columns", ""));
-      this.viewSchemaMode = values.getOrDefault("View Schema Mode", "");
-      this.sqlPath = values.getOrDefault("SQL Path", "");
+      this.serdeLibrary = text(description, "serde_library");
+      this.inputFormat = text(description, "input_format");
+      this.outputFormat = text(description, "output_format");
+      this.storageProperties = textMap(description, "storage_properties");
+      this.tableProperties = textMap(description, "table_properties");
+      this.numBuckets = text(description, "num_buckets");
+      this.bucketColumns = textList(description, "bucket_columns");
+      this.sortColumns = textList(description, "sort_columns");
+      JsonNode viewText = description.path("view_text");
+      this.viewDefinition = isAbsent(viewText) ? null : viewText.asText();
+      this.viewCatalogAndNamespace = text(description, "view_catalog_and_namespace");
+      this.viewQueryOutputColumns = textList(description, "view_query_output_columns");
+      this.viewSchemaMode = text(description, "view_schema_mode");
+      this.sqlPath = text(description, "sql_path");
       this.columns =
-          parseSchemaColumns(
-              values.getOrDefault("Schema", ""),
-              parseIdentifierList(values.getOrDefault("Partition Columns", "")));
+          withPartitionIndexes(
+              parseColumns(description.path("columns")),
+              textList(description, "partition_columns"));
       this.constraints = parseDeltaCheckConstraints(tableProperties);
+      this.partitioningKnown = !DELTA_FORMAT.equals(dataSourceFormat);
+    }
+
+    /** Copies a table with other columns, whose partition indexes are known. */
+    private ParsedTable(@Nonnull ParsedTable table, @Nonnull ImmutableList<ParsedColumn> columns) {
+      this.schemaName = table.schemaName;
+      this.tableName = table.tableName;
+      this.described = table.described;
+      this.tableType = table.tableType;
+      this.dataSourceFormat = table.dataSourceFormat;
+      this.storageLocation = table.storageLocation;
+      this.comment = table.comment;
+      this.owner = table.owner;
+      this.createdAt = table.createdAt;
+      this.serdeLibrary = table.serdeLibrary;
+      this.inputFormat = table.inputFormat;
+      this.outputFormat = table.outputFormat;
+      this.storageProperties = table.storageProperties;
+      this.tableProperties = table.tableProperties;
+      this.numBuckets = table.numBuckets;
+      this.bucketColumns = table.bucketColumns;
+      this.sortColumns = table.sortColumns;
+      this.viewDefinition = table.viewDefinition;
+      this.viewCatalogAndNamespace = table.viewCatalogAndNamespace;
+      this.viewQueryOutputColumns = table.viewQueryOutputColumns;
+      this.viewSchemaMode = table.viewSchemaMode;
+      this.sqlPath = table.sqlPath;
+      this.columns = columns;
+      this.constraints = table.constraints;
+      this.partitioningKnown = true;
+    }
+
+    boolean isDelta() {
+      return DELTA_FORMAT.equals(dataSourceFormat);
+    }
+
+    /**
+     * Returns this table with the partition indexes of {@code partitionColumns}, the names of the
+     * partition columns in their order, such as those that {@code DESCRIBE DETAIL} reports for a
+     * Delta table.
+     */
+    @Nonnull
+    ParsedTable withPartitionColumns(@Nonnull List<String> partitionColumns) {
+      return new ParsedTable(this, withPartitionIndexes(columns, partitionColumns));
     }
   }
 
-  @Nonnull
-  static ParsedTableExtended parseShowTableExtended(
-      @Nonnull String defaultSchema,
-      @Nonnull String defaultTable,
-      @CheckForNull String informationBlob) {
-    return new ParsedTableExtended(
-        defaultSchema, defaultTable, splitTableInformation(Strings.nullToEmpty(informationBlob)));
-  }
-
   /**
-   * Splits a {@code SHOW TABLE EXTENDED} information blob into values by key.
+   * Parses the {@code DESCRIBE TABLE EXTENDED ... AS JSON} output of a table or view.
    *
-   * <p>Spark prints one {@code Key: value} line per key, in {@link #TABLE_KEYS_IN_ORDER} order, and
-   * prints the values of {@link #MULTI_LINE_TABLE_KEYS} verbatim, so a line of such a value may
-   * look like a key line, as the comment line {@code Owner: data team} does. The key lines are
-   * therefore the most lines that start with keys in that order. Of equally many, the key line
-   * after a multi-line value is the latest candidate, because text that imitates a key line
-   * precedes the real one, and the key line after any other value is the earliest candidate,
-   * because Spark prints it right after that value.
+   * @throws IOException if the output isn't a JSON object
    */
   @Nonnull
-  private static ImmutableMap<String, String> splitTableInformation(
-      @Nonnull String informationBlob) {
-    String[] lines = informationBlob.split("\n");
-    int[] keyIndexes = new int[lines.length];
-    int keyLineCount = 0;
-    for (int lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-      keyIndexes[lineIndex] = findTableKeyIndex(lines[lineIndex]);
-      if (keyIndexes[lineIndex] >= 0) {
-        keyLineCount++;
-      }
+  static ParsedTable parseDescribeTableJson(
+      @Nonnull String schemaName, @Nonnull String tableName, @CheckForNull String json)
+      throws IOException {
+    JsonNode description = json == null ? null : JSON_READER.readTree(json);
+    if (description == null || !description.isObject()) {
+      throw new IOException(
+          String.format(
+              "DESCRIBE TABLE AS JSON returned no JSON object for %s.%s.",
+              quoteIdentifier(schemaName), quoteIdentifier(tableName)));
     }
 
-    // skippedCounts[p][state] is the fewest key lines to skip from the p-th key line on, where
-    // state is 0 before the first key and otherwise one more than the index of the last key.
-    int keyCount = TABLE_KEYS_IN_ORDER.size();
-    int[][] skippedCounts = new int[keyLineCount + 1][keyCount + 1];
-    int keyLinePosition = keyLineCount;
-    for (int lineIndex = lines.length - 1; lineIndex >= 0; lineIndex--) {
-      int keyIndex = keyIndexes[lineIndex];
-      if (keyIndex < 0) {
-        continue;
-      }
+    return new ParsedTable(schemaName, tableName, description);
+  }
 
-      keyLinePosition--;
-      for (int state = 0; state <= keyCount; state++) {
-        int skippedIfNotStarted = skippedCounts[keyLinePosition + 1][state] + 1;
-        skippedCounts[keyLinePosition][state] =
-            keyIndex >= state
-                ? Math.min(skippedCounts[keyLinePosition + 1][keyIndex + 1], skippedIfNotStarted)
-                : skippedIfNotStarted;
-      }
-    }
-
-    ImmutableMap.Builder<String, String> values = ImmutableMap.builder();
-    String key = null;
-    StringBuilder value = new StringBuilder();
-    int state = 0;
-    int keyLinesSeen = 0;
-    for (int lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-      int keyIndex = keyIndexes[lineIndex];
-      boolean startsKey = false;
-      if (keyIndex >= 0) {
-        keyLinesSeen++;
-        if (keyIndex >= state) {
-          int skippedIfStarted = skippedCounts[keyLinesSeen][keyIndex + 1];
-          int skippedIfNotStarted = skippedCounts[keyLinesSeen][state] + 1;
-          startsKey =
-              skippedIfStarted < skippedIfNotStarted
-                  || (skippedIfStarted == skippedIfNotStarted
-                      && !MULTI_LINE_TABLE_KEYS.contains(key));
-        }
-      }
-
-      if (startsKey) {
-        if (key != null) {
-          values.put(key, finishTableValue(key, value));
-        }
-        key = TABLE_KEYS_IN_ORDER.get(keyIndex);
-        value.setLength(0);
-        value.append(parseKeyLineValue(lines[lineIndex], key));
-        state = keyIndex + 1;
-      } else if (MULTI_LINE_TABLE_KEYS.contains(key) || "Schema".equals(key)) {
-        value.append('\n').append(lines[lineIndex]);
-      }
-    }
-    if (key != null) {
-      values.put(key, finishTableValue(key, value));
-    }
-    return values.build();
+  /** Returns a table that couldn't be described, with only its schema and name. */
+  @Nonnull
+  static ParsedTable undescribedTable(@Nonnull String schemaName, @Nonnull String tableName) {
+    return new ParsedTable(schemaName, tableName);
   }
 
   /**
-   * Returns the index in {@link #TABLE_KEYS_IN_ORDER} of the key that starts the line, as in {@code
-   * Key: value} or, for an empty value, {@code Key}, or -1 if no key starts the line.
+   * Returns a column type of {@code DESCRIBE TABLE ... AS JSON}, such as {@code {"name": "decimal",
+   * "precision": 10, "scale": 2}}, in the syntax of the columns files, such as {@code
+   * decimal(10,2)} or {@code array<struct<x:bigint,y:string>>}. A {@code string} type with a
+   * collation other than {@code UTF8_BINARY} is written as {@code string collate <collation>}.
    */
-  private static int findTableKeyIndex(@Nonnull String line) {
-    for (int keyIndex = 0; keyIndex < TABLE_KEYS_IN_ORDER.size(); keyIndex++) {
-      String key = TABLE_KEYS_IN_ORDER.get(keyIndex);
-      if (line.startsWith(key)
-          && (line.length() == key.length() || line.charAt(key.length()) == ':')) {
-        return keyIndex;
-      }
+  @Nonnull
+  static String formatDataType(@Nonnull JsonNode type) {
+    String name = type.path("name").asText("").toLowerCase(Locale.ROOT);
+    switch (name) {
+      case "decimal":
+        if (isAbsent(type.path("precision"))) {
+          return name;
+        }
+
+        return String.format(
+            "decimal(%s,%s)", type.path("precision").asText(), type.path("scale").asText("0"));
+      case "char":
+      case "varchar":
+        return name + "(" + type.path("length").asText() + ")";
+      case "string":
+        String collation = type.path("collation").asText("");
+        return collation.isEmpty() || DEFAULT_COLLATION.equalsIgnoreCase(collation)
+            ? name
+            : name + " collate " + collation;
+      case "interval":
+        String startUnit = type.path("start_unit").asText("").toLowerCase(Locale.ROOT);
+        String endUnit = type.path("end_unit").asText("").toLowerCase(Locale.ROOT);
+        if (startUnit.isEmpty()) {
+          return name;
+        }
+
+        return endUnit.isEmpty() || endUnit.equals(startUnit)
+            ? name + " " + startUnit
+            : name + " " + startUnit + " to " + endUnit;
+      case "array":
+        return "array<" + formatDataType(type.path("element_type")) + ">";
+      case "map":
+        return "map<"
+            + formatDataType(type.path("key_type"))
+            + ","
+            + formatDataType(type.path("value_type"))
+            + ">";
+      case "struct":
+        StringBuilder struct = new StringBuilder("struct<");
+        for (JsonNode field : type.path("fields")) {
+          if (struct.length() > "struct<".length()) {
+            struct.append(',');
+          }
+          struct.append(text(field, "name")).append(':').append(formatDataType(field.path("type")));
+        }
+        return struct.append('>').toString();
+      default:
+        return TYPE_NAMES.getOrDefault(name, name);
     }
-    return -1;
-  }
-
-  /** Returns the value in a line that starts with the key, such as {@code v} in {@code Key: v}. */
-  @Nonnull
-  private static String parseKeyLineValue(@Nonnull String line, @Nonnull String key) {
-    String value = line.substring(Math.min(line.length(), key.length() + 1));
-    return value.startsWith(" ") ? value.substring(1) : value;
-  }
-
-  @Nonnull
-  private static String finishTableValue(@Nonnull String key, @Nonnull StringBuilder value) {
-    return MULTI_LINE_TABLE_KEYS.contains(key) ? value.toString() : value.toString().trim();
-  }
-
-  @Nonnull
-  private static String valueOrDefault(
-      @Nonnull Map<String, String> values, @Nonnull String key, @Nonnull String defaultValue) {
-    String value = values.get(key);
-    return Strings.isNullOrEmpty(value) ? defaultValue : value;
   }
 
   /**
-   * Returns a time that Spark prints with {@code java.util.Date#toString}, such as the {@code
-   * Created Time} {@code Sun Sep 27 21:19:25 UTC 2026}, as an ISO 8601 instant, such as {@code
-   * 2026-09-27T21:19:25Z}. A time in another format is logged and returned as an empty string, so
-   * that the {@code CreatedAt} columns hold only instants, as for Unity Catalog.
+   * Returns a time of {@code DESCRIBE TABLE ... AS JSON}, such as {@code 2026-09-14T16:19:04Z}, as
+   * an ISO 8601 instant. A time in another format is logged and returned as an empty string, so
+   * that the {@code CreatedAt} columns hold only instants.
    *
-   * @param objectName the quoted name of the table or function, for the warning
+   * @param objectName the quoted name of the table, for the warning
    */
   @Nonnull
-  static String formatCreatedTime(@Nonnull String createdTime, @Nonnull String objectName) {
+  private static String formatCreatedTime(@Nonnull String createdTime, @Nonnull String objectName) {
     if (createdTime.isEmpty()) {
       return "";
     }
 
     try {
-      return ZonedDateTime.parse(createdTime, CREATED_TIME_FORMATTER).toInstant().toString();
+      return OffsetDateTime.parse(createdTime).toInstant().toString();
     } catch (DateTimeParseException e) {
       logger.warn(
-          "Writing {} without CreatedAt because its created time '{}' doesn't match '{}'.",
+          "Writing {} without CreatedAt because its created time '{}' isn't an ISO 8601 time.",
           objectName,
-          createdTime,
-          CREATED_TIME_PATTERN);
+          createdTime);
       return "";
     }
   }
 
   /**
-   * Returns the data source format of a table from its {@code Provider}, as Unity Catalog names the
+   * Returns the data source format of a table from its {@code provider}, as Unity Catalog names the
    * formats: a short name in upper case, such as {@code PARQUET} for {@code parquet}. A class or
    * package name that Spark accepts for a built-in format, such as {@code
    * org.apache.spark.sql.parquet}, gets the name of that format. Another class name, such as that
@@ -503,273 +423,6 @@ final class DatabricksHiveMetastoreTableParser {
     }
 
     return provider.contains(".") ? provider : provider.toUpperCase(Locale.ROOT);
-  }
-
-  /**
-   * Parses properties printed as {@code [key=value, ...]}, such as {@code Table Properties}, in
-   * their printed order.
-   *
-   * <p>Spark prints the keys and values without escaping, so the entries are split on a best-effort
-   * basis: an entry ends before {@code , } followed by a key and {@code =}, unless that text is in
-   * parentheses or brackets, as in the check constraint {@code status IN ('new', 'done')}. A value
-   * that contains such text outside of parentheses, as in {@code a, b=c}, is split.
-   */
-  @Nonnull
-  static ImmutableMap<String, String> parseBracketedProperties(@Nonnull String text) {
-    String body = text.trim();
-    if (body.startsWith("[") && body.endsWith("]")) {
-      body = body.substring(1, body.length() - 1);
-    }
-    if (body.isEmpty()) {
-      return ImmutableMap.of();
-    }
-
-    Map<String, String> properties = new LinkedHashMap<>();
-    Matcher keyMatcher = PROPERTY_KEY_PATTERN.matcher(body);
-    int depth = 0;
-    int entryStart = 0;
-    for (int index = 0; index < body.length(); index++) {
-      char c = body.charAt(index);
-      if (c == '(' || c == '[') {
-        depth++;
-      } else if ((c == ')' || c == ']') && depth > 0) {
-        depth--;
-      } else if (depth == 0
-          && body.startsWith(LIST_SEPARATOR, index)
-          && keyMatcher.region(index + LIST_SEPARATOR.length(), body.length()).lookingAt()) {
-        putProperty(body.substring(entryStart, index), properties);
-        entryStart = index + LIST_SEPARATOR.length();
-      }
-    }
-    putProperty(body.substring(entryStart), properties);
-    return ImmutableMap.copyOf(properties);
-  }
-
-  /** Adds a {@code key=value} entry. An entry without a key is kept as a key with no value. */
-  private static void putProperty(@Nonnull String entry, @Nonnull Map<String, String> properties) {
-    int separator = entry.indexOf('=');
-    if (separator <= 0) {
-      properties.put(entry, "");
-    } else {
-      properties.put(entry.substring(0, separator), entry.substring(separator + 1));
-    }
-  }
-
-  /**
-   * Parses a list of identifiers printed as {@code [`a`, `b`]}, such as {@code Partition Columns}.
-   * Spark quotes each identifier with backticks and doubles a backtick in it. An identifier without
-   * backticks ends before the next {@code , }.
-   */
-  @Nonnull
-  static ImmutableList<String> parseIdentifierList(@Nonnull String text) {
-    String body = text.trim();
-    if (body.startsWith("[") && body.endsWith("]")) {
-      body = body.substring(1, body.length() - 1);
-    }
-
-    ImmutableList.Builder<String> identifiers = ImmutableList.builder();
-    int index = 0;
-    while (index < body.length()) {
-      char c = body.charAt(index);
-      if (c == ',' || Character.isWhitespace(c)) {
-        index++;
-      } else if (c == '`') {
-        StringBuilder identifier = new StringBuilder();
-        index++;
-        while (index < body.length()) {
-          char next = body.charAt(index);
-          if (next != '`') {
-            identifier.append(next);
-            index++;
-          } else if (body.startsWith("``", index)) {
-            identifier.append('`');
-            index += 2;
-          } else {
-            index++;
-            break;
-          }
-        }
-        identifiers.add(identifier.toString());
-      } else {
-        int end = body.indexOf(LIST_SEPARATOR, index);
-        if (end < 0) {
-          end = body.length();
-        }
-        identifiers.add(body.substring(index, end).trim());
-        index = end;
-      }
-    }
-    return identifiers.build();
-  }
-
-  /**
-   * Parses the columns of a {@code Schema} tree. Each type is written in Hive type syntax, such as
-   * {@code bigint} for a {@code long} line and {@code array<struct<x:bigint>>} for an {@code array}
-   * line and its nested lines.
-   */
-  @Nonnull
-  private static ImmutableList<ParsedColumn> parseSchemaColumns(
-      @Nonnull String schemaTree, @Nonnull List<String> partitionCols) {
-    Map<String, Integer> partitionIndexByLowerCol = new LinkedHashMap<>();
-    for (int idx = 0; idx < partitionCols.size(); idx++) {
-      partitionIndexByLowerCol.put(partitionCols.get(idx).toLowerCase(Locale.ROOT), idx);
-    }
-
-    ImmutableList.Builder<SchemaTreeLine> treeLinesBuilder = ImmutableList.builder();
-    for (String line : schemaTree.split("\n")) {
-      SchemaTreeLine treeLine = parseSchemaTreeLine(line);
-      if (treeLine != null) {
-        treeLinesBuilder.add(treeLine);
-      }
-    }
-    ImmutableList<SchemaTreeLine> treeLines = treeLinesBuilder.build();
-
-    ImmutableList.Builder<ParsedColumn> columns = ImmutableList.builder();
-    int ordinal = 0;
-    int index = 0;
-    while (index < treeLines.size()) {
-      SchemaTreeLine field = treeLines.get(index);
-      if (field.depth > 0) {
-        index++;
-        continue;
-      }
-
-      StringBuilder dataType = new StringBuilder();
-      index = appendHiveType(treeLines, index, dataType);
-      Integer pIdx = partitionIndexByLowerCol.get(field.name.toLowerCase(Locale.ROOT));
-      columns.add(
-          new ParsedColumn(
-              ordinal,
-              field.name,
-              dataType.toString(),
-              field.nullable ? "YES" : "NO",
-              pIdx != null ? String.valueOf(pIdx) : "",
-              ""));
-      ordinal++;
-    }
-    return columns.build();
-  }
-
-  /**
-   * Parses a field line of a {@code Schema} tree, or returns null for another line. The name is the
-   * text before the last colon and space, because a name may contain a colon and a space and a type
-   * name doesn't.
-   */
-  @CheckForNull
-  private static SchemaTreeLine parseSchemaTreeLine(@Nonnull String line) {
-    if (!line.startsWith(SCHEMA_TREE_LINE_PREFIX)) {
-      return null;
-    }
-
-    int offset = SCHEMA_TREE_LINE_PREFIX.length();
-    int depth = 0;
-    while (line.startsWith(SCHEMA_TREE_INDENT, offset)) {
-      offset += SCHEMA_TREE_INDENT.length();
-      depth++;
-    }
-    if (!line.startsWith(SCHEMA_TREE_FIELD_MARKER, offset)) {
-      return null;
-    }
-
-    String field =
-        whitespace().trimTrailingFrom(line.substring(offset + SCHEMA_TREE_FIELD_MARKER.length()));
-    boolean nullable = true;
-    Matcher nullability = SCHEMA_TREE_NULLABILITY_PATTERN.matcher(field);
-    if (nullability.find()) {
-      nullable = Boolean.parseBoolean(nullability.group(1));
-      field = field.substring(0, nullability.start());
-    }
-    int separator = field.lastIndexOf(SCHEMA_TREE_TYPE_SEPARATOR);
-    if (separator < 0) {
-      return null;
-    }
-
-    return new SchemaTreeLine(
-        depth,
-        field.substring(0, separator),
-        field.substring(separator + SCHEMA_TREE_TYPE_SEPARATOR.length()),
-        nullable);
-  }
-
-  /**
-   * Appends the Hive type of the field at {@code index}, including the types of its nested lines,
-   * and returns the index of the first line after them.
-   */
-  private static int appendHiveType(
-      @Nonnull List<SchemaTreeLine> treeLines, int index, @Nonnull StringBuilder dataType) {
-    SchemaTreeLine field = treeLines.get(index);
-    if (!NESTED_TYPE_NAMES.contains(field.typeName)) {
-      dataType.append(HIVE_TYPE_NAMES.getOrDefault(field.typeName, field.typeName));
-      return index + 1;
-    }
-
-    dataType.append(field.typeName).append('<');
-    int next = index + 1;
-    while (next < treeLines.size() && treeLines.get(next).depth > field.depth) {
-      if (next > index + 1) {
-        dataType.append(',');
-      }
-      if (STRUCT_TYPE_NAME.equals(field.typeName)) {
-        dataType.append(treeLines.get(next).name).append(':');
-      }
-      next = appendHiveType(treeLines, next, dataType);
-    }
-    dataType.append('>');
-    return next;
-  }
-
-  /**
-   * Parses the column types and comments of {@code DESCRIBE TABLE} rows, such as {@code
-   * varchar(20)}, by column name. The columns end at the first row without a type, such as {@code #
-   * Partition Information}, which starts a section that lists the partition columns again.
-   */
-  @Nonnull
-  static ImmutableMap<String, DescribedColumn> parseDescribeTableColumns(
-      @Nonnull Iterable<? extends List<String>> rows) {
-    Map<String, DescribedColumn> columnsByName = new LinkedHashMap<>();
-    for (List<String> row : rows) {
-      String dataType = cellOrEmpty(row, 1);
-      if (dataType.isEmpty()) {
-        break;
-      }
-
-      columnsByName.putIfAbsent(
-          cellOrEmpty(row, 0), new DescribedColumn(dataType, cellOrEmpty(row, 2)));
-    }
-    return ImmutableMap.copyOf(columnsByName);
-  }
-
-  /**
-   * Returns the columns with the comments, and the {@code CHAR} and {@code VARCHAR} types, that
-   * {@code DESCRIBE TABLE} reports. The {@code Schema} tree has no comments and reports {@code
-   * CHAR} and {@code VARCHAR} types as {@code string}.
-   *
-   * <p>A described type replaces the type of a column only if both are equal once each {@code CHAR}
-   * and {@code VARCHAR} type is replaced by {@code string}. So a column keeps its type if {@code
-   * DESCRIBE TABLE} truncated the type, as it does for a struct with many fields, such as {@code
-   * struct<f00:int,...,f24:int,... 5 more fields>}.
-   */
-  @Nonnull
-  static ImmutableList<ParsedColumn> withDescribedColumns(
-      @Nonnull List<ParsedColumn> columns, @Nonnull Map<String, DescribedColumn> describedColumns) {
-    ImmutableList.Builder<ParsedColumn> builder = ImmutableList.builder();
-    for (ParsedColumn column : columns) {
-      DescribedColumn described = describedColumns.get(column.columnName);
-      if (described == null) {
-        builder.add(column);
-        continue;
-      }
-
-      boolean differsOnlyInLengths =
-          CHAR_VARCHAR_TYPE_PATTERN
-              .matcher(described.dataType)
-              .replaceAll(STRING_TYPE_NAME)
-              .equals(column.dataType);
-      builder.add(
-          column.withDataTypeAndComment(
-              differsOnlyInLengths ? described.dataType : column.dataType, described.comment));
-    }
-    return builder.build();
   }
 
   /** Returns the check constraints in the {@code delta.constraints.<name>} table properties. */
@@ -791,5 +444,135 @@ final class DatabricksHiveMetastoreTableParser {
       }
     }
     return constraints.build();
+  }
+
+  /**
+   * Returns the partition columns that {@code DESCRIBE DETAIL} reports for a Delta table: its
+   * {@code partitionColumns} cell, a JSON array of names such as {@code ["region","dt"]}.
+   *
+   * @throws IOException if the cell isn't a JSON array of names
+   */
+  @Nonnull
+  static ImmutableList<String> parseDeltaPartitionColumns(@CheckForNull String partitionColumns)
+      throws IOException {
+    JsonNode names = partitionColumns == null ? null : JSON_READER.readTree(partitionColumns);
+    if (names == null || !names.isArray()) {
+      throw new IOException(
+          String.format(
+              "DESCRIBE DETAIL returned partition columns that aren't a JSON array: %s",
+              partitionColumns));
+    }
+
+    ImmutableList.Builder<String> builder = ImmutableList.builder();
+    for (JsonNode name : names) {
+      if (!name.isTextual()) {
+        throw new IOException(
+            String.format(
+                "DESCRIBE DETAIL returned a partition column that isn't a name: %s",
+                partitionColumns));
+      }
+
+      builder.add(name.asText());
+    }
+    return builder.build();
+  }
+
+  /** Returns the columns in their order, without partition indexes. */
+  @Nonnull
+  private static ImmutableList<ParsedColumn> parseColumns(@Nonnull JsonNode columns) {
+    ImmutableList.Builder<ParsedColumn> parsedColumns = ImmutableList.builder();
+    int ordinalPosition = 0;
+    for (JsonNode column : columns) {
+      parsedColumns.add(
+          new ParsedColumn(
+              ordinalPosition,
+              text(column, "name"),
+              formatDataType(column.path("type")),
+              column.path("nullable").asBoolean(true) ? "YES" : "NO",
+              "",
+              text(column, "comment"),
+              text(column, "default")));
+      ordinalPosition++;
+    }
+    return parsedColumns.build();
+  }
+
+  /**
+   * Returns the columns with the 0-based position of each partition column in the partitioning. The
+   * names are matched case-insensitively, as Spark resolves them.
+   */
+  @Nonnull
+  private static ImmutableList<ParsedColumn> withPartitionIndexes(
+      @Nonnull List<ParsedColumn> columns, @Nonnull List<String> partitionColumns) {
+    Map<String, Integer> partitionIndexByLowerName = new LinkedHashMap<>();
+    for (int index = 0; index < partitionColumns.size(); index++) {
+      partitionIndexByLowerName.putIfAbsent(
+          partitionColumns.get(index).toLowerCase(Locale.ROOT), index);
+    }
+
+    ImmutableList.Builder<ParsedColumn> indexedColumns = ImmutableList.builder();
+    for (ParsedColumn column : columns) {
+      Integer partitionIndex =
+          partitionIndexByLowerName.get(column.columnName.toLowerCase(Locale.ROOT));
+      indexedColumns.add(
+          new ParsedColumn(
+              column.ordinalPosition,
+              column.columnName,
+              column.dataType,
+              column.isNullable,
+              partitionIndex == null ? "" : String.valueOf(partitionIndex),
+              column.comment,
+              column.defaultExpression));
+    }
+    return indexedColumns.build();
+  }
+
+  /** Returns the value of a field as text, as {@link #asText} does. */
+  @Nonnull
+  private static String text(@Nonnull JsonNode node, @Nonnull String field) {
+    return asText(node.path(field));
+  }
+
+  /** Returns the values of a list as text, or an empty list if the list is absent. */
+  @Nonnull
+  private static ImmutableList<String> textList(@Nonnull JsonNode node, @Nonnull String field) {
+    ImmutableList.Builder<String> values = ImmutableList.builder();
+    for (JsonNode value : node.path(field)) {
+      values.add(asText(value));
+    }
+    return values.build();
+  }
+
+  /** Returns the entries of an object as text, in their order, or an empty map if it's absent. */
+  @Nonnull
+  private static ImmutableMap<String, String> textMap(
+      @Nonnull JsonNode node, @Nonnull String field) {
+    JsonNode object = node.path(field);
+    if (!object.isObject()) {
+      return ImmutableMap.of();
+    }
+
+    Map<String, String> entries = new LinkedHashMap<>();
+    for (Map.Entry<String, JsonNode> entry : object.properties()) {
+      entries.put(entry.getKey(), asText(entry.getValue()));
+    }
+    return ImmutableMap.copyOf(entries);
+  }
+
+  /**
+   * Returns a value as text: a string as is, another scalar as printed, a list or object as JSON,
+   * and an absent value as an empty string.
+   */
+  @Nonnull
+  private static String asText(@Nonnull JsonNode value) {
+    if (isAbsent(value)) {
+      return "";
+    }
+
+    return value.isContainerNode() ? value.toString() : value.asText();
+  }
+
+  private static boolean isAbsent(@Nonnull JsonNode value) {
+    return value.isMissingNode() || value.isNull();
   }
 }

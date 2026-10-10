@@ -150,6 +150,19 @@ public class DatabricksHiveMetastoreFunctionParserTest {
   }
 
   @Test
+  public void parseDescribeFunctionExtended_writesEmptyCreatedTimeInOtherFormat() {
+    ParsedFunction parsed =
+        parseFunction(
+            "f_time",
+            "Function: hive_metastore.legacy_db.f_time",
+            "Create Time: 2026-09-27 21:03:11",
+            "Body: 1");
+
+    assertEquals("", parsed.createdAt);
+    assertEquals("1", parsed.routineDefinition);
+  }
+
+  @Test
   public void parseDescribeFunctionExtended_separatesDefaultExpressionsFromComments() {
     ParsedFunction parsed =
         parseFunction(

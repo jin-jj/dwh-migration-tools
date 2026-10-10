@@ -57,6 +57,7 @@ import com.google.edwmigration.dumper.application.dumper.task.FormatTask;
 import com.google.edwmigration.dumper.application.dumper.task.Task;
 import com.google.edwmigration.dumper.plugin.ext.jdk.annotation.Description;
 import java.util.List;
+import java.util.Locale;
 import javax.annotation.Nonnull;
 
 /**
@@ -68,10 +69,12 @@ import javax.annotation.Nonnull;
  *
  * <p>Dumps the schemas, tables, views, columns, table constraints and functions of the legacy
  * {@code hive_metastore} catalog with {@code SHOW SCHEMAS}, {@code DESCRIBE SCHEMA EXTENDED},
- * {@code SHOW TABLE EXTENDED}, {@code DESCRIBE TABLE}, {@code SHOW USER FUNCTIONS} and {@code
- * DESCRIBE FUNCTION EXTENDED}, run on a Databricks SQL warehouse. It also dumps the {@code SHOW
- * CREATE TABLE} output of the tables and views, and builds the {@code CREATE FUNCTION} statements
- * of the functions.
+ * {@code SHOW TABLES}, {@code DESCRIBE TABLE EXTENDED ... AS JSON}, {@code DESCRIBE DETAIL} for
+ * Delta tables, {@code SHOW USER FUNCTIONS} and {@code DESCRIBE FUNCTION EXTENDED}, run on a
+ * Databricks SQL warehouse. It also dumps the {@code SHOW CREATE TABLE} output of the tables whose
+ * DDL has clauses that the other files lack, or of every table and view with {@link
+ * DatabricksProperty#SHOW_CREATE_TABLE}, and builds the {@code CREATE FUNCTION} statements of the
+ * functions.
  *
  * <p>The files are described in {@link DatabricksMetadataDumpFormat}.
  */
@@ -115,6 +118,23 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
 
   private static final int DEFAULT_MAX_CONCURRENT_STATEMENTS = 8;
 
+  /** The values of {@link DatabricksProperty#SHOW_CREATE_TABLE}. */
+  enum ShowCreateTableMode {
+    NEEDED("needed"),
+    ALL("all");
+
+    private final String value;
+
+    ShowCreateTableMode(@Nonnull String value) {
+      this.value = value;
+    }
+
+    @Override
+    public String toString() {
+      return value;
+    }
+  }
+
   /** Properties of this connector, passed as {@code -D<name>=<value>}. */
   enum DatabricksProperty implements ConnectorProperty {
     MAX_CONCURRENT_STATEMENTS(
@@ -128,7 +148,19 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     HIVE_METASTORE_ONLY(
         "hive-metastore-only",
         "Whether to dump only the hive_metastore catalog and skip the Unity Catalog catalogs."
-            + " Allowed values: true, false. Default: false.");
+            + " Allowed values: true, false. Default: false."),
+    SHOW_CREATE_TABLE(
+        "show-create-table",
+        "Which hive_metastore tables get their SHOW CREATE TABLE output in "
+            + DatabricksMetadataDumpFormat.HIVE_METASTORE_DDLS_ENTRY_NAME
+            + ". "
+            + ShowCreateTableMode.NEEDED
+            + ": only the tables whose DDL has clauses that the other files lack, such as the"
+            + " generated and identity columns of Delta tables. "
+            + ShowCreateTableMode.ALL
+            + ": every table and view. Default: "
+            + ShowCreateTableMode.NEEDED
+            + ".");
 
     private final String name;
     private final String description;
@@ -168,6 +200,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     DatabricksClientFactory.requireUrl(arguments);
     DatabricksClientFactory.requireWarehouse(arguments);
     parseMaxConcurrentStatements(arguments);
+    parseShowCreateTableMode(arguments);
     if (parseHiveMetastoreOnly(arguments)
         && !DatabricksFilter.fromArguments(arguments).acceptsCatalog(HIVE_METASTORE_CATALOG)) {
       throw new MetadataDumperUsageException(
@@ -215,7 +248,8 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
       out.add(new DatabricksHiveMetastoreColumnsTask(sessionCache));
       out.add(new DatabricksHiveMetastoreViewsTask(sessionCache));
       out.add(new DatabricksHiveMetastoreTableConstraintsTask(sessionCache));
-      out.add(new DatabricksHiveMetastoreDdlsTask(sessionCache));
+      out.add(
+          new DatabricksHiveMetastoreDdlsTask(sessionCache, parseShowCreateTableMode(arguments)));
       HiveMetastoreFunctionCache functionCache = new HiveMetastoreFunctionCache(sessionCache);
       out.add(new DatabricksHiveMetastoreFunctionsTask(functionCache));
       out.add(new DatabricksHiveMetastoreFunctionDdlsTask(functionCache));
@@ -263,5 +297,29 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
         String.format(
             "Option '%s' accepts only true or false. Actual: '%s'.",
             DatabricksProperty.HIVE_METASTORE_ONLY.getName(), value));
+  }
+
+  /** Returns the value of {@link DatabricksProperty#SHOW_CREATE_TABLE}, the default if absent. */
+  @Nonnull
+  private static ShowCreateTableMode parseShowCreateTableMode(
+      @Nonnull ConnectorArguments arguments) {
+    String value = arguments.getDefinition(DatabricksProperty.SHOW_CREATE_TABLE);
+    if (value == null || value.trim().isEmpty()) {
+      return ShowCreateTableMode.NEEDED;
+    }
+
+    String normalized = value.trim().toLowerCase(Locale.ROOT);
+    for (ShowCreateTableMode mode : ShowCreateTableMode.values()) {
+      if (mode.toString().equals(normalized)) {
+        return mode;
+      }
+    }
+    throw new MetadataDumperUsageException(
+        String.format(
+            "Option '%s' accepts only %s or %s. Actual: '%s'.",
+            DatabricksProperty.SHOW_CREATE_TABLE.getName(),
+            ShowCreateTableMode.NEEDED,
+            ShowCreateTableMode.ALL,
+            value));
   }
 }

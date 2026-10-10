@@ -36,11 +36,13 @@ import static org.mockito.Mockito.when;
 
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.sql.CancelExecutionRequest;
+import com.databricks.sdk.service.sql.ColumnInfo;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ExternalLink;
 import com.databricks.sdk.service.sql.QueryTag;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.ResultManifest;
+import com.databricks.sdk.service.sql.ResultSchema;
 import com.databricks.sdk.service.sql.ServiceError;
 import com.databricks.sdk.service.sql.ServiceErrorCode;
 import com.databricks.sdk.service.sql.StatementExecutionAPI;
@@ -49,6 +51,7 @@ import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
 import java.time.Clock;
@@ -56,6 +59,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import org.junit.After;
@@ -295,6 +300,59 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
             "SQL statement stmt-denied failed in state %s (SQLSTATE: %s, errorCode: %s): %s",
             StatementState.FAILED, sqlState, ServiceErrorCode.BAD_REQUEST.name(), errorMessage),
         ex.getMessage());
+  }
+
+  @Test
+  public void sqlHelper_returnsCellsOfFirstRowByColumnName() throws Exception {
+    WorkspaceClient client = mock(WorkspaceClient.class);
+    StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
+    when(client.statementExecution()).thenReturn(stmtApi);
+    String partitionColumns = "[\"region\",\"dt\"]";
+    when(stmtApi.executeStatement(any(ExecuteStatementRequest.class)))
+        .thenReturn(
+            new StatementResponse()
+                .setStatementId("stmt-detail")
+                .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+                .setManifest(
+                    new ResultManifest()
+                        .setSchema(
+                            new ResultSchema()
+                                .setColumns(
+                                    ImmutableList.of(
+                                        new ColumnInfo().setName("format").setPosition(0L),
+                                        new ColumnInfo().setName("description").setPosition(1L),
+                                        new ColumnInfo()
+                                            .setName("partitionColumns")
+                                            .setPosition(2L)))))
+                .setResult(
+                    new ResultData()
+                        .setDataArray(
+                            ImmutableList.<Collection<String>>of(
+                                Arrays.asList("delta", null, partitionColumns),
+                                Arrays.asList("parquet", "second row", "[]")))));
+    DatabricksSqlHelper helper =
+        new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
+
+    assertEquals(
+        ImmutableMap.of("format", "delta", "partitionColumns", partitionColumns),
+        helper.executeSqlInCatalogForFirstRow(CATALOG, "DESCRIBE DETAIL t"));
+  }
+
+  @Test
+  public void sqlHelper_returnsEmptyMapWithoutFirstRow() throws Exception {
+    WorkspaceClient client = mock(WorkspaceClient.class);
+    StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
+    when(client.statementExecution()).thenReturn(stmtApi);
+    when(stmtApi.executeStatement(any(ExecuteStatementRequest.class)))
+        .thenReturn(
+            new StatementResponse()
+                .setStatementId("stmt-empty")
+                .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED)));
+    DatabricksSqlHelper helper =
+        new DatabricksSqlHelper(client, "wh-1", new DatabricksChunkDownloader(), 0L);
+
+    assertEquals(
+        ImmutableMap.of(), helper.executeSqlInCatalogForFirstRow(CATALOG, "DESCRIBE DETAIL t"));
   }
 
   @Test

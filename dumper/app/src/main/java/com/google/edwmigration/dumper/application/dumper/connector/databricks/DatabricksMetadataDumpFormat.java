@@ -116,6 +116,9 @@ interface DatabricksMetadataDumpFormat {
   /**
    * Columns of the tables files, with a row for each table and view.
    *
+   * <p>A {@code hive_metastore} table that {@code DESCRIBE TABLE} fails for has only its catalog,
+   * schema and name.
+   *
    * <ul>
    *   <li>{@code TableType}: such as {@code MANAGED}, {@code EXTERNAL} or {@code VIEW}.
    *   <li>{@code SecurableType} and {@code SecurableKind}: the Unity Catalog securable type and
@@ -126,18 +129,17 @@ interface DatabricksMetadataDumpFormat {
    *       format for a class name that Spark accepts for a built-in format, such as {@code
    *       org.apache.spark.sql.parquet}. Another class name is kept as is.
    *   <li>{@code StorageLocation}: where the data of the table is stored.
-   *   <li>{@code UpdatedAt}: empty for {@code hive_metastore}, because {@code SHOW TABLE EXTENDED}
-   *       has no update time.
+   *   <li>{@code UpdatedAt}: empty for {@code hive_metastore}, because {@code DESCRIBE TABLE} has
+   *       no update time.
    *   <li>{@code SerdeLibrary}, {@code InputFormat}, {@code OutputFormat} and {@code
    *       StorageProperties}: the Hive storage of a {@code hive_metastore} table. They describe the
    *       storage only for Hive compatible tables; for other tables, such as Delta tables, the
    *       metastore records placeholders such as {@code SequenceFileInputFormat}.
-   *   <li>{@code StorageProperties} and {@code TableProperties}: JSON objects. {@code SHOW TABLE
-   *       EXTENDED} prints them as {@code [key=value, ...]} without escaping, so for {@code
-   *       hive_metastore} an entry ends before the next {@code , key=} outside of parentheses and
-   *       brackets, and a value that contains such text is split. For Unity Catalog, {@code
-   *       TableProperties} also has the {@code view.*} properties of a view, such as the SQL
-   *       configuration when the view was created, which {@code SHOW TABLE EXTENDED} hides.
+   *   <li>{@code StorageProperties} and {@code TableProperties}: JSON objects. For {@code
+   *       hive_metastore}, {@code TableProperties} also has the protocol of a Delta table, such as
+   *       {@code delta.minWriterVersion} and the {@code delta.feature.*} table features. For Unity
+   *       Catalog, {@code TableProperties} also has the {@code view.*} properties of a view, such
+   *       as the SQL configuration when the view was created, which {@code DESCRIBE TABLE} hides.
    *   <li>{@code NumBuckets}, {@code BucketColumns} and {@code SortColumns}: the bucketing of a
    *       {@code hive_metastore} table, as in {@code CLUSTERED BY (a) SORTED BY (b) INTO 4
    *       BUCKETS}. The columns are JSON arrays of names.
@@ -178,20 +180,20 @@ interface DatabricksMetadataDumpFormat {
    * <ul>
    *   <li>{@code OrdinalPosition}: the 0-based position of the column in the table.
    *   <li>{@code DataType}: such as {@code bigint}, {@code varchar(20)} or {@code
-   *       array<struct<x:bigint,y:string>>}. For {@code hive_metastore}, {@code SHOW TABLE
-   *       EXTENDED} reports {@code CHAR} and {@code VARCHAR} types as {@code string}, so their
-   *       lengths come from {@code DESCRIBE TABLE}. A column keeps {@code string} if {@code
-   *       DESCRIBE TABLE} fails or truncates its type, as it does for a struct with many fields.
-   *   <li>{@code Comment}: for {@code hive_metastore}, from {@code DESCRIBE TABLE}, and empty if it
-   *       fails.
+   *       array<struct<x:bigint,y:string>>}. For {@code hive_metastore}, a {@code string} with a
+   *       collation other than {@code UTF8_BINARY} is written as {@code string collate
+   *       <collation>}, such as {@code string collate UTF8_LCASE}.
    *   <li>{@code PartitionIndex}: the 0-based position of the column in the partitioning, or empty
-   *       if the table isn't partitioned by the column.
+   *       if the table isn't partitioned by the column. {@code DESCRIBE TABLE} doesn't report the
+   *       partitioning of a {@code hive_metastore} Delta table, so it comes from {@code DESCRIBE
+   *       DETAIL}. If that fails, the column is empty and the DDL file has the table.
    *   <li>{@code ColumnDefault}, {@code GenerationExpression}, {@code IdentityGeneration} ({@code
    *       ALWAYS} or {@code BY DEFAULT}), {@code IdentityStart} and {@code IdentityIncrement}: the
    *       {@code DEFAULT}, {@code GENERATED ALWAYS AS} and {@code GENERATED ... AS IDENTITY}
-   *       clauses of a Unity Catalog column, from the metadata of the column in its {@code
-   *       type_json}. {@code SHOW TABLE EXTENDED} and {@code DESCRIBE TABLE} don't show them, so
-   *       for {@code hive_metastore} they are empty; the DDL files show them.
+   *       clauses of a column. For Unity Catalog, they come from the metadata of the column in its
+   *       {@code type_json}. For {@code hive_metastore}, {@code ColumnDefault} comes from {@code
+   *       DESCRIBE TABLE}, which doesn't show the other clauses, so they are empty; the DDL file
+   *       shows them.
    *   <li>{@code Mask}: a JSON object of the column mask of a Unity Catalog column, as in {@code
    *       MASK f USING COLUMNS (region)}: {@code function}, the qualified name of the mask
    *       function, and {@code usingColumns}, its other arguments. {@code usingArguments} has the
@@ -232,8 +234,8 @@ interface DatabricksMetadataDumpFormat {
    *   <li>{@code ViewQueryOutputColumns}: a JSON array of the names of the columns of the view
    *       query, which the view columns are mapped to.
    *   <li>{@code ViewSchemaMode}: such as {@code BINDING} or {@code COMPENSATION}. For {@code
-   *       hive_metastore}, the mode that {@code SHOW TABLE EXTENDED} prints, which may be a default
-   *       for a view that recorded none. For Unity Catalog, the recorded mode, or empty if the view
+   *       hive_metastore}, the mode that {@code DESCRIBE TABLE} reports, which may be a default for
+   *       a view that recorded none. For Unity Catalog, the recorded mode, or empty if the view
    *       recorded none.
    *   <li>{@code SqlPath}: the SQL path for the unqualified function names in the view text.
    * </ul>
@@ -261,11 +263,9 @@ interface DatabricksMetadataDumpFormat {
    * hive_metastore} has only the check constraints of Delta tables.
    *
    * <p>The check constraints come from the {@code delta.constraints.*} table properties and are
-   * written first. For {@code hive_metastore}, they come from the printed table properties, so an
-   * expression that contains {@code , key=} outside of parentheses is split, as in {@code
-   * TableProperties}. Unity Catalog lists tables without their primary and foreign keys, so they
-   * are read with a request for each table that has keys in information_schema, and written after
-   * the check constraints. If the information_schema of a catalog can't be read, each table of the
+   * written first. Unity Catalog lists tables without their primary and foreign keys, so they are
+   * read with a request for each table that has keys in information_schema, and written after the
+   * check constraints. If the information_schema of a catalog can't be read, each table of the
    * catalog other than a view is requested. A table whose request fails has only its check
    * constraints.
    */
@@ -329,10 +329,14 @@ interface DatabricksMetadataDumpFormat {
   }
 
   /**
-   * Columns of the DDL files, with the {@code SHOW CREATE TABLE} output of each table and view.
+   * Columns of the DDL files, with the {@code SHOW CREATE TABLE} output of tables and views.
    *
-   * <p>For {@code hive_metastore}, the DDL of a Delta table also shows the column defaults,
-   * generated columns and identity columns that the columns file leaves empty.
+   * <p>For {@code hive_metastore}, the DDL of a Delta table also shows the generated and identity
+   * columns that the columns file leaves empty. By default, the DDL file has only the tables whose
+   * DDL may have clauses that the other files lack: the Delta tables whose protocol allows
+   * generated or identity columns, and the tables that {@code DESCRIBE TABLE}, or {@code DESCRIBE
+   * DETAIL} for a Delta table, fails for. With {@code -Ddatabricks.show-create-table=all}, it has
+   * every table and view, such as to check the other files against the DDL.
    *
    * <p>Databricks rejects {@code SHOW CREATE TABLE} for some {@code hive_metastore} tables, such as
    * Hive tables with an unsupported SerDe configuration. Those tables are left out; their storage

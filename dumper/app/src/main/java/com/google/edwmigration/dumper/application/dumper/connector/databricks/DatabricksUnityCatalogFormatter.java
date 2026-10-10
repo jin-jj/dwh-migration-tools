@@ -272,8 +272,8 @@ final class DatabricksUnityCatalogFormatter {
 
   /**
    * Returns the current catalog and schema when a view was created, such as {@code main.sales},
-   * from its {@code view.catalogAndNamespace.*} properties, as {@code SHOW TABLE EXTENDED} prints
-   * them. Returns an empty string if the properties are absent or incomplete.
+   * from its {@code view.catalogAndNamespace.*} properties, as {@code DESCRIBE TABLE EXTENDED}
+   * prints them. Returns an empty string if the properties are absent or incomplete.
    */
   @Nonnull
   static String formatViewCatalogAndNamespace(@CheckForNull Map<String, String> properties) {

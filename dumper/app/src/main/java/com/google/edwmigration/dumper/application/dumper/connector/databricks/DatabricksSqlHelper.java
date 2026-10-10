@@ -21,6 +21,7 @@ import com.databricks.sdk.core.DatabricksException;
 import com.databricks.sdk.core.commons.CommonsHttpClient;
 import com.databricks.sdk.core.http.HttpClient;
 import com.databricks.sdk.service.sql.CancelExecutionRequest;
+import com.databricks.sdk.service.sql.ColumnInfo;
 import com.databricks.sdk.service.sql.Disposition;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
 import com.databricks.sdk.service.sql.ExecuteStatementRequestOnWaitTimeout;
@@ -29,13 +30,16 @@ import com.databricks.sdk.service.sql.Format;
 import com.databricks.sdk.service.sql.QueryTag;
 import com.databricks.sdk.service.sql.ResultData;
 import com.databricks.sdk.service.sql.ResultManifest;
+import com.databricks.sdk.service.sql.ResultSchema;
 import com.databricks.sdk.service.sql.ServiceError;
 import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Duration;
@@ -45,7 +49,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -127,6 +133,41 @@ final class DatabricksSqlHelper {
   @Nonnull
   CloseableIterable<List<String>> executeSqlInCatalog(@Nonnull String catalog, @Nonnull String sql)
       throws IOException {
+    return rowsOf(executeToCompletion(catalog, sql));
+  }
+
+  /**
+   * Executes a SQL statement in a catalog and returns the cells of its first row by column name,
+   * such as the output of {@code DESCRIBE DETAIL}. A null cell has no entry, and the map is empty
+   * if the statement returns no row.
+   */
+  @Nonnull
+  ImmutableMap<String, String> executeSqlInCatalogForFirstRow(
+      @Nonnull String catalog, @Nonnull String sql) throws IOException {
+    SucceededStatement statement = executeToCompletion(catalog, sql);
+    ImmutableList<String> columnNames = columnNames(statement.response.getManifest());
+    try (CloseableIterable<List<String>> rows = rowsOf(statement)) {
+      Iterator<List<String>> iterator = rows.iterator();
+      if (!iterator.hasNext()) {
+        return ImmutableMap.of();
+      }
+
+      List<String> row = iterator.next();
+      Map<String, String> cells = new LinkedHashMap<>();
+      for (int index = 0; index < columnNames.size() && index < row.size(); index++) {
+        String cell = row.get(index);
+        if (cell != null) {
+          cells.putIfAbsent(columnNames.get(index), cell);
+        }
+      }
+      return ImmutableMap.copyOf(cells);
+    }
+  }
+
+  /** Executes a SQL statement in a catalog and waits until it succeeds. */
+  @Nonnull
+  private SucceededStatement executeToCompletion(@Nonnull String catalog, @Nonnull String sql)
+      throws IOException {
     Preconditions.checkNotNull(catalog, "Catalog was null.");
     Preconditions.checkNotNull(sql, "SQL statement was null.");
     ExecuteStatementRequest request =
@@ -186,12 +227,19 @@ final class DatabricksSqlHelper {
               "SQL statement %s failed in state %s (SQLSTATE: %s, errorCode: %s): %s",
               statementId, state, sqlState, errCode, errMsg));
     }
+    return new SucceededStatement(statementId, response);
+  }
 
-    ResultData firstResult = response.getResult();
-    ResultManifest manifest = response.getManifest();
+  /** Returns the rows of a statement, fetching the chunks after the first as they are read. */
+  @Nonnull
+  private CloseableIterable<List<String>> rowsOf(@Nonnull SucceededStatement statement)
+      throws IOException {
+    ResultData firstResult = statement.response.getResult();
+    ResultManifest manifest = statement.response.getManifest();
     Long totalChunks = manifest != null ? manifest.getTotalChunkCount() : null;
 
-    ChunkRowIterator rowIterator = new ChunkRowIterator(statementId, firstResult, totalChunks);
+    ChunkRowIterator rowIterator =
+        new ChunkRowIterator(statement.statementId, firstResult, totalChunks);
     return new CloseableIterable<List<String>>() {
       @Override
       @Nonnull
@@ -204,6 +252,33 @@ final class DatabricksSqlHelper {
         rowIterator.close();
       }
     };
+  }
+
+  /** Returns the column names of a result in their order, or an empty list without a schema. */
+  @Nonnull
+  private static ImmutableList<String> columnNames(@CheckForNull ResultManifest manifest) {
+    ResultSchema schema = manifest != null ? manifest.getSchema() : null;
+    if (schema == null || schema.getColumns() == null) {
+      return ImmutableList.of();
+    }
+
+    ImmutableList.Builder<String> names = ImmutableList.builder();
+    for (ColumnInfo column : schema.getColumns()) {
+      names.add(Strings.nullToEmpty(column.getName()));
+    }
+    return names.build();
+  }
+
+  /** A statement that succeeded, with the ID that it was submitted with. */
+  private static final class SucceededStatement {
+
+    @CheckForNull final String statementId;
+    final StatementResponse response;
+
+    SucceededStatement(@CheckForNull String statementId, @Nonnull StatementResponse response) {
+      this.statementId = statementId;
+      this.response = response;
+    }
   }
 
   @CheckForNull

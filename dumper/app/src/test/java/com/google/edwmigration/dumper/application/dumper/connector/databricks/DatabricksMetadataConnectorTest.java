@@ -19,26 +19,39 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataConnector.DatabricksProperty.HIVE_METASTORE_ONLY;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataConnector.DatabricksProperty.MAX_CONCURRENT_STATEMENTS;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataConnector.DatabricksProperty.SHOW_CREATE_TABLE;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataConnector.MAX_CONCURRENT_STATEMENTS_RANGE;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.acceptAllFilter;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.mockStatements;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.succeeded;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DescribeTableJson.deltaTable;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.databricks.sdk.service.sql.StatementExecutionAPI;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultiset;
 import com.google.common.collect.ImmutableSet;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
 import com.google.edwmigration.dumper.application.dumper.ConnectorRepository;
 import com.google.edwmigration.dumper.application.dumper.MetadataDumperUsageException;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDdlTasks.DatabricksHiveMetastoreDdlsTask;
 import com.google.edwmigration.dumper.application.dumper.task.DumpMetadataTask;
 import com.google.edwmigration.dumper.application.dumper.task.FormatTask;
 import com.google.edwmigration.dumper.application.dumper.task.Task;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import org.apache.commons.csv.CSVRecord;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
@@ -70,6 +83,8 @@ public class DatabricksMetadataConnectorTest {
           DatabricksMetadataDumpFormat.HIVE_METASTORE_DDLS_ENTRY_NAME,
           DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTIONS_ENTRY_NAME,
           DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTION_DDLS_ENTRY_NAME);
+
+  @Rule public final TemporaryFolder tempFolder = new TemporaryFolder();
 
   private final DatabricksMetadataConnector connector = new DatabricksMetadataConnector();
 
@@ -172,6 +187,61 @@ public class DatabricksMetadataConnectorTest {
   }
 
   @Test
+  public void validate_acceptsShowCreateTableModesInAnyCase() throws IOException {
+    for (String value : Arrays.asList("needed", "ALL", "Needed")) {
+      connector.validate(arguments(showCreateTableDefinition(value)));
+    }
+  }
+
+  @Test
+  public void validate_rejectsUnknownShowCreateTableMode() throws IOException {
+    String value = "some";
+    ConnectorArguments arguments = arguments(showCreateTableDefinition(value));
+
+    MetadataDumperUsageException exception =
+        assertThrows(MetadataDumperUsageException.class, () -> connector.validate(arguments));
+    assertTrue(exception.getMessage().contains(SHOW_CREATE_TABLE.getName()));
+    assertTrue(exception.getMessage().contains(value));
+  }
+
+  @Test
+  public void showCreateTable_isPrefixedWithConnectorName() {
+    assertEquals(CONNECTOR_NAME + ".show-create-table", SHOW_CREATE_TABLE.getName());
+  }
+
+  @Test
+  public void addTasksTo_passesShowCreateTableModeToDdlsTask() throws Exception {
+    String schema = "legacy";
+    String ddl = "CREATE TABLE hive_metastore.legacy.plain (id INT) USING delta";
+    StatementExecutionAPI statements =
+        mockStatements(
+            DescribeTableJson.responsesFor(schema, ImmutableList.of(deltaTable(schema, "plain", 2)))
+                .put("SHOW CREATE TABLE `legacy`.`plain`", succeeded(ddl))
+                .build());
+    // The table doesn't need SHOW CREATE TABLE, so only the "all" mode writes its DDL.
+    ImmutableMap<ConnectorArguments, Integer> ddlCountsByArguments =
+        ImmutableMap.of(
+            arguments(), 0,
+            arguments(showCreateTableDefinition("needed")), 0,
+            arguments(showCreateTableDefinition("all")), 1);
+
+    for (Map.Entry<ConnectorArguments, Integer> ddlCount : ddlCountsByArguments.entrySet()) {
+      DatabricksHiveMetastoreDdlsTask task = findDdlsTask(ddlCount.getKey());
+      List<CSVRecord> records =
+          DatabricksStatementStubs.runTask(
+              tempFolder.newFile(),
+              statements,
+              acceptAllFilter(),
+              (sink, handle) -> task.doRun(null, sink, handle));
+
+      assertEquals(
+          ddlCount.getKey().getDefinition(SHOW_CREATE_TABLE),
+          (int) ddlCount.getValue(),
+          records.size());
+    }
+  }
+
+  @Test
   public void addTasksTo_addsUnityCatalogAndHiveMetastoreTasksByDefault() throws IOException {
     assertEquals(
         ImmutableMultiset.<String>builder()
@@ -230,6 +300,21 @@ public class DatabricksMetadataConnectorTest {
       }
     }
     return targetPaths.build();
+  }
+
+  private DatabricksHiveMetastoreDdlsTask findDdlsTask(ConnectorArguments arguments) {
+    List<Task<?>> tasks = new ArrayList<>();
+    connector.addTasksTo(tasks, arguments);
+    for (Task<?> task : tasks) {
+      if (task instanceof DatabricksHiveMetastoreDdlsTask) {
+        return (DatabricksHiveMetastoreDdlsTask) task;
+      }
+    }
+    throw new AssertionError("No hive_metastore DDLs task in " + tasks);
+  }
+
+  private static String showCreateTableDefinition(String value) {
+    return "-D" + SHOW_CREATE_TABLE.getName() + "=" + value;
   }
 
   private static String hiveMetastoreOnlyDefinition(String value) {

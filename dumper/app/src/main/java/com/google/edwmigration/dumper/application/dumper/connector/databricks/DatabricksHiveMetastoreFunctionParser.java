@@ -17,12 +17,14 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.common.base.CharMatcher.whitespace;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.formatCreatedTime;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -32,12 +34,23 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Parses the {@code DESCRIBE FUNCTION EXTENDED} output of Databricks {@code hive_metastore}
  * functions.
  */
 final class DatabricksHiveMetastoreFunctionParser {
+
+  private static final Logger logger =
+      LoggerFactory.getLogger(DatabricksHiveMetastoreFunctionParser.class);
+
+  /** The format of {@code java.util.Date#toString}, which Spark uses for {@code Create Time}. */
+  private static final String CREATED_TIME_PATTERN = "EEE MMM dd HH:mm:ss zzz yyyy";
+
+  private static final DateTimeFormatter CREATED_TIME_FORMATTER =
+      DateTimeFormatter.ofPattern(CREATED_TIME_PATTERN, Locale.US);
 
   /**
    * Matches {@code Key: value}. {@code DOTALL} lets the value span lines, because {@code DESCRIBE
@@ -209,6 +222,33 @@ final class DatabricksHiveMetastoreFunctionParser {
       columns.add(column.toSqlDefinition());
     }
     return "TABLE(" + String.join(", ", columns) + ")";
+  }
+
+  /**
+   * Returns a time that Spark prints with {@code java.util.Date#toString}, such as the {@code
+   * Create Time} {@code Sun Sep 27 21:03:11 UTC 2026}, as an ISO 8601 instant, such as {@code
+   * 2026-09-27T21:03:11Z}. A time in another format is logged and returned as an empty string, so
+   * that the {@code CreatedAt} column holds only instants, as for Unity Catalog.
+   *
+   * @param functionName the quoted name of the function, for the warning
+   */
+  @Nonnull
+  private static String formatCreatedTime(
+      @Nonnull String createdTime, @Nonnull String functionName) {
+    if (createdTime.isEmpty()) {
+      return "";
+    }
+
+    try {
+      return ZonedDateTime.parse(createdTime, CREATED_TIME_FORMATTER).toInstant().toString();
+    } catch (DateTimeParseException e) {
+      logger.warn(
+          "Writing {} without CreatedAt because its created time '{}' doesn't match '{}'.",
+          functionName,
+          createdTime,
+          CREATED_TIME_PATTERN);
+      return "";
+    }
   }
 
   /**

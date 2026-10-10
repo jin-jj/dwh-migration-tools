@@ -37,9 +37,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Runs one SQL statement or Unity Catalog API request per object, such as {@code SHOW TABLE
- * EXTENDED} or a table listing request for each schema, on a bounded number of threads, and passes
- * the results to a consumer in input order.
+ * Runs one SQL statement or Unity Catalog API request per object, such as {@code SHOW TABLES} or a
+ * table listing request for each schema, on a bounded number of threads, and passes the results to
+ * a consumer in input order.
  *
  * <p>The consumer runs on the calling thread, so it can write to a file without synchronization.
  * Only a few statements per thread are submitted ahead of the consumer, so a slow statement doesn't
@@ -96,7 +96,7 @@ final class ObjectStatementRunner implements AutoCloseable {
    * Runs {@code statement} for each input and passes each successful result to {@code consumer}, in
    * input order.
    *
-   * @param statementName the statement, for log messages, e.g. {@code SHOW TABLE EXTENDED}
+   * @param statementName the statement, for log messages, e.g. {@code SHOW TABLES}
    * @param describer describes an input for log messages, e.g. as a quoted schema name
    * @throws InterruptedIOException if the calling thread was interrupted
    * @throws IOException if every statement failed, or if the consumer failed
@@ -227,7 +227,7 @@ final class ObjectStatementRunner implements AutoCloseable {
       }
 
       logger.warn(
-          "{} failed for {} of {} objects; they are missing from the output.",
+          "{} failed for {} of {} objects.",
           statementName,
           failureCount,
           failureCount + successCount);
