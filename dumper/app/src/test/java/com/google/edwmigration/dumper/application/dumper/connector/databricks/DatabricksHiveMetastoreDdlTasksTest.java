@@ -17,10 +17,10 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksFilter.HIVE_METASTORE_CATALOG;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreDdlTasks.needsShowCreateTable;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreFunctionDdlFormatter.formatCreateFunction;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.parseDescribeTableJson;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTableParser.undescribedTable;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksHiveMetastoreTasks.needsShowCreateTable;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.acceptAllFilter;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.failed;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksStatementStubs.mockStatements;
@@ -453,11 +453,11 @@ public class DatabricksHiveMetastoreDdlTasksTest {
 
   private List<CSVRecord> runDdlsTask(StatementExecutionAPI statements, ShowCreateTableMode mode)
       throws Exception {
-    HiveMetastoreSessionCache sessionCache = new HiveMetastoreSessionCache();
+    HiveMetastoreSessionCache sessionCache = new HiveMetastoreSessionCache(mode);
     return runTask(
         statements,
         (sink, handle) ->
-            new DatabricksHiveMetastoreDdlsTask(sessionCache, mode).doRun(null, sink, handle));
+            new DatabricksHiveMetastoreDdlsTask(sessionCache).doRun(null, sink, handle));
   }
 
   private List<CSVRecord> runFunctionDdlsTask(

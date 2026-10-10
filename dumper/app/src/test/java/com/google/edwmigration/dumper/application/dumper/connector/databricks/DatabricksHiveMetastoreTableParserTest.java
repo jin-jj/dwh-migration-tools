@@ -345,6 +345,32 @@ public class DatabricksHiveMetastoreTableParserTest {
   }
 
   @Test
+  public void formatDataType_writesStructFieldNullabilityCommentsAndQuotedNames() {
+    ObjectNode annotated = type("struct");
+    ArrayNode annotatedFields = annotated.putArray("fields");
+    ObjectNode id = annotatedFields.addObject().put("name", "id").put("nullable", false);
+    id.put("comment", "it's the key").set("type", type("bigint"));
+    annotatedFields
+        .addObject()
+        .put("name", "note")
+        .put("nullable", true)
+        .set("type", type("string"));
+    ObjectNode quoted = type("struct");
+    ArrayNode quotedFields = quoted.putArray("fields");
+    for (String name :
+        Arrays.asList("field with space", "field:colon", "123", "back`tick", "_ok1")) {
+      quotedFields.addObject().put("name", name).put("nullable", true).set("type", type("int"));
+    }
+
+    assertEquals(
+        "struct<id:bigint not null comment 'it\\'s the key',note:string>",
+        formatDataType(annotated));
+    assertEquals(
+        "struct<`field with space`:int,`field:colon`:int,`123`:int,`back``tick`:int,_ok1:int>",
+        formatDataType(quoted));
+  }
+
+  @Test
   public void formatDataSourceFormat_writesUnityCatalogFormatNames() {
     String customSource = "com.acme.spark.CustomSource";
     ImmutableMap<String, String> formatsByProvider =

@@ -182,7 +182,10 @@ interface DatabricksMetadataDumpFormat {
    *   <li>{@code DataType}: such as {@code bigint}, {@code varchar(20)} or {@code
    *       array<struct<x:bigint,y:string>>}. For {@code hive_metastore}, a {@code string} with a
    *       collation other than {@code UTF8_BINARY} is written as {@code string collate
-   *       <collation>}, such as {@code string collate UTF8_LCASE}.
+   *       <collation>}, such as {@code string collate UTF8_LCASE}. A struct field is followed by
+   *       {@code not null} and {@code comment '...'} when they apply, as in {@code struct<id:bigint
+   *       not null comment 'key'>}, and its name is quoted with backticks if it isn't a plain
+   *       identifier.
    *   <li>{@code PartitionIndex}: the 0-based position of the column in the partitioning, or empty
    *       if the table isn't partitioned by the column. {@code DESCRIBE TABLE} doesn't report the
    *       partitioning of a {@code hive_metastore} Delta table, so it comes from {@code DESCRIBE
@@ -192,8 +195,8 @@ interface DatabricksMetadataDumpFormat {
    *       {@code DEFAULT}, {@code GENERATED ALWAYS AS} and {@code GENERATED ... AS IDENTITY}
    *       clauses of a column. For Unity Catalog, they come from the metadata of the column in its
    *       {@code type_json}. For {@code hive_metastore}, {@code ColumnDefault} comes from {@code
-   *       DESCRIBE TABLE}, which doesn't show the other clauses, so they are empty; the DDL file
-   *       shows them.
+   *       DESCRIBE TABLE}, which doesn't show the other clauses, so they come from the {@code SHOW
+   *       CREATE TABLE} output of the table. They are empty if {@code SHOW CREATE TABLE} fails.
    *   <li>{@code Mask}: a JSON object of the column mask of a Unity Catalog column, as in {@code
    *       MASK f USING COLUMNS (region)}: {@code function}, the qualified name of the mask
    *       function, and {@code usingColumns}, its other arguments. {@code usingArguments} has the
@@ -331,9 +334,9 @@ interface DatabricksMetadataDumpFormat {
   /**
    * Columns of the DDL files, with the {@code SHOW CREATE TABLE} output of tables and views.
    *
-   * <p>For {@code hive_metastore}, the DDL of a Delta table also shows the generated and identity
-   * columns that the columns file leaves empty. By default, the DDL file has only the tables whose
-   * DDL may have clauses that the other files lack: the Delta tables whose protocol allows
+   * <p>For {@code hive_metastore}, the columns file has the generation and identity clauses that
+   * only the DDL of a Delta table shows. By default, the DDL file has only the tables whose DDL may
+   * have clauses that {@code DESCRIBE TABLE} doesn't report: the Delta tables whose protocol allows
    * generated or identity columns, and the tables that {@code DESCRIBE TABLE}, or {@code DESCRIBE
    * DETAIL} for a Delta table, fails for. With {@code -Ddatabricks.show-create-table=all}, it has
    * every table and view, such as to check the other files against the DDL.

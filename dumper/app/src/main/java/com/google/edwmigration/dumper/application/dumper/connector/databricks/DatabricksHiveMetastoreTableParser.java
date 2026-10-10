@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteStringLiteral;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
@@ -104,6 +106,10 @@ final class DatabricksHiveMetastoreTableParser {
 
   /** The data source format of Delta tables, as {@link #formatDataSourceFormat} writes it. */
   private static final String DELTA_FORMAT = "DELTA";
+
+  /** Matches a struct field name that Spark writes without backticks. */
+  private static final Pattern PLAIN_FIELD_NAME_PATTERN =
+      Pattern.compile("[A-Za-z0-9_]*[A-Za-z_][A-Za-z0-9_]*");
 
   private DatabricksHiveMetastoreTableParser() {}
 
@@ -331,7 +337,10 @@ final class DatabricksHiveMetastoreTableParser {
    * Returns a column type of {@code DESCRIBE TABLE ... AS JSON}, such as {@code {"name": "decimal",
    * "precision": 10, "scale": 2}}, in the syntax of the columns files, such as {@code
    * decimal(10,2)} or {@code array<struct<x:bigint,y:string>>}. A {@code string} type with a
-   * collation other than {@code UTF8_BINARY} is written as {@code string collate <collation>}.
+   * collation other than {@code UTF8_BINARY} is written as {@code string collate <collation>}. A
+   * struct field is followed by {@code not null} and {@code comment '...'} when they apply, as in
+   * {@code struct<id:bigint not null comment 'key'>}, and its name is quoted with backticks if it
+   * isn't a plain identifier.
    */
   @Nonnull
   static String formatDataType(@Nonnull JsonNode type) {
@@ -376,12 +385,31 @@ final class DatabricksHiveMetastoreTableParser {
           if (struct.length() > "struct<".length()) {
             struct.append(',');
           }
-          struct.append(text(field, "name")).append(':').append(formatDataType(field.path("type")));
+          struct
+              .append(quoteFieldNameIfNeeded(text(field, "name")))
+              .append(':')
+              .append(formatDataType(field.path("type")));
+          if (!field.path("nullable").asBoolean(true)) {
+            struct.append(" not null");
+          }
+          String comment = text(field, "comment");
+          if (!comment.isEmpty()) {
+            struct.append(" comment ").append(quoteStringLiteral(comment));
+          }
         }
         return struct.append('>').toString();
       default:
         return TYPE_NAMES.getOrDefault(name, name);
     }
+  }
+
+  /**
+   * Returns a struct field name as Spark writes it in a type: as is if it has only letters, digits
+   * and underscores and isn't a number, and otherwise quoted with backticks.
+   */
+  @Nonnull
+  private static String quoteFieldNameIfNeeded(@Nonnull String name) {
+    return PLAIN_FIELD_NAME_PATTERN.matcher(name).matches() ? name : quoteIdentifier(name);
   }
 
   /**

@@ -72,9 +72,9 @@ import javax.annotation.Nonnull;
  * {@code SHOW TABLES}, {@code DESCRIBE TABLE EXTENDED ... AS JSON}, {@code DESCRIBE DETAIL} for
  * Delta tables, {@code SHOW USER FUNCTIONS} and {@code DESCRIBE FUNCTION EXTENDED}, run on a
  * Databricks SQL warehouse. It also dumps the {@code SHOW CREATE TABLE} output of the tables whose
- * DDL has clauses that the other files lack, or of every table and view with {@link
- * DatabricksProperty#SHOW_CREATE_TABLE}, and builds the {@code CREATE FUNCTION} statements of the
- * functions.
+ * DDL may have clauses that the other statements don't report, or of every table and view with
+ * {@link DatabricksProperty#SHOW_CREATE_TABLE}, and builds the {@code CREATE FUNCTION} statements
+ * of the functions.
  *
  * <p>The files are described in {@link DatabricksMetadataDumpFormat}.
  */
@@ -155,8 +155,8 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
             + DatabricksMetadataDumpFormat.HIVE_METASTORE_DDLS_ENTRY_NAME
             + ". "
             + ShowCreateTableMode.NEEDED
-            + ": only the tables whose DDL has clauses that the other files lack, such as the"
-            + " generated and identity columns of Delta tables. "
+            + ": only the tables whose DDL may have clauses that DESCRIBE TABLE doesn't report,"
+            + " such as the generated and identity columns of Delta tables. "
             + ShowCreateTableMode.ALL
             + ": every table and view. Default: "
             + ShowCreateTableMode.NEEDED
@@ -241,15 +241,15 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     }
 
     if (filter.acceptsCatalog(HIVE_METASTORE_CATALOG)) {
-      HiveMetastoreSessionCache sessionCache = new HiveMetastoreSessionCache();
+      HiveMetastoreSessionCache sessionCache =
+          new HiveMetastoreSessionCache(parseShowCreateTableMode(arguments));
       out.add(new DatabricksHiveMetastoreCatalogsTask(sessionCache));
       out.add(new DatabricksHiveMetastoreSchemataTask(sessionCache));
       out.add(new DatabricksHiveMetastoreTablesTask(sessionCache));
       out.add(new DatabricksHiveMetastoreColumnsTask(sessionCache));
       out.add(new DatabricksHiveMetastoreViewsTask(sessionCache));
       out.add(new DatabricksHiveMetastoreTableConstraintsTask(sessionCache));
-      out.add(
-          new DatabricksHiveMetastoreDdlsTask(sessionCache, parseShowCreateTableMode(arguments)));
+      out.add(new DatabricksHiveMetastoreDdlsTask(sessionCache));
       HiveMetastoreFunctionCache functionCache = new HiveMetastoreFunctionCache(sessionCache);
       out.add(new DatabricksHiveMetastoreFunctionsTask(functionCache));
       out.add(new DatabricksHiveMetastoreFunctionDdlsTask(functionCache));
