@@ -16,6 +16,8 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.common.base.CharMatcher.whitespace;
+
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksException;
 import com.databricks.sdk.core.commons.CommonsHttpClient;
@@ -38,9 +40,12 @@ import com.databricks.sdk.service.sql.StatementStatus;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksChunkDownloader.Sleeper;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.time.Instant;
@@ -61,6 +66,10 @@ import org.slf4j.LoggerFactory;
 /**
  * Executes SQL statements on a Databricks SQL Warehouse via the Statement Execution API using
  * {@link Disposition#EXTERNAL_LINKS} and {@link Format#JSON_ARRAY}, streaming chunks incrementally.
+ *
+ * <p>Submitting a statement, polling it and fetching its result chunks are retried by {@link
+ * DatabricksRetrier} when they fail with a transient error. A statement whose submission failed may
+ * have started, but the statements only read metadata, so running one twice is harmless.
  */
 final class DatabricksSqlHelper {
 
@@ -70,6 +79,9 @@ final class DatabricksSqlHelper {
   private static final Duration DEFAULT_STATEMENT_TIMEOUT = Duration.ofMinutes(30);
   private static final long LINK_EXPIRATION_SKEW_SECONDS = 30L;
   private static final int DEFAULT_HTTP_TIMEOUT_SECONDS = 60;
+
+  /** The length of the statement text in log messages, after which it is cut off. */
+  private static final int LOGGED_STATEMENT_LENGTH = 100;
 
   /**
    * The key and value of the query tag of the statements of the dumper. The query history records
@@ -87,6 +99,7 @@ final class DatabricksSqlHelper {
   private final DatabricksChunkDownloader chunkDownloader;
   private final long pollIntervalMs;
   private final Duration statementTimeout;
+  private final DatabricksRetrier retrier;
 
   DatabricksSqlHelper(@Nonnull WorkspaceClient workspaceClient, @Nonnull String warehouseId) {
     this(
@@ -122,12 +135,31 @@ final class DatabricksSqlHelper {
       @Nonnull DatabricksChunkDownloader chunkDownloader,
       long pollIntervalMs,
       @Nonnull Duration statementTimeout) {
+    this(
+        workspaceClient,
+        warehouseId,
+        chunkDownloader,
+        pollIntervalMs,
+        statementTimeout,
+        Thread::sleep);
+  }
+
+  /** Creates a helper whose retries wait with {@code retrySleeper}. */
+  @VisibleForTesting
+  DatabricksSqlHelper(
+      @Nonnull WorkspaceClient workspaceClient,
+      @Nonnull String warehouseId,
+      @Nonnull DatabricksChunkDownloader chunkDownloader,
+      long pollIntervalMs,
+      @Nonnull Duration statementTimeout,
+      @Nonnull Sleeper retrySleeper) {
     this.workspaceClient = Preconditions.checkNotNull(workspaceClient, "WorkspaceClient was null.");
     this.warehouseId = Preconditions.checkNotNull(warehouseId, "Warehouse ID was null.");
     this.chunkDownloader = Preconditions.checkNotNull(chunkDownloader, "ChunkDownloader was null.");
     this.pollIntervalMs = pollIntervalMs;
     this.statementTimeout =
         Preconditions.checkNotNull(statementTimeout, "StatementTimeout was null.");
+    this.retrier = new DatabricksRetrier(retrySleeper, Ticker.systemTicker());
   }
 
   @Nonnull
@@ -183,7 +215,10 @@ final class DatabricksSqlHelper {
 
     StatementResponse response;
     try {
-      response = workspaceClient.statementExecution().executeStatement(request);
+      response =
+          retrier.call(
+              "Submitting " + abbreviateStatement(sql),
+              () -> workspaceClient.statementExecution().executeStatement(request));
     } catch (DatabricksException e) {
       throw new DatabricksSqlException(
           "Databricks Statement Execution API call failed: " + e.getMessage(), e);
@@ -204,7 +239,13 @@ final class DatabricksSqlHelper {
       }
       sleepForPoll(statementId);
       try {
-        response = workspaceClient.statementExecution().getStatement(statementId);
+        response =
+            retrier.call(
+                "Polling statement " + statementId,
+                () -> workspaceClient.statementExecution().getStatement(statementId));
+      } catch (InterruptedIOException e) {
+        cancelQuietly(statementId);
+        throw e;
       } catch (DatabricksException e) {
         throw new DatabricksSqlException(
             "Failed polling statement " + statementId + ": " + e.getMessage(), e);
@@ -349,6 +390,18 @@ final class DatabricksSqlHelper {
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
   }
 
+  /**
+   * Returns a statement for log messages: on one line, and cut off after {@link
+   * #LOGGED_STATEMENT_LENGTH} characters.
+   */
+  @Nonnull
+  static String abbreviateStatement(@Nonnull String sql) {
+    String line = whitespace().trimAndCollapseFrom(sql, ' ');
+    return line.length() <= LOGGED_STATEMENT_LENGTH
+        ? line
+        : line.substring(0, LOGGED_STATEMENT_LENGTH) + "...";
+  }
+
   private final class ChunkRowIterator implements Iterator<List<String>> {
 
     @CheckForNull private final String statementId;
@@ -386,12 +439,16 @@ final class DatabricksSqlHelper {
           closed = true;
           return false;
         }
+        long chunkIndex = nextIdx.longValue();
         try {
           currentChunkData =
-              workspaceClient
-                  .statementExecution()
-                  .getStatementResultChunkN(statementId, nextIdx.longValue());
-          currentChunkIndex = nextIdx.longValue();
+              retrier.call(
+                  "Fetching chunk " + chunkIndex + " of statement " + statementId,
+                  () ->
+                      workspaceClient
+                          .statementExecution()
+                          .getStatementResultChunkN(statementId, chunkIndex));
+          currentChunkIndex = chunkIndex;
           if (currentChunkData == null) {
             closed = true;
             return false;
@@ -404,7 +461,7 @@ final class DatabricksSqlHelper {
           closed = true;
           throw new UncheckedIOException(
               new DatabricksSqlException(
-                  "Failed fetching chunk " + nextIdx + " for statement " + statementId, e));
+                  "Failed fetching chunk " + chunkIndex + " for statement " + statementId, e));
         }
       }
       return true;
@@ -459,7 +516,12 @@ final class DatabricksSqlHelper {
             chunkIdx);
         try {
           ResultData refreshed =
-              workspaceClient.statementExecution().getStatementResultChunkN(statementId, chunkIdx);
+              retrier.call(
+                  "Refreshing the links of chunk " + chunkIdx + " of statement " + statementId,
+                  () ->
+                      workspaceClient
+                          .statementExecution()
+                          .getStatementResultChunkN(statementId, chunkIdx));
           if (refreshed != null && refreshed.getExternalLinks() != null) {
             activeChunkData = refreshed;
             currentChunkData = refreshed;

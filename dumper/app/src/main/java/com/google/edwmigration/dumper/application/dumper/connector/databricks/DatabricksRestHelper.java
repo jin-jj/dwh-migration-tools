@@ -19,7 +19,6 @@ package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
 
 import com.databricks.sdk.WorkspaceClient;
-import com.databricks.sdk.core.DatabricksError;
 import com.databricks.sdk.core.http.Request;
 import com.databricks.sdk.service.catalog.CatalogInfo;
 import com.databricks.sdk.service.catalog.FunctionInfo;
@@ -45,24 +44,20 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
+import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.RateLimiter;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksChunkDownloader.Sleeper;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRetrier.Call;
 import java.io.IOException;
-import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.ThreadLocalRandom;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.concurrent.ThreadSafe;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Reads Unity Catalog metadata, the query history and the workspace ID with the Databricks REST
@@ -70,16 +65,13 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Databricks limits the rate of requests to a workspace, so each request waits for a permit of a
  * rate limiter that the tasks share. The SDK retries a throttled request a few times; if it still
- * fails, the request is retried here, after a backoff with jitter so that the requests that were
- * throttled together don't retry together.
+ * fails, or if it fails with another transient error, {@link DatabricksRetrier} retries it.
  *
  * <p>A Unity Catalog list request asks for the page size that the server configures, as the API
  * reference recommends, and the page tokens are followed to the last page.
  */
 @ThreadSafe
 final class DatabricksRestHelper {
-
-  private static final Logger logger = LoggerFactory.getLogger(DatabricksRestHelper.class);
 
   /**
    * The rate of requests. Databricks doesn't publish the rate limits of the Unity Catalog
@@ -106,16 +98,6 @@ final class DatabricksRestHelper {
   /** The response header that has the ID of the workspace. */
   static final String WORKSPACE_ID_HEADER = "X-Databricks-Org-Id";
 
-  /** The attempts of a request that keeps failing with a retryable status. */
-  static final int MAX_ATTEMPTS = 5;
-
-  static final long INITIAL_BACKOFF_MILLIS = 1_000L;
-
-  static final long MAX_BACKOFF_MILLIS = 60_000L;
-
-  /** The HTTP statuses of a request that may succeed later: too many requests and unavailable. */
-  private static final ImmutableSet<Integer> RETRYABLE_STATUS_CODES = ImmutableSet.of(429, 503);
-
   /** Receives the items of one page, such as the queries of a page of the query history. */
   interface PageConsumer<T> {
 
@@ -134,13 +116,6 @@ final class DatabricksRestHelper {
     private String workspaceId;
 
     public WorkspaceIdResponse() {}
-  }
-
-  /** Sends one request, and returns its response, which is null if the response body is empty. */
-  private interface Call<T> {
-
-    @CheckForNull
-    T call();
   }
 
   /**
@@ -167,7 +142,7 @@ final class DatabricksRestHelper {
 
   private final WorkspaceClient client;
   private final RateLimiter rateLimiter;
-  private final Sleeper sleeper;
+  private final DatabricksRetrier retrier;
 
   DatabricksRestHelper(@Nonnull WorkspaceClient client) {
     this(client, DEFAULT_REQUESTS_PER_SECOND, Thread::sleep);
@@ -178,7 +153,7 @@ final class DatabricksRestHelper {
       @Nonnull WorkspaceClient client, double requestsPerSecond, @Nonnull Sleeper sleeper) {
     this.client = Preconditions.checkNotNull(client, "WorkspaceClient was null.");
     this.rateLimiter = RateLimiter.create(requestsPerSecond);
-    this.sleeper = Preconditions.checkNotNull(sleeper, "Sleeper was null.");
+    this.retrier = new DatabricksRetrier(sleeper, Ticker.systemTicker());
   }
 
   /** Lists the catalogs, including those that are visible only with the BROWSE privilege. */
@@ -393,74 +368,29 @@ final class DatabricksRestHelper {
     }
   }
 
+  /**
+   * Sends a request, which waits for a permit of the rate limiter at each attempt, and returns its
+   * response, which must not be empty.
+   */
   @Nonnull
   private <T> T callWithRetry(@Nonnull String description, @Nonnull Call<T> call)
       throws IOException {
-    for (int attempt = 1; ; attempt++) {
-      rateLimiter.acquire();
-      T response;
-      try {
-        response = call.call();
-      } catch (RuntimeException e) {
-        if (attempt >= MAX_ATTEMPTS || !isRetryable(e)) {
-          throw new IOException(description + " failed: " + e.getMessage(), e);
-        }
-
-        long backoffMillis = backoffMillis(attempt);
-        logger.warn(
-            "{} failed on attempt {} of {}, retrying in {} ms: {}",
-            description,
-            attempt,
-            MAX_ATTEMPTS,
-            backoffMillis,
-            e.getMessage());
-        sleep(description, backoffMillis);
-        continue;
-      }
-
-      if (response == null) {
-        throw new IOException(description + " failed: Databricks returned an empty response.");
-      }
-      return response;
-    }
-  }
-
-  /** Returns whether the failure, or one of its causes, has a retryable HTTP status. */
-  static boolean isRetryable(@Nonnull Throwable failure) {
-    for (Throwable cause : Throwables.getCausalChain(failure)) {
-      if (cause instanceof DatabricksError
-          && RETRYABLE_STATUS_CODES.contains(((DatabricksError) cause).getStatusCode())) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Returns the backoff before the retry after a 1-based attempt: a random time between half of and
-   * the whole of a ceiling that starts at {@link #INITIAL_BACKOFF_MILLIS} and doubles with each
-   * attempt, up to {@link #MAX_BACKOFF_MILLIS}.
-   */
-  static long backoffMillis(int attempt) {
-    Preconditions.checkArgument(attempt >= 1, "Attempt must be at least 1, but was %s.", attempt);
-    long ceiling = INITIAL_BACKOFF_MILLIS;
-    for (int doubling = 1; doubling < attempt && ceiling < MAX_BACKOFF_MILLIS; doubling++) {
-      ceiling *= 2;
-    }
-
-    long half = Math.min(ceiling, MAX_BACKOFF_MILLIS) / 2;
-    return half + ThreadLocalRandom.current().nextLong(half + 1);
-  }
-
-  private void sleep(@Nonnull String description, long millis) throws InterruptedIOException {
+    T response;
     try {
-      sleeper.sleep(millis);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      InterruptedIOException interrupted =
-          new InterruptedIOException(description + " was interrupted while waiting to retry.");
-      interrupted.initCause(e);
-      throw interrupted;
+      response =
+          retrier.call(
+              description,
+              () -> {
+                rateLimiter.acquire();
+                return call.call();
+              });
+    } catch (RuntimeException e) {
+      throw new IOException(description + " failed: " + e.getMessage(), e);
     }
+
+    if (response == null) {
+      throw new IOException(description + " failed: Databricks returned an empty response.");
+    }
+    return response;
   }
 }

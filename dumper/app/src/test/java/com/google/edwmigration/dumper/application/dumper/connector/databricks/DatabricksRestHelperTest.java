@@ -24,12 +24,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.CURRENT_USER_PATH;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.INITIAL_BACKOFF_MILLIS;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.MAX_ATTEMPTS;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.MAX_BACKOFF_MILLIS;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.WORKSPACE_ID_HEADER;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.backoffMillis;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestHelper.isRetryable;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.CATALOGS_PATH;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.FUNCTIONS_PATH;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.QUERY_HISTORY_PATH;
@@ -40,6 +35,9 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.newWorkspaceClient;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.okModel;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.throttled;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRetrier.INITIAL_BACKOFF_MILLIS;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRetrier.MAX_ATTEMPTS;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRetrier.isRetryable;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -82,9 +80,6 @@ public class DatabricksRestHelperTest {
   private static final String SCHEMA = "sales";
   private static final String TABLE = "orders";
   private static final String TABLE_PATH = TABLES_PATH + "/main.sales.orders";
-
-  /** The backoffs sampled per attempt, because a backoff is random. */
-  private static final int BACKOFF_SAMPLES = 100;
 
   private static WireMockServer server;
 
@@ -256,6 +251,32 @@ public class DatabricksRestHelperTest {
   }
 
   @Test
+  public void listCatalogs_retriesAnInternalError() throws Exception {
+    server.stubFor(
+        get(urlPathEqualTo(CATALOGS_PATH))
+            .willReturn(error(500, "INTERNAL_ERROR", "The request failed.")));
+    DatabricksRestHelper restHelper =
+        newRestHelper(
+            millis -> {
+              sleeps.add(millis);
+              server.stubFor(
+                  get(urlPathEqualTo(CATALOGS_PATH))
+                      .willReturn(
+                          okModel(
+                              new ListCatalogsResponse()
+                                  .setCatalogs(
+                                      ImmutableList.of(new CatalogInfo().setName(CATALOG))))));
+            });
+
+    ImmutableList<CatalogInfo> catalogs = restHelper.listCatalogs();
+
+    assertEquals(CATALOG, getOnlyElement(catalogs).getName());
+    assertEquals(1, sleeps.size());
+    // The SDK doesn't retry an HTTP 500 itself, so each attempt sent one request.
+    server.verify(2, getRequestedFor(urlPathEqualTo(CATALOGS_PATH)));
+  }
+
+  @Test
   public void listCatalogs_failsWhenTheLastAttemptIsThrottled() {
     server.stubFor(get(urlPathEqualTo(CATALOGS_PATH)).willReturn(throttled()));
     DatabricksRestHelper restHelper = newRestHelper();
@@ -368,36 +389,6 @@ public class DatabricksRestHelperTest {
           ImmutableSet.of("FINISHED", "FAILED", "CANCELED"),
           ImmutableSet.copyOf(request.queryParameter("filter_by.statuses").values()));
       assertEquals("true", request.queryParameter("include_metrics").firstValue());
-    }
-  }
-
-  @Test
-  public void backoffMillis_isBetweenHalfAndAllOfACeilingThatDoubles() {
-    long ceiling = INITIAL_BACKOFF_MILLIS;
-    for (int attempt = 1; attempt < MAX_ATTEMPTS; attempt++) {
-      assertBackoffsBetween(attempt, ceiling / 2, ceiling);
-      ceiling = Math.min(2 * ceiling, MAX_BACKOFF_MILLIS);
-    }
-  }
-
-  @Test
-  public void backoffMillis_doesNotExceedTheMaximum() {
-    assertBackoffsBetween(Integer.MAX_VALUE, MAX_BACKOFF_MILLIS / 2, MAX_BACKOFF_MILLIS);
-  }
-
-  @Test
-  public void backoffMillis_rejectsAnAttemptBeforeTheFirst() {
-    assertThrows(IllegalArgumentException.class, () -> backoffMillis(0));
-  }
-
-  private static void assertBackoffsBetween(int attempt, long minMillis, long maxMillis) {
-    for (int sample = 0; sample < BACKOFF_SAMPLES; sample++) {
-      long backoff = backoffMillis(attempt);
-      assertTrue(
-          String.format(
-              "Backoff %d of attempt %d is not in [%d, %d].",
-              backoff, attempt, minMillis, maxMillis),
-          backoff >= minMillis && backoff <= maxMillis);
     }
   }
 

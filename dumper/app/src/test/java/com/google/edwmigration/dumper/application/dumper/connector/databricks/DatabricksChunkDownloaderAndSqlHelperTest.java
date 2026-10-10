@@ -20,10 +20,17 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.request;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.error;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.newWorkspaceClient;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksRestStubs.okModel;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.abbreviateStatement;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -35,6 +42,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.databricks.sdk.WorkspaceClient;
+import com.databricks.sdk.core.DatabricksError;
 import com.databricks.sdk.service.sql.CancelExecutionRequest;
 import com.databricks.sdk.service.sql.ColumnInfo;
 import com.databricks.sdk.service.sql.ExecuteStatementRequest;
@@ -50,10 +58,13 @@ import com.databricks.sdk.service.sql.StatementResponse;
 import com.databricks.sdk.service.sql.StatementState;
 import com.databricks.sdk.service.sql.StatementStatus;
 import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -74,6 +85,8 @@ import org.mockito.ArgumentCaptor;
 public class DatabricksChunkDownloaderAndSqlHelperTest {
 
   private static final String CATALOG = "hive_metastore";
+
+  private static final String STATEMENTS_PATH = "/api/2.0/sql/statements";
 
   private WireMockServer wireMock;
 
@@ -435,6 +448,132 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
   }
 
   @Test
+  public void sqlHelper_resubmitsAStatementWhoseSubmissionFailsWithAnInternalError()
+      throws Exception {
+    stubFailureThenSuccess(
+        "POST", STATEMENTS_PATH, internalError(), okModel(succeeded("stmt-1", "first_schema")));
+    List<Long> sleeps = new ArrayList<>();
+
+    ImmutableList<List<String>> rows = readRows(newSqlHelper(sleeps), "SHOW SCHEMAS");
+
+    assertEquals(ImmutableList.of(ImmutableList.of("first_schema")), rows);
+    assertEquals(1, sleeps.size());
+    wireMock.verify(2, postRequestedFor(urlPathEqualTo(STATEMENTS_PATH)));
+  }
+
+  @Test
+  public void sqlHelper_pollsAgainWhenPollingFailsWithAnInternalError() throws Exception {
+    String statementId = "stmt-2";
+    String statementPath = STATEMENTS_PATH + "/" + statementId;
+    wireMock.stubFor(
+        post(urlPathEqualTo(STATEMENTS_PATH))
+            .willReturn(
+                okModel(
+                    new StatementResponse()
+                        .setStatementId(statementId)
+                        .setStatus(new StatementStatus().setState(StatementState.PENDING)))));
+    stubFailureThenSuccess(
+        "GET", statementPath, internalError(), okModel(succeeded(statementId, "first_schema")));
+    List<Long> sleeps = new ArrayList<>();
+
+    ImmutableList<List<String>> rows = readRows(newSqlHelper(sleeps), "SHOW SCHEMAS");
+
+    assertEquals(ImmutableList.of(ImmutableList.of("first_schema")), rows);
+    assertEquals(1, sleeps.size());
+    // The SDK doesn't retry this HTTP 500 itself, so each attempt sent one request.
+    wireMock.verify(2, getRequestedFor(urlPathEqualTo(statementPath)));
+  }
+
+  @Test
+  public void sqlHelper_fetchesAChunkAgainWhenFetchingFailsWithAnInternalError() throws Exception {
+    String statementId = "stmt-3";
+    String chunkPath = STATEMENTS_PATH + "/" + statementId + "/result/chunks/1";
+    StatementResponse firstChunk = succeeded(statementId, "first_schema");
+    firstChunk.getManifest().setTotalChunkCount(2L);
+    firstChunk.getResult().setNextChunkIndex(1L);
+    wireMock.stubFor(post(urlPathEqualTo(STATEMENTS_PATH)).willReturn(okModel(firstChunk)));
+    stubFailureThenSuccess(
+        "GET",
+        chunkPath,
+        internalError(),
+        okModel(new ResultData().setChunkIndex(1L).setDataArray(singleCellRows("second_schema"))));
+    List<Long> sleeps = new ArrayList<>();
+
+    ImmutableList<List<String>> rows = readRows(newSqlHelper(sleeps), "SHOW SCHEMAS");
+
+    assertEquals(
+        ImmutableList.of(ImmutableList.of("first_schema"), ImmutableList.of("second_schema")),
+        rows);
+    assertEquals(1, sleeps.size());
+    wireMock.verify(2, getRequestedFor(urlPathEqualTo(chunkPath)));
+  }
+
+  @Test
+  public void sqlHelper_cancelsStatementWhenInterruptedWhileWaitingToPollAgain() {
+    WorkspaceClient client = mock(WorkspaceClient.class);
+    StatementExecutionAPI stmtApi = mock(StatementExecutionAPI.class);
+    when(client.statementExecution()).thenReturn(stmtApi);
+    String statementId = "stmt-interrupted";
+    when(stmtApi.executeStatement(any(ExecuteStatementRequest.class)))
+        .thenReturn(
+            new StatementResponse()
+                .setStatementId(statementId)
+                .setStatus(new StatementStatus().setState(StatementState.RUNNING)));
+    when(stmtApi.getStatement(statementId))
+        .thenThrow(new DatabricksError("INTERNAL_ERROR", "The request failed.", 500));
+    DatabricksSqlHelper helper =
+        new DatabricksSqlHelper(
+            client,
+            "wh-1",
+            new DatabricksChunkDownloader(),
+            0L,
+            Duration.ofMinutes(1),
+            millis -> {
+              throw new InterruptedException("Interrupted by the test.");
+            });
+
+    assertThrows(
+        InterruptedIOException.class, () -> helper.executeSqlInCatalog(CATALOG, "SELECT 1"));
+
+    assertTrue(Thread.interrupted());
+    ArgumentCaptor<CancelExecutionRequest> cancel =
+        ArgumentCaptor.forClass(CancelExecutionRequest.class);
+    verify(stmtApi).cancelExecution(cancel.capture());
+    assertEquals(statementId, cancel.getValue().getStatementId());
+  }
+
+  @Test
+  public void sqlHelper_doesNotResubmitARejectedStatement() {
+    wireMock.stubFor(
+        post(urlPathEqualTo(STATEMENTS_PATH))
+            .willReturn(error(400, "INVALID_PARAMETER_VALUE", "No such warehouse.")));
+    List<Long> sleeps = new ArrayList<>();
+    DatabricksSqlHelper helper = newSqlHelper(sleeps);
+
+    DatabricksSqlException thrown =
+        assertThrows(DatabricksSqlException.class, () -> readRows(helper, "SHOW SCHEMAS"));
+
+    assertTrue(thrown.getMessage(), thrown.getMessage().contains("No such warehouse."));
+    assertEquals(ImmutableList.of(), sleeps);
+    wireMock.verify(1, postRequestedFor(urlPathEqualTo(STATEMENTS_PATH)));
+  }
+
+  @Test
+  public void abbreviateStatement_putsTheStatementOnOneLineAndCutsItOff() {
+    String longStatement = "SELECT\n  " + Strings.repeat("column_name,\n  ", 20) + "id\nFROM t";
+    String longLine = "SELECT " + Strings.repeat("column_name, ", 20) + "id FROM t";
+
+    String abbreviated = abbreviateStatement(longStatement);
+
+    assertEquals(
+        "DESCRIBE TABLE EXTENDED `db`.`t` AS JSON",
+        abbreviateStatement("  DESCRIBE TABLE EXTENDED\n  `db`.`t`\tAS JSON\n"));
+    assertTrue(abbreviated, abbreviated.endsWith("..."));
+    String kept = abbreviated.substring(0, abbreviated.length() - "...".length());
+    assertTrue(abbreviated, longLine.startsWith(kept) && kept.length() < longLine.length());
+  }
+
+  @Test
   public void quoteIdentifier_doublesBackticks() {
     assertEquals("`legacy`", DatabricksSqlHelper.quoteIdentifier("legacy"));
     assertEquals("`odd``name`", DatabricksSqlHelper.quoteIdentifier("odd`name"));
@@ -444,5 +583,65 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
   public void quoteStringLiteral_escapesBackslashesAndSingleQuotes() {
     assertEquals("'plain'", DatabricksSqlHelper.quoteStringLiteral("plain"));
     assertEquals("'it\\'s C:\\\\tmp'", DatabricksSqlHelper.quoteStringLiteral("it's C:\\tmp"));
+  }
+
+  /** Returns a helper that sends its requests to the WireMock server, and records its retries. */
+  private DatabricksSqlHelper newSqlHelper(List<Long> sleeps) {
+    return new DatabricksSqlHelper(
+        newWorkspaceClient(wireMock.baseUrl()),
+        "wh-1",
+        new DatabricksChunkDownloader(),
+        0L,
+        Duration.ofMinutes(1),
+        sleeps::add);
+  }
+
+  /** Makes the first request to a path fail with {@code failure}, and the next ones succeed. */
+  private void stubFailureThenSuccess(
+      String method,
+      String path,
+      ResponseDefinitionBuilder failure,
+      ResponseDefinitionBuilder success) {
+    String failedOnce = "failed once";
+    wireMock.stubFor(
+        request(method, urlPathEqualTo(path))
+            .inScenario(path)
+            .whenScenarioStateIs(Scenario.STARTED)
+            .willReturn(failure)
+            .willSetStateTo(failedOnce));
+    wireMock.stubFor(
+        request(method, urlPathEqualTo(path))
+            .inScenario(path)
+            .whenScenarioStateIs(failedOnce)
+            .willReturn(success));
+  }
+
+  /** Returns the HTTP 500 that Databricks sent during an outage. */
+  private static ResponseDefinitionBuilder internalError() {
+    return error(500, "INTERNAL_ERROR", "The request failed due to an unexpected condition.");
+  }
+
+  /** Returns a succeeded statement whose first chunk has one row with one cell. */
+  private static StatementResponse succeeded(String statementId, String cell) {
+    return new StatementResponse()
+        .setStatementId(statementId)
+        .setStatus(new StatementStatus().setState(StatementState.SUCCEEDED))
+        .setManifest(new ResultManifest().setTotalChunkCount(1L))
+        .setResult(new ResultData().setChunkIndex(0L).setDataArray(singleCellRows(cell)));
+  }
+
+  private static Collection<Collection<String>> singleCellRows(String cell) {
+    return ImmutableList.<Collection<String>>of(ImmutableList.of(cell));
+  }
+
+  private static ImmutableList<List<String>> readRows(DatabricksSqlHelper helper, String sql)
+      throws IOException {
+    ImmutableList.Builder<List<String>> rows = ImmutableList.builder();
+    try (CloseableIterable<List<String>> iterable = helper.executeSqlInCatalog(CATALOG, sql)) {
+      for (List<String> row : iterable) {
+        rows.add(row);
+      }
+    }
+    return rows.build();
   }
 }
