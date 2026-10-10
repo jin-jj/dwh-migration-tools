@@ -180,12 +180,13 @@ interface DatabricksMetadataDumpFormat {
    * <ul>
    *   <li>{@code OrdinalPosition}: the 0-based position of the column in the table.
    *   <li>{@code DataType}: such as {@code bigint}, {@code varchar(20)} or {@code
-   *       array<struct<x:bigint,y:string>>}. For {@code hive_metastore}, a {@code string} with a
-   *       collation other than {@code UTF8_BINARY} is written as {@code string collate
-   *       <collation>}, such as {@code string collate UTF8_LCASE}. A struct field is followed by
-   *       {@code not null} and {@code comment '...'} when they apply, as in {@code struct<id:bigint
-   *       not null comment 'key'>}, and its name is quoted with backticks if it isn't a plain
-   *       identifier.
+   *       array<struct<x:bigint,y:string>>}. A {@code string} with a collation other than {@code
+   *       UTF8_BINARY} is written as {@code string collate <collation>}, such as {@code string
+   *       collate UTF8_LCASE}. A struct field is followed by {@code not null} and {@code comment
+   *       '...'} when they apply, as in {@code struct<id:bigint not null comment 'key'>}, and its
+   *       name is quoted with backticks if it isn't a plain identifier. For Unity Catalog, a
+   *       struct, array or map type is written from {@code type_json}, because {@code type_text}
+   *       drops these; other types are {@code type_text}.
    *   <li>{@code PartitionIndex}: the 0-based position of the column in the partitioning, or empty
    *       if the table isn't partitioned by the column. {@code DESCRIBE TABLE} doesn't report the
    *       partitioning of a {@code hive_metastore} Delta table, so it comes from {@code DESCRIBE

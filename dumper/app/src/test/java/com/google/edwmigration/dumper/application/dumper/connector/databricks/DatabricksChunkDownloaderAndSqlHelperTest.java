@@ -580,6 +580,17 @@ public class DatabricksChunkDownloaderAndSqlHelperTest {
   }
 
   @Test
+  public void quoteIdentifierIfNeeded_quotesOnlyIdentifiersThatAreNotPlainWords() {
+    assertEquals("sales_2024", DatabricksSqlHelper.quoteIdentifierIfNeeded("sales_2024"));
+    assertEquals("_1", DatabricksSqlHelper.quoteIdentifierIfNeeded("_1"));
+    assertEquals("`2024`", DatabricksSqlHelper.quoteIdentifierIfNeeded("2024"));
+    assertEquals("`my table`", DatabricksSqlHelper.quoteIdentifierIfNeeded("my table"));
+    assertEquals("`a-b`", DatabricksSqlHelper.quoteIdentifierIfNeeded("a-b"));
+    assertEquals("`odd``name`", DatabricksSqlHelper.quoteIdentifierIfNeeded("odd`name"));
+    assertEquals("``", DatabricksSqlHelper.quoteIdentifierIfNeeded(""));
+  }
+
+  @Test
   public void quoteStringLiteral_escapesBackslashesAndSingleQuotes() {
     assertEquals("'plain'", DatabricksSqlHelper.quoteStringLiteral("plain"));
     assertEquals("'it\\'s C:\\\\tmp'", DatabricksSqlHelper.quoteStringLiteral("it's C:\\tmp"));

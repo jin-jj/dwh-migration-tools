@@ -17,6 +17,8 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksJson.toJsonOrEmpty;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifierIfNeeded;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteStringLiteral;
 
 import com.databricks.sdk.service.catalog.ColumnInfo;
 import com.databricks.sdk.service.catalog.ColumnMask;
@@ -46,7 +48,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
-import java.util.regex.Pattern;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
@@ -78,14 +79,26 @@ final class DatabricksUnityCatalogFormatter {
   private static final String VIEW_QUERY_OUTPUT_COLUMN_KEY_PREFIX = "view.query.out.col.";
   private static final String VIEW_SCHEMA_MODE_KEY = "view.schemaMode";
 
-  /** A name part that Spark prints without backticks, unless it has only digits. */
-  private static final Pattern PLAIN_NAME_PART_PATTERN = Pattern.compile("[a-zA-Z0-9_]+");
-
-  private static final Pattern DIGITS_PATTERN = Pattern.compile("[0-9]+");
-
   private static final String SQL_LANGUAGE = "SQL";
 
   private static final ObjectReader TYPE_JSON_READER = new ObjectMapper().reader();
+
+  /** The metadata key of the comment of a struct field in {@code type_json}. */
+  private static final String COMMENT_KEY = "comment";
+
+  /**
+   * The metadata key of the collations of the strings in the type of a field in {@code type_json},
+   * by their path in the field, such as {@code tags.element} for {@code array<string collate
+   * UTF8_LCASE>}.
+   */
+  private static final String COLLATIONS_KEY = "__COLLATIONS";
+
+  /** The collation that a string has unless another is given, which types don't write. */
+  private static final String DEFAULT_COLLATION = "UTF8_BINARY";
+
+  /** The names of the {@code type_json} types that {@code type_text} writes differently. */
+  private static final ImmutableMap<String, String> TYPE_TEXT_NAMES =
+      ImmutableMap.of("integer", "int", "long", "bigint", "short", "smallint", "byte", "tinyint");
 
   private DatabricksUnityCatalogFormatter() {}
 
@@ -190,15 +203,121 @@ final class DatabricksUnityCatalogFormatter {
 
   @Nonnull
   private static JsonNode readColumnMetadata(@CheckForNull String typeJson) {
+    return readTypeJson(typeJson).path("metadata");
+  }
+
+  /** Returns the {@code type_json} of a column, or a missing node if it can't be parsed. */
+  @Nonnull
+  private static JsonNode readTypeJson(@CheckForNull String typeJson) {
     if (Strings.isNullOrEmpty(typeJson)) {
       return MissingNode.getInstance();
     }
 
     try {
-      return TYPE_JSON_READER.readTree(typeJson).path("metadata");
+      return TYPE_JSON_READER.readTree(typeJson);
     } catch (IOException e) {
       return MissingNode.getInstance();
     }
+  }
+
+  /**
+   * Returns the type of a column in the syntax of the columns files. A struct, array or map type is
+   * written from the {@code type_json} of the column, because {@code type_text} drops the {@code
+   * not null} and comments of struct fields and doesn't quote field names, as in {@code
+   * struct<id:bigint not null comment 'key',`a-b`:int>}. That is the syntax of the {@code
+   * hive_metastore} types. Other types, and types that {@code type_json} doesn't describe in a
+   * known way, are written as {@code type_text}.
+   */
+  @Nonnull
+  static String formatDataType(@CheckForNull String typeText, @CheckForNull String typeJson) {
+    JsonNode column = readTypeJson(typeJson);
+    JsonNode type = column.path("type");
+    if (type.isObject()) {
+      String formattedType =
+          formatType(
+              type, column.path("name").asText(), column.path("metadata").path(COLLATIONS_KEY));
+      if (formattedType != null) {
+        return formattedType;
+      }
+    }
+    return Strings.nullToEmpty(typeText);
+  }
+
+  /**
+   * Returns a type of {@code type_json}, or null if the type isn't known.
+   *
+   * @param path the path of the type in the nearest field, such as {@code tags.element}
+   * @param collations the collations of the strings in the type of the nearest field, by path
+   */
+  @CheckForNull
+  private static String formatType(
+      @Nonnull JsonNode type, @Nonnull String path, @Nonnull JsonNode collations) {
+    if (type.isTextual()) {
+      return formatPrimitiveType(type.asText(), collations.path(path).asText(""));
+    }
+
+    switch (type.path("type").asText()) {
+      case "struct":
+        return formatStructType(type);
+      case "array":
+        String elementType = formatType(type.path("elementType"), path + ".element", collations);
+        return elementType == null ? null : "array<" + elementType + ">";
+      case "map":
+        String keyType = formatType(type.path("keyType"), path + ".key", collations);
+        String valueType = formatType(type.path("valueType"), path + ".value", collations);
+        return keyType == null || valueType == null
+            ? null
+            : "map<" + keyType + "," + valueType + ">";
+      default:
+        return null;
+    }
+  }
+
+  @CheckForNull
+  private static String formatStructType(@Nonnull JsonNode type) {
+    StringBuilder struct = new StringBuilder("struct<");
+    for (JsonNode field : type.path("fields")) {
+      String name = field.path("name").asText();
+      JsonNode metadata = field.path("metadata");
+      String fieldType = formatType(field.path("type"), name, metadata.path(COLLATIONS_KEY));
+      if (fieldType == null) {
+        return null;
+      }
+
+      if (struct.length() > "struct<".length()) {
+        struct.append(',');
+      }
+      struct.append(quoteIdentifierIfNeeded(name)).append(':').append(fieldType);
+      if (!field.path("nullable").asBoolean(true)) {
+        struct.append(" not null");
+      }
+
+      String comment = metadata.path(COMMENT_KEY).asText("");
+      if (!comment.isEmpty()) {
+        struct.append(" comment ").append(quoteStringLiteral(comment));
+      }
+    }
+    return struct.append('>').toString();
+  }
+
+  /**
+   * Returns a primitive type of {@code type_json}, such as {@code integer} or {@code
+   * decimal(10,2)}, as {@code type_text} writes it, such as {@code int}. A string with a collation
+   * other than {@link #DEFAULT_COLLATION}, such as {@code spark.UTF8_LCASE}, is written as {@code
+   * string collate UTF8_LCASE}.
+   */
+  @Nonnull
+  private static String formatPrimitiveType(@Nonnull String typeName, @Nonnull String collation) {
+    // The collation is qualified by its provider, such as spark or icu.
+    String collationName = collation.substring(collation.indexOf('.') + 1);
+    if (typeName.equals("string")
+        && !collationName.isEmpty()
+        && !collationName.equalsIgnoreCase(DEFAULT_COLLATION)) {
+      return "string collate " + collationName;
+    }
+
+    String typeTextName = TYPE_TEXT_NAMES.get(typeName);
+    return typeTextName == null ? typeName : typeTextName;
   }
 
   @Nonnull
@@ -283,7 +402,7 @@ final class DatabricksUnityCatalogFormatter {
             properties,
             VIEW_CATALOG_AND_NAMESPACE_PARTS_KEY,
             VIEW_CATALOG_AND_NAMESPACE_PART_KEY_PREFIX)) {
-      quotedParts.add(quoteIfNeeded(part));
+      quotedParts.add(quoteIdentifierIfNeeded(part));
     }
     return String.join(".", quotedParts);
   }
@@ -337,19 +456,6 @@ final class DatabricksUnityCatalogFormatter {
       elements.add(element);
     }
     return elements.build();
-  }
-
-  /**
-   * Returns a name part as Spark prints it in a qualified name: unchanged if it has only letters,
-   * digits and underscores and isn't a number, or else in backticks.
-   */
-  @Nonnull
-  static String quoteIfNeeded(@Nonnull String part) {
-    if (PLAIN_NAME_PART_PATTERN.matcher(part).matches()
-        && !DIGITS_PATTERN.matcher(part).matches()) {
-      return part;
-    }
-    return "`" + part.replace("`", "``") + "`";
   }
 
   /** Returns the parameters of a function, or the columns of a table function, in order. */

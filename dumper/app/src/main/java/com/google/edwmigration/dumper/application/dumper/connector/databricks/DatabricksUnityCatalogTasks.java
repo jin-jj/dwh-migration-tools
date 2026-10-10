@@ -25,6 +25,7 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteStringLiteral;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogFormatter.copyWithoutNulls;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogFormatter.formatBoolean;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogFormatter.formatDataType;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogFormatter.formatEnum;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogFormatter.formatForeignKeyDetails;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksUnityCatalogFormatter.formatFunctionDataType;
@@ -482,7 +483,7 @@ final class DatabricksUnityCatalogTasks {
                     ? String.valueOf(index)
                     : String.valueOf(column.getPosition()),
                 column.getName(),
-                column.getTypeText(),
+                formatDataType(column.getTypeText(), column.getTypeJson()),
                 formatNullable(column.getNullable()),
                 column.getComment(),
                 formatNumber(column.getPartitionIndex()),

@@ -58,6 +58,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.regex.Pattern;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
@@ -82,6 +83,10 @@ final class DatabricksSqlHelper {
 
   /** The length of the statement text in log messages, after which it is cut off. */
   private static final int LOGGED_STATEMENT_LENGTH = 100;
+
+  /** An identifier that Spark prints without backticks: a word that isn't a number. */
+  private static final Pattern PLAIN_IDENTIFIER_PATTERN =
+      Pattern.compile("[A-Za-z0-9_]*[A-Za-z_][A-Za-z0-9_]*");
 
   /**
    * The key and value of the query tag of the statements of the dumper. The query history records
@@ -379,6 +384,17 @@ final class DatabricksSqlHelper {
   @Nonnull
   static String quoteIdentifier(@Nonnull String identifier) {
     return "`" + identifier.replace("`", "``") + "`";
+  }
+
+  /**
+   * Returns an identifier as Spark prints it in a qualified name or a struct type: unchanged if it
+   * has only letters, digits and underscores and isn't a number, or else quoted with backticks.
+   */
+  @Nonnull
+  static String quoteIdentifierIfNeeded(@Nonnull String identifier) {
+    return PLAIN_IDENTIFIER_PATTERN.matcher(identifier).matches()
+        ? identifier
+        : quoteIdentifier(identifier);
   }
 
   /**

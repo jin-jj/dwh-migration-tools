@@ -17,6 +17,7 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifier;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteIdentifierIfNeeded;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksSqlHelper.quoteStringLiteral;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -31,7 +32,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Pattern;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import org.slf4j.Logger;
@@ -106,10 +106,6 @@ final class DatabricksHiveMetastoreTableParser {
 
   /** The data source format of Delta tables, as {@link #formatDataSourceFormat} writes it. */
   private static final String DELTA_FORMAT = "DELTA";
-
-  /** Matches a struct field name that Spark writes without backticks. */
-  private static final Pattern PLAIN_FIELD_NAME_PATTERN =
-      Pattern.compile("[A-Za-z0-9_]*[A-Za-z_][A-Za-z0-9_]*");
 
   private DatabricksHiveMetastoreTableParser() {}
 
@@ -386,7 +382,7 @@ final class DatabricksHiveMetastoreTableParser {
             struct.append(',');
           }
           struct
-              .append(quoteFieldNameIfNeeded(text(field, "name")))
+              .append(quoteIdentifierIfNeeded(text(field, "name")))
               .append(':')
               .append(formatDataType(field.path("type")));
           if (!field.path("nullable").asBoolean(true)) {
@@ -401,15 +397,6 @@ final class DatabricksHiveMetastoreTableParser {
       default:
         return TYPE_NAMES.getOrDefault(name, name);
     }
-  }
-
-  /**
-   * Returns a struct field name as Spark writes it in a type: as is if it has only letters, digits
-   * and underscores and isn't a number, and otherwise quoted with backticks.
-   */
-  @Nonnull
-  private static String quoteFieldNameIfNeeded(@Nonnull String name) {
-    return PLAIN_FIELD_NAME_PATTERN.matcher(name).matches() ? name : quoteIdentifier(name);
   }
 
   /**

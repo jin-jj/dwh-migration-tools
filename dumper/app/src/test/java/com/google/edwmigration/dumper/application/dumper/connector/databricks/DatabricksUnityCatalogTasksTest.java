@@ -425,6 +425,34 @@ public class DatabricksUnityCatalogTasksTest {
   }
 
   @Test
+  public void columnsTask_writesStructTypesWithTheNullabilityAndCommentsOfTheirFields()
+      throws Exception {
+    ColumnInfo customer =
+        new ColumnInfo()
+            .setName("customer")
+            .setPosition(0L)
+            .setTypeText("struct<id:bigint,name:string>")
+            .setTypeJson(
+                "{\"name\":\"customer\",\"type\":{\"type\":\"struct\",\"fields\":["
+                    + "{\"name\":\"id\",\"type\":\"long\",\"nullable\":false,"
+                    + "\"metadata\":{\"comment\":\"Customer ID\"}},"
+                    + "{\"name\":\"name\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]},"
+                    + "\"nullable\":true,\"metadata\":{}}");
+    stubTables(
+        table("orders").setTableType(TableType.MANAGED).setColumns(ImmutableList.of(customer)));
+
+    List<CSVRecord> records =
+        runTask(
+            (sink, handle) ->
+                new DatabricksUnityCatalogColumnsTask(new UnityCatalogSessionCache())
+                    .doRun(null, sink, handle));
+
+    assertEquals(
+        ImmutableList.of("struct<id:bigint not null comment 'Customer ID',name:string>"),
+        columnValues(records, ColumnsHeader.DataType));
+  }
+
+  @Test
   public void viewsTask_writesViewsAndTablesWithADefiningQuery() throws Exception {
     String viewDefinition = "SELECT id FROM orders";
     String streamingDefinition = "SELECT * FROM STREAM read_files('s3://lake/events')";
