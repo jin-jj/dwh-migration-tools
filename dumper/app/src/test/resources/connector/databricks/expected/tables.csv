@@ -1,0 +1,4 @@
+TableCatalog,TableSchema,TableName,TableType,DataSourceFormat,StoragePath,TableProperties
+dumper_test_uc,dumper_test_schema,items,MANAGED,DELTA,abfss://container@storage.dfs.core.windows.net/tables/3c68c0cf-0530-49b0-ab76-09c7d19b4309,"{\"delta.minReaderVersion\":\"3\",\"delta.minWriterVersion\":\"7\",\"this.is.my.key\":\"14\"}"
+dumper_test_uc,dumper_test_schema,items_view,VIEW,,,
+dumper_test_uc,dumper_test_schema,orgs,MANAGED,DELTA,abfss://container@storage.dfs.core.windows.net/tables/eddb78b8-5a86-4577-a761-1b35d5fc7e15,"{\"delta.constraints.org_id_positive\":\"org_id > 0\",\"delta.minReaderVersion\":\"3\",\"delta.minWriterVersion\":\"7\"}"
