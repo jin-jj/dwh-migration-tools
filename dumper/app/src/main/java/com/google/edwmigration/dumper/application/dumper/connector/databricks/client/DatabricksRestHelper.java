@@ -27,19 +27,27 @@ import com.databricks.sdk.service.catalog.ListSchemasRequest;
 import com.databricks.sdk.service.catalog.ListTablesRequest;
 import com.databricks.sdk.service.catalog.SchemaInfo;
 import com.databricks.sdk.service.catalog.TableInfo;
+import com.databricks.sdk.service.sql.ListQueriesResponse;
+import com.databricks.sdk.service.sql.ListQueryHistoryRequest;
+import com.databricks.sdk.service.sql.QueryFilter;
+import com.databricks.sdk.service.sql.QueryStatus;
+import com.databricks.sdk.service.sql.TimeRange;
+import com.databricks.sdk.support.Header;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.io.InputStream;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
- * Reads Unity Catalog metadata with the Databricks REST API. Every call sets {@code
- * include_browse=true}, so objects with only the BROWSE privilege are returned too. The calls throw
- * the {@code DatabricksException} of the SDK when the API returns an error.
+ * Reads Unity Catalog metadata, the query history and the workspace ID with the Databricks REST
+ * API. The Unity Catalog calls set {@code include_browse=true}, so objects with only the BROWSE
+ * privilege are returned too. The calls throw the {@code DatabricksException} of the SDK when the
+ * API returns an error.
  */
 @ThreadSafe
 public final class DatabricksRestHelper {
@@ -47,6 +55,20 @@ public final class DatabricksRestHelper {
   private static final long SERVER_PAGE_SIZE = 0L;
   private static final String TABLES_PATH = "/api/2.1/unity-catalog/tables/";
   private static final ObjectReader JSON_READER = new ObjectMapper().readerFor(JsonNode.class);
+
+  private static final long QUERY_HISTORY_PAGE_SIZE = 100L;
+  private static final ImmutableList<QueryStatus> ENDED_QUERY_STATUSES =
+      ImmutableList.of(QueryStatus.FINISHED, QueryStatus.FAILED, QueryStatus.CANCELED);
+
+  private static final String CURRENT_USER_PATH = "/api/2.0/preview/scim/v2/Me";
+  private static final String WORKSPACE_ID_HEADER = "X-Databricks-Org-Id";
+
+  /** Response of {@link #CURRENT_USER_PATH}, of which only the workspace ID header is read. */
+  public static final class WorkspaceIdResponse {
+
+    @Header(WORKSPACE_ID_HEADER)
+    private String workspaceId;
+  }
 
   private final WorkspaceClient client;
 
@@ -108,5 +130,35 @@ public final class DatabricksRestHelper {
     try (InputStream body = apiClient.execute(request, InputStream.class)) {
       return JSON_READER.readTree(body);
     }
+  }
+
+  public String findWorkspaceId() throws IOException {
+    Request request =
+        new Request("GET", CURRENT_USER_PATH).withHeader("Accept", "application/json");
+    WorkspaceIdResponse response = client.apiClient().execute(request, WorkspaceIdResponse.class);
+    return Strings.emptyToNull(response.workspaceId);
+  }
+
+  /**
+   * Lists one page of the queries that started in the time range and ended. The SDK reads only one
+   * page of the query history, so callers read the next pages with {@code next_page_token} while
+   * {@code has_next_page} isn't false.
+   */
+  public ListQueriesResponse listQueryHistoryPage(
+      long startTimeMillis, long endTimeMillis, String pageToken) {
+    return client
+        .queryHistory()
+        .list(
+            new ListQueryHistoryRequest()
+                .setFilterBy(
+                    new QueryFilter()
+                        .setQueryStartTimeRange(
+                            new TimeRange()
+                                .setStartTimeMs(startTimeMillis)
+                                .setEndTimeMs(endTimeMillis))
+                        .setStatuses(ENDED_QUERY_STATUSES))
+                .setIncludeMetrics(true)
+                .setMaxResults(QUERY_HISTORY_PAGE_SIZE)
+                .setPageToken(pageToken));
   }
 }
