@@ -16,6 +16,7 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks;
 
+import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static org.apache.commons.lang3.StringUtils.trimToNull;
 
@@ -111,7 +112,13 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
   public static final String CONNECTOR_NAME = "databricks";
 
   private static final int MIN_JDBC_JAVA_MAJOR_VERSION = 11;
-  private static final String JAVA_VERSION_PROPERTY = "java.specification.version";
+  static final String JAVA_VERSION_PROPERTY = "java.specification.version";
+  static final String WAREHOUSE_TRANSPORT_DESCRIPTION =
+      "How SQL statement results are fetched from '--warehouse': 'jdbc' (Databricks JDBC driver"
+          + " over Thrift without external links; requires Java 11 or above), 'inline'"
+          + " (Statement Execution API without external links, up to 25 MiB per statement), or"
+          + " 'external-links' (Statement Execution API with pre-signed cloud-storage links)."
+          + " Default: 'jdbc' on Java 11 or above, 'external-links' on Java 8.";
   // How many per-object calls, such as DESCRIBE TABLE statements, run at a time without
   // --thread-pool-size. 4 fits --cluster, whose metadata statements all run in the single driver
   // JVM of the cluster, and --warehouse over the Statement Execution API, whose executeStatement
@@ -141,24 +148,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
       this.disposition = disposition;
     }
 
-    /** Returns the transport of {@code rawValue}, ignoring case and surrounding whitespace. */
-    static WarehouseTransport parse(String rawValue) {
-      String trimmed = Strings.nullToEmpty(rawValue).trim();
-      for (WarehouseTransport transport : values()) {
-        if (transport.value.equalsIgnoreCase(trimmed)) {
-          return transport;
-        }
-      }
-
-      throw new MetadataDumperUsageException(
-          String.format(
-              "Invalid value '%s' for '%s'. Allowed values: '%s'.",
-              rawValue,
-              DatabricksMetadataProperty.WAREHOUSE_TRANSPORT.getName(),
-              Joiner.on("', '").join(values())));
-    }
-
-    /** Returns the value that {@link #parse} accepts, such as {@code external-links}. */
+    /** Returns the value of the property, such as {@code external-links}. */
     @Override
     public String toString() {
       return this.value;
@@ -167,13 +157,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
 
   /** Properties of the Databricks metadata connector, passed as {@code -D<name>=<value>}. */
   enum DatabricksMetadataProperty implements ConnectorProperty {
-    WAREHOUSE_TRANSPORT(
-        "warehouse-transport",
-        "How SQL statement results are fetched from '--warehouse': 'jdbc' (Databricks JDBC driver"
-            + " over Thrift without external links; requires Java 11 or above), 'inline'"
-            + " (Statement Execution API without external links, up to 25 MiB per statement), or"
-            + " 'external-links' (Statement Execution API with pre-signed cloud-storage links)."
-            + " Default: 'jdbc' on Java 11 or above, 'external-links' on Java 8.");
+    WAREHOUSE_TRANSPORT("warehouse-transport", WAREHOUSE_TRANSPORT_DESCRIPTION);
 
     private final String name;
     private final String description;
@@ -208,29 +192,10 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     Preconditions.checkNotNull(arguments, "ConnectorArguments was null.");
     validateNotAssessment(getName(), arguments);
     requireUrl(arguments);
-    String warehouseId = getWarehouse(arguments);
-    String clusterId = getCluster(arguments);
-    if (warehouseId != null && clusterId != null) {
-      throw new MetadataDumperUsageException(
-          "The hive_metastore statements run on either a SQL warehouse or a cluster. Please"
-              + " specify either '--warehouse <warehouse-id>' or '--cluster <cluster-id>', not"
-              + " both.");
-    }
+    validateComputeAndTransport(arguments, DatabricksMetadataProperty.WAREHOUSE_TRANSPORT);
 
-    if (arguments.isDefinitionSpecified(DatabricksMetadataProperty.WAREHOUSE_TRANSPORT)) {
-      if (warehouseId == null) {
-        throw new MetadataDumperUsageException(
-            String.format(
-                "Option '%s' requires '--warehouse'.",
-                DatabricksMetadataProperty.WAREHOUSE_TRANSPORT.getName()));
-      }
-
-      WarehouseTransport.parse(
-          arguments.getDefinition(DatabricksMetadataProperty.WAREHOUSE_TRANSPORT));
-    }
-
-    if (warehouseId == null
-        && clusterId == null
+    if (getWarehouse(arguments) == null
+        && getCluster(arguments) == null
         && !DatabricksFilter.fromArguments(arguments).acceptsUnityCatalog()) {
       throw new MetadataDumperUsageException(
           "The hive_metastore catalog needs a SQL warehouse or a cluster, because its metadata is"
@@ -289,7 +254,12 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     int parallelism = getParallelism(arguments, specificationVersion);
     DatabricksSqlRunner sqlRunner =
         filter.acceptsCatalog(HIVE_METASTORE_CATALOG)
-            ? createSqlRunner(client, arguments, parallelism, specificationVersion)
+            ? createSqlRunner(
+                client,
+                arguments,
+                DatabricksMetadataProperty.WAREHOUSE_TRANSPORT,
+                parallelism,
+                specificationVersion)
             : null;
     return new DatabricksHandle(sqlRunner, client, filter, parallelism);
   }
@@ -308,27 +278,68 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     boolean jdbcOnWarehouse =
         getWarehouse(arguments) != null
             && DatabricksFilter.fromArguments(arguments).acceptsCatalog(HIVE_METASTORE_CATALOG)
-            && getWarehouseTransport(arguments, specificationVersion) == WarehouseTransport.JDBC;
+            && getWarehouseTransport(
+                    arguments, DatabricksMetadataProperty.WAREHOUSE_TRANSPORT, specificationVersion)
+                == WarehouseTransport.JDBC;
     return jdbcOnWarehouse ? DEFAULT_JDBC_WAREHOUSE_PARALLELISM : DEFAULT_PARALLELISM;
   }
 
-  /**
-   * Returns the transport of -Ddatabricks.metadata.warehouse-transport if given, or else JDBC on
-   * Java 11 or above, whose persistent sessions run the statements 1.7x-1.9x faster without
-   * external links, and the external links of the Statement Execution API on Java 8, which can't
-   * load the JDBC driver.
-   */
-  private static WarehouseTransport getWarehouseTransport(
-      ConnectorArguments arguments, String specificationVersion) {
-    // Like validate(), treats an empty value as not given.
-    if (arguments.isDefinitionSpecified(DatabricksMetadataProperty.WAREHOUSE_TRANSPORT)) {
-      return WarehouseTransport.parse(
-          arguments.getDefinition(DatabricksMetadataProperty.WAREHOUSE_TRANSPORT));
+  // The static methods below are shared with DatabricksLogsConnector.
+
+  static void validateComputeAndTransport(
+      ConnectorArguments arguments, ConnectorProperty transportProperty) {
+    String warehouseId = getWarehouse(arguments);
+    if (warehouseId != null && getCluster(arguments) != null) {
+      throw new MetadataDumperUsageException(
+          "SQL statements run on either a SQL warehouse or a cluster. Please specify either"
+              + " '--warehouse <warehouse-id>' or '--cluster <cluster-id>', not both.");
     }
 
-    return isJava11OrAbove(specificationVersion)
-        ? WarehouseTransport.JDBC
-        : WarehouseTransport.EXTERNAL_LINKS;
+    if (parseProperty(arguments, transportProperty, WarehouseTransport.values()) != null
+        && warehouseId == null) {
+      throw new MetadataDumperUsageException(
+          String.format("Option '%s' requires '--warehouse'.", transportProperty.getName()));
+    }
+  }
+
+  /**
+   * Returns the value of {@code property} among {@code values}, which are matched by their
+   * toString() ignoring case and surrounding whitespace, or null if the property isn't set or is
+   * empty.
+   */
+  @Nullable
+  static <T> T parseProperty(ConnectorArguments arguments, ConnectorProperty property, T[] values) {
+    if (!arguments.isDefinitionSpecified(property)) {
+      return null;
+    }
+
+    String rawValue = arguments.getDefinition(property);
+    for (T value : values) {
+      if (value.toString().equalsIgnoreCase(rawValue.trim())) {
+        return value;
+      }
+    }
+
+    throw new MetadataDumperUsageException(
+        String.format(
+            "Invalid value '%s' for '%s'. Allowed values: '%s'.",
+            rawValue, property.getName(), Joiner.on("', '").join(values)));
+  }
+
+  /**
+   * Returns the transport of {@code transportProperty} if given, or else JDBC on Java 11 or above,
+   * whose persistent sessions run the statements 1.7x-1.9x faster without external links, and the
+   * external links of the Statement Execution API on Java 8, which can't load the JDBC driver.
+   */
+  private static WarehouseTransport getWarehouseTransport(
+      ConnectorArguments arguments,
+      ConnectorProperty transportProperty,
+      String specificationVersion) {
+    return firstNonNull(
+        parseProperty(arguments, transportProperty, WarehouseTransport.values()),
+        isJava11OrAbove(specificationVersion)
+            ? WarehouseTransport.JDBC
+            : WarehouseTransport.EXTERNAL_LINKS);
   }
 
   /**
@@ -351,19 +362,20 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
    * cluster can't run the statements, and an IOException when a JDBC runner can't open a
    * connection.
    */
-  private static DatabricksSqlRunner createSqlRunner(
+  static DatabricksSqlRunner createSqlRunner(
       WorkspaceClient client,
       ConnectorArguments arguments,
+      ConnectorProperty transportProperty,
       int parallelism,
       String specificationVersion)
       throws IOException {
     String warehouseId = getWarehouse(arguments);
     if (warehouseId != null) {
-      WarehouseTransport transport = getWarehouseTransport(arguments, specificationVersion);
+      WarehouseTransport transport =
+          getWarehouseTransport(arguments, transportProperty, specificationVersion);
       // The defaults depend on the Java version, so the log shows the transport and parallelism.
       logger.info(
-          "Running the hive_metastore statements on SQL warehouse {} with the '{}' transport, {}"
-              + " at a time.",
+          "Running SQL statements on SQL warehouse {} with the '{}' transport, {} at a time.",
           warehouseId,
           transport,
           parallelism);
@@ -414,7 +426,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     }
   }
 
-  private static void validateNotAssessment(String connectorName, ConnectorArguments arguments) {
+  static void validateNotAssessment(String connectorName, ConnectorArguments arguments) {
     if (arguments.isAssessment()) {
       throw new MetadataDumperUsageException(
           String.format(
@@ -425,7 +437,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     }
   }
 
-  private static String requireUrl(ConnectorArguments arguments) {
+  static String requireUrl(ConnectorArguments arguments) {
     String url = arguments.getUri();
     if (url == null || url.trim().isEmpty()) {
       throw new MetadataDumperUsageException(
@@ -435,12 +447,12 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
   }
 
   /** Returns the ID of the SQL warehouse of --warehouse, or null if none. */
-  private static String getWarehouse(ConnectorArguments arguments) {
+  static String getWarehouse(ConnectorArguments arguments) {
     return trimToNull(arguments.getWarehouse());
   }
 
   /** Returns the ID of the cluster of --cluster, or null if none. */
-  private static String getCluster(ConnectorArguments arguments) {
+  static String getCluster(ConnectorArguments arguments) {
     return trimToNull(arguments.getCluster());
   }
 
@@ -448,7 +460,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
    * Creates the client of the workspace of --url. Without --password, the client uses the
    * Databricks SDK default authentication, such as the DATABRICKS_TOKEN environment variable.
    */
-  private static WorkspaceClient createWorkspaceClient(ConnectorArguments arguments) {
+  static WorkspaceClient createWorkspaceClient(ConnectorArguments arguments) {
     DatabricksConfig config = new DatabricksConfig().setHost(requireUrl(arguments));
     if (arguments.isPasswordFlagProvided()) {
       String token = arguments.getPasswordOrPrompt().trim();
