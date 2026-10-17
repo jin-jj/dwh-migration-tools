@@ -22,7 +22,10 @@ import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.ApiClient;
 import com.databricks.sdk.core.http.Request;
 import com.databricks.sdk.service.catalog.CatalogInfo;
+import com.databricks.sdk.service.catalog.FunctionInfo;
+import com.databricks.sdk.service.catalog.GetFunctionRequest;
 import com.databricks.sdk.service.catalog.ListCatalogsRequest;
+import com.databricks.sdk.service.catalog.ListFunctionsRequest;
 import com.databricks.sdk.service.catalog.ListSchemasRequest;
 import com.databricks.sdk.service.catalog.ListTablesRequest;
 import com.databricks.sdk.service.catalog.SchemaInfo;
@@ -83,6 +86,30 @@ public final class DatabricksRestHelper {
                     .setSchemaName(schemaName)
                     .setIncludeBrowse(true)
                     .setMaxResults(SERVER_PAGE_SIZE)));
+  }
+
+  public ImmutableList<FunctionInfo> listFunctions(String catalogName, String schemaName) {
+    return ImmutableList.copyOf(
+        client
+            .functions()
+            .list(
+                new ListFunctionsRequest()
+                    .setCatalogName(catalogName)
+                    .setSchemaName(schemaName)
+                    .setIncludeBrowse(true)
+                    .setMaxResults(SERVER_PAGE_SIZE)));
+  }
+
+  /**
+   * Returns the {@code functions.get} response of a function, which has the {@code input_params}
+   * that {@code functions.list} doesn't return. The SDK throws an {@link IllegalArgumentException}
+   * for a full name that isn't valid in a URL path, such as a name with a space.
+   */
+  public FunctionInfo getFunction(String catalogName, String schemaName, String functionName) {
+    String fullName = catalogName + "." + schemaName + "." + functionName;
+    return client
+        .functions()
+        .get(new GetFunctionRequest().setName(fullName).setIncludeBrowse(true));
   }
 
   /**

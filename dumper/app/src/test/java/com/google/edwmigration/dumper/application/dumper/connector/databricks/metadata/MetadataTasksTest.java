@@ -30,8 +30,10 @@ import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.HIVE_METASTORE_COLUMNS_ENTRY_NAME;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTIONS_ENTRY_NAME;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.HIVE_METASTORE_TABLES_ENTRY_NAME;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.UNITY_CATALOG_CATALOGS_ENTRY_NAME;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.UNITY_CATALOG_FUNCTIONS_ENTRY_NAME;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.UNITY_CATALOG_SCHEMATA_ENTRY_NAME;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.UNITY_CATALOG_TABLE_CONSTRAINTS_ENTRY_NAME;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -71,6 +73,7 @@ import org.junit.runners.JUnit4;
 public class MetadataTasksTest {
 
   private static final String CATALOGS_PATH = "/api/2.1/unity-catalog/catalogs";
+  private static final String FUNCTIONS_PATH = "/api/2.1/unity-catalog/functions";
   private static final String SCHEMAS_PATH = "/api/2.1/unity-catalog/schemas";
   private static final String TABLES_PATH = "/api/2.1/unity-catalog/tables";
   private static final String STATEMENTS_PATH = "/api/2.0/sql/statements";
@@ -131,9 +134,9 @@ public class MetadataTasksTest {
         0,
         getRequestedFor(
             urlPathEqualTo(TABLES_PATH + "/dumper_test_uc.dumper_test_schema.items_view")));
-    // 1 SHOW SCHEMAS + 1 SHOW TABLES + 3 DESCRIBE TABLE + 1 DESCRIBE DETAIL (cached across tasks)
-    // = 6 statements total.
-    server.verify(6, postRequestedFor(urlEqualTo(STATEMENTS_PATH)));
+    // 1 SHOW SCHEMAS + 1 SHOW TABLES + 3 DESCRIBE TABLE + 1 DESCRIBE DETAIL + 1 SHOW USER FUNCTIONS
+    // + 5 DESCRIBE FUNCTION EXTENDED (cached across tasks) = 12 statements total.
+    server.verify(12, postRequestedFor(urlEqualTo(STATEMENTS_PATH)));
   }
 
   @Test
@@ -155,14 +158,22 @@ public class MetadataTasksTest {
   @Test
   public void unityCatalogTasks_skipFailedObjectsAndFailWhenEveryObjectFails() throws Exception {
     // 1. One table's tables.get fails -> skipped while the other table's constraints are written.
+    // One function's functions.get fails -> written with an empty ArgumentSignature.
     server.stubFor(
         get(urlPathEqualTo(TABLES_PATH + "/dumper_test_uc.dumper_test_schema.orgs"))
             .atPriority(1)
             .willReturn(permissionDenied("User does not have SELECT.")));
+    server.stubFor(
+        get(urlPathEqualTo(FUNCTIONS_PATH + "/dumper_test_uc.dumper_test_schema.filter_fn"))
+            .atPriority(1)
+            .willReturn(permissionDenied("User does not have EXECUTE.")));
     String constraintsCsv = runTask(UNITY_CATALOG_TABLE_CONSTRAINTS_ENTRY_NAME, ACCEPT_ALL);
     assertTrue(constraintsCsv.contains("items_pk"));
     assertTrue(constraintsCsv.contains("items_org_fk"));
     assertFalse(constraintsCsv.contains("orgs_pk"));
+    String functionsCsv = runTask(UNITY_CATALOG_FUNCTIONS_ENTRY_NAME, ACCEPT_ALL);
+    assertTrue(functionsCsv.contains("DEFAULT '*' COMMENT 'mask char'"));
+    assertFalse(functionsCsv.contains("(region string collate UTF8_BINARY)"));
 
     // 2. When every tables.get fails, or catalogs.list fails, the task fails.
     server.stubFor(
@@ -205,6 +216,7 @@ public class MetadataTasksTest {
                 matchingJsonPath(
                     "$.statement", equalTo("DESCRIBE DETAIL `dumper_test_hms`.`delta_items`")))
             .willReturn(permissionDenied("No access to the SQL warehouse.")));
+    stubFailed("DESCRIBE FUNCTION EXTENDED `dumper_test_hms`.`fn_py`");
 
     // parquet_items gets a name-only row when DESCRIBE TABLE fails or returns non-JSON.
     assertTrue(
@@ -216,6 +228,7 @@ public class MetadataTasksTest {
     assertTrue(
         columnsCsv.contains(
             "hive_metastore,dumper_test_hms,delta_items,13,dt,DATE,date,YES,,,,,,,,,,,,,,\n"));
+    assertFalse(runTask(HIVE_METASTORE_FUNCTIONS_ENTRY_NAME, ACCEPT_ALL).contains("fn_py"));
 
     // When every SHOW TABLES fails, the task fails.
     stubFailed("SHOW TABLES IN `dumper_test_hms`");

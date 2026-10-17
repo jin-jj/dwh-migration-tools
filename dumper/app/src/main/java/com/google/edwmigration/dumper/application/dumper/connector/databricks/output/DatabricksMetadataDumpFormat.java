@@ -33,6 +33,7 @@ public interface DatabricksMetadataDumpFormat {
   String UNITY_CATALOG_COLUMNS_ENTRY_NAME = "columns.csv";
   String UNITY_CATALOG_VIEWS_ENTRY_NAME = "views.csv";
   String UNITY_CATALOG_TABLE_CONSTRAINTS_ENTRY_NAME = "table_constraints.csv";
+  String UNITY_CATALOG_FUNCTIONS_ENTRY_NAME = "functions.csv";
   String UNITY_CATALOG_COLUMN_MASKS_ENTRY_NAME = "column_masks.csv";
   String UNITY_CATALOG_ROW_FILTERS_ENTRY_NAME = "row_filters.csv";
 
@@ -41,6 +42,7 @@ public interface DatabricksMetadataDumpFormat {
   String HIVE_METASTORE_TABLES_ENTRY_NAME = "tables-hms.csv";
   String HIVE_METASTORE_COLUMNS_ENTRY_NAME = "columns-hms.csv";
   String HIVE_METASTORE_VIEWS_ENTRY_NAME = "views-hms.csv";
+  String HIVE_METASTORE_FUNCTIONS_ENTRY_NAME = "functions-hms.csv";
 
   /**
    * Columns of {@code catalogs.csv} and {@code catalogs-hms.csv}. For Unity Catalog, the {@code
@@ -144,6 +146,38 @@ public interface DatabricksMetadataDumpFormat {
     ReferencedTableName,
     ReferencedColumns,
     Rely
+  }
+
+  /**
+   * Columns of {@code functions.csv} and {@code functions-hms.csv}. For Unity Catalog, the REST
+   * {@code functions.list} functions: {@code DataType}, {@code RoutineBody} and {@code
+   * SqlDataAccess} are the names of the {@code data_type}, {@code routine_body} and {@code
+   * sql_data_access} values, {@code IsDeterministic} is {@code true} or {@code false}, {@code
+   * ArgumentSignature} is the parameter list of the {@code input_params} of the REST {@code
+   * functions.get} response, such as {@code (x INT DEFAULT 0 COMMENT 'the input')}, or empty when
+   * {@code functions.get} fails, {@code SqlPath} is empty as the REST API doesn't return {@code
+   * sql_path}, and {@code ClassName} is empty. For {@code hive_metastore}, the {@code DESCRIBE
+   * FUNCTION EXTENDED} output of the {@code SHOW USER FUNCTIONS} functions: {@code DataType} uses
+   * the Unity Catalog type names, such as LONG for bigint, and {@code ArgumentSignature} lists the
+   * {@code Input} parameters as DESCRIBE prints them, such as {@code (x INT DEFAULT 0 'the
+   * input')}.
+   */
+  enum FunctionsHeader {
+    RoutineCatalog,
+    RoutineSchema,
+    RoutineName,
+    DataType,
+    FullDataType,
+    RoutineBody,
+    RoutineDefinition,
+    ExternalLanguage,
+    ExternalName,
+    IsDeterministic,
+    SqlDataAccess,
+    SqlPath,
+    Comment,
+    ArgumentSignature,
+    ClassName
   }
 
   /**

@@ -16,12 +16,21 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata;
 
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteIdentifierIfNeeded;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteQualifiedName;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteStringLiteral;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.DatabricksFilter.HIVE_METASTORE_CATALOG;
+import static java.util.Comparator.comparing;
+import static java.util.Comparator.naturalOrder;
+import static java.util.Comparator.nullsLast;
 
+import com.databricks.sdk.core.DatabricksException;
 import com.databricks.sdk.service.catalog.CatalogInfo;
 import com.databricks.sdk.service.catalog.ColumnInfo;
 import com.databricks.sdk.service.catalog.ColumnMask;
+import com.databricks.sdk.service.catalog.FunctionInfo;
+import com.databricks.sdk.service.catalog.FunctionParameterInfo;
+import com.databricks.sdk.service.catalog.FunctionParameterInfos;
 import com.databricks.sdk.service.catalog.SchemaInfo;
 import com.databricks.sdk.service.catalog.TableInfo;
 import com.databricks.sdk.service.catalog.TableRowFilter;
@@ -43,6 +52,7 @@ import com.google.edwmigration.dumper.application.dumper.connector.databricks.ou
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.ColumnMasksHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.ColumnsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.DatabricksFilter;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.FunctionsHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.RowFiltersHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.SchemataHeader;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.output.DatabricksMetadataDumpFormat.TableConstraintsHeader;
@@ -51,6 +61,7 @@ import com.google.edwmigration.dumper.application.dumper.connector.databricks.ou
 import com.google.edwmigration.dumper.application.dumper.task.Task;
 import java.io.IOException;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -60,9 +71,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Factory, Unity Catalog REST API readers, and CSV row writers for the 8 Unity Catalog metadata
+ * Factory, Unity Catalog REST API readers, and CSV row writers for the 9 Unity Catalog metadata
  * extraction tasks in their archive order. The schemas are listed once per run; every task lists
- * the tables of each schema again, so the rows are written schema by schema.
+ * the tables or functions of each schema again, so the rows are written schema by schema.
  */
 public final class UnityCatalogTasks {
 
@@ -76,6 +87,8 @@ public final class UnityCatalogTasks {
   private static final ObjectWriter JSON_WRITER =
       new ObjectMapper().configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true).writer();
   private static final Splitter PARENT_TABLE_SPLITTER = Splitter.on('.').limit(3);
+  private static final Comparator<FunctionParameterInfo> PARAMETER_POSITION_ORDER =
+      comparing(FunctionParameterInfo::getPosition, nullsLast(naturalOrder()));
 
   /** Consumes one table of a {@code tables.list} response. */
   @FunctionalInterface
@@ -115,6 +128,10 @@ public final class UnityCatalogTasks {
             DatabricksMetadataDumpFormat.UNITY_CATALOG_TABLE_CONSTRAINTS_ENTRY_NAME,
             TableConstraintsHeader.class,
             tasks::writeTableConstraints),
+        new MetadataTask<>(
+            DatabricksMetadataDumpFormat.UNITY_CATALOG_FUNCTIONS_ENTRY_NAME,
+            FunctionsHeader.class,
+            tasks::writeFunctions),
         new MetadataTask<>(
             DatabricksMetadataDumpFormat.UNITY_CATALOG_COLUMN_MASKS_ENTRY_NAME,
             ColumnMasksHeader.class,
@@ -205,6 +222,29 @@ public final class UnityCatalogTasks {
         table -> quoteQualifiedName(table.catalog, table.schema, table.name),
         table -> handle.restHelper().getTableJson(table.catalog, table.schema, table.name),
         (table, tableJson) -> printConstraints(printer, table, tableJson));
+  }
+
+  /**
+   * Writes the {@code functions.list} functions of each accepted schema. {@code functions.list}
+   * doesn't return the {@code input_params} of the functions, so {@code functions.get} is called
+   * for each function to write its {@code ArgumentSignature}; the row is written with an empty
+   * {@code ArgumentSignature} when {@code functions.get} fails. Neither call returns a {@code
+   * sql_path}, so {@code SqlPath} is empty.
+   */
+  void writeFunctions(DatabricksHandle handle, CSVPrinter printer) throws IOException {
+    handle.runForEach(
+        "functions.list",
+        listSchemas(handle),
+        schema -> quoteQualifiedName(schema.getKey(), schema.getValue()),
+        schema -> handle.restHelper().listFunctions(schema.getKey(), schema.getValue()),
+        (schema, functions) -> {
+          for (FunctionInfo function : functions) {
+            String argumentSignature =
+                fetchArgumentSignature(
+                    handle, schema.getKey(), schema.getValue(), function.getName());
+            printer.printRecord(functionRecord(function, argumentSignature));
+          }
+        });
   }
 
   void writeColumnMasks(DatabricksHandle handle, CSVPrinter printer) throws IOException {
@@ -402,6 +442,74 @@ public final class UnityCatalogTasks {
       record[TableConstraintsHeader.Rely.ordinal()] = key.path("rely").asBoolean(false);
       printer.printRecord(record);
     }
+  }
+
+  /**
+   * Returns the record of {@code functions.csv} for a {@code functions.list} function and its
+   * {@code ArgumentSignature}.
+   */
+  private static Object[] functionRecord(FunctionInfo function, String argumentSignature) {
+    Object[] record = new Object[FunctionsHeader.values().length];
+    record[FunctionsHeader.RoutineCatalog.ordinal()] = function.getCatalogName();
+    record[FunctionsHeader.RoutineSchema.ordinal()] = function.getSchemaName();
+    record[FunctionsHeader.RoutineName.ordinal()] = function.getName();
+    record[FunctionsHeader.DataType.ordinal()] = function.getDataType();
+    record[FunctionsHeader.FullDataType.ordinal()] = function.getFullDataType();
+    record[FunctionsHeader.RoutineBody.ordinal()] = function.getRoutineBody();
+    record[FunctionsHeader.RoutineDefinition.ordinal()] = function.getRoutineDefinition();
+    record[FunctionsHeader.ExternalLanguage.ordinal()] = function.getExternalLanguage();
+    record[FunctionsHeader.ExternalName.ordinal()] = function.getExternalName();
+    // Written as true or false, like the Deterministic value of the hive_metastore functions.
+    record[FunctionsHeader.IsDeterministic.ordinal()] = function.getIsDeterministic();
+    record[FunctionsHeader.SqlDataAccess.ordinal()] = function.getSqlDataAccess();
+    // Empty, as the REST API doesn't return sql_path.
+    record[FunctionsHeader.SqlPath.ordinal()] = function.getSqlPath();
+    record[FunctionsHeader.Comment.ordinal()] = function.getComment();
+    record[FunctionsHeader.ArgumentSignature.ordinal()] = argumentSignature;
+    // The class name is written for the hive_metastore functions only.
+    record[FunctionsHeader.ClassName.ordinal()] = "";
+    return record;
+  }
+
+  /**
+   * Returns the {@code ArgumentSignature} of a function: the parameters of the {@code input_params}
+   * of its {@code functions.get} response in {@code position} order as a list in parentheses, such
+   * as {@code (x INT, y INT DEFAULT 0 COMMENT 'the offset')}, or empty if {@code functions.get}
+   * fails.
+   */
+  private static String fetchArgumentSignature(
+      DatabricksHandle handle, String catalogName, String schemaName, String functionName) {
+    FunctionInfo function;
+    try {
+      function = handle.restHelper().getFunction(catalogName, schemaName, functionName);
+    } catch (DatabricksException | IllegalArgumentException e) {
+      logger.warn(
+          "Writing function {} with an empty ArgumentSignature because functions.get failed: {}",
+          quoteQualifiedName(catalogName, schemaName, functionName),
+          e.getMessage());
+      return "";
+    }
+
+    FunctionParameterInfos inputParams = function.getInputParams();
+    ImmutableList.Builder<String> parameters = ImmutableList.builder();
+    if (inputParams != null && inputParams.getParameters() != null) {
+      for (FunctionParameterInfo parameter :
+          ImmutableList.sortedCopyOf(PARAMETER_POSITION_ORDER, inputParams.getParameters())) {
+        StringBuilder definition =
+            new StringBuilder(quoteIdentifierIfNeeded(Strings.nullToEmpty(parameter.getName())))
+                .append(' ')
+                .append(Strings.nullToEmpty(parameter.getTypeText()));
+        if (parameter.getParameterDefault() != null) {
+          definition.append(" DEFAULT ").append(parameter.getParameterDefault());
+        }
+
+        if (parameter.getComment() != null) {
+          definition.append(" COMMENT ").append(quoteStringLiteral(parameter.getComment()));
+        }
+        parameters.add(definition.toString());
+      }
+    }
+    return "(" + String.join(", ", parameters.build()) + ")";
   }
 
   /** Returns {@code type_json.metadata}, or a missing node when {@code typeJson} isn't JSON. */

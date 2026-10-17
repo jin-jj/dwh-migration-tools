@@ -1,0 +1,3 @@
+RoutineCatalog,RoutineSchema,RoutineName,DataType,FullDataType,RoutineBody,RoutineDefinition,ExternalLanguage,ExternalName,IsDeterministic,SqlDataAccess,SqlPath,Comment,ArgumentSignature,ClassName
+dumper_test_uc,dumper_test_schema,filter_fn,BOOLEAN,BOOLEAN,SQL,region = 'US',,,true,CONTAINS_SQL,,,(region string collate UTF8_BINARY),
+dumper_test_uc,dumper_test_schema,mask_fn,STRING,STRING COLLATE UTF8_BINARY,SQL,"REPEAT(mask_char, 3)",,,true,CONTAINS_SQL,,Mask function,"(val string collate UTF8_BINARY, mask_char string collate UTF8_BINARY DEFAULT '*' COMMENT 'mask char')",

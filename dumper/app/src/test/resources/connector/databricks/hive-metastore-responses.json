@@ -301,5 +301,203 @@
         "[\"dt\"]"
       ]
     ]
+  },
+  "SHOW USER FUNCTIONS IN `dumper_test_hms`": {
+    "rows": [
+      [
+        "hive_metastore.dumper_test_hms.fn_multi"
+      ],
+      [
+        "hive_metastore.dumper_test_hms.fn_noarg"
+      ],
+      [
+        "hive_metastore.dumper_test_hms.fn_py"
+      ],
+      [
+        "hive_metastore.dumper_test_hms.fn_scalar"
+      ],
+      [
+        "hive_metastore.dumper_test_hms.fn_table"
+      ]
+    ]
+  },
+  "DESCRIBE FUNCTION EXTENDED `dumper_test_hms`.`fn_multi`": {
+    "rows": [
+      [
+        "Function:      hive_metastore.dumper_test_hms.fn_multi"
+      ],
+      [
+        "Type:          SCALAR"
+      ],
+      [
+        "Input:         a          INT   "
+      ],
+      [
+        "               long_param STRING DEFAULT 'x' 'long one'"
+      ],
+      [
+        "Returns:       STRING"
+      ],
+      [
+        "Comment:       Multi fn"
+      ],
+      [
+        "Deterministic: true"
+      ],
+      [
+        "Data Access:   CONTAINS SQL"
+      ],
+      [
+        "Configs:       runtime.databricks.sql.functions.counter_diff.enabled=true"
+      ],
+      [
+        "Owner:         root"
+      ],
+      [
+        "Create Time:   Sat Oct 17 18:18:20 UTC 2026"
+      ],
+      [
+        "Body:          concat(cast(a AS STRING), long_param)"
+      ]
+    ]
+  },
+  "DESCRIBE FUNCTION EXTENDED `dumper_test_hms`.`fn_noarg`": {
+    "rows": [
+      [
+        "Function:      hive_metastore.dumper_test_hms.fn_noarg"
+      ],
+      [
+        "Type:          SCALAR"
+      ],
+      [
+        "Input:         ()"
+      ],
+      [
+        "Returns:       INT"
+      ],
+      [
+        "Deterministic: true"
+      ],
+      [
+        "Data Access:   CONTAINS SQL"
+      ],
+      [
+        "Configs:       runtime.databricks.sql.functions.counter_diff.enabled=true"
+      ],
+      [
+        "Owner:         root"
+      ],
+      [
+        "Create Time:   Sat Oct 17 18:18:22 UTC 2026"
+      ],
+      [
+        "Body:          1"
+      ]
+    ]
+  },
+  "DESCRIBE FUNCTION EXTENDED `dumper_test_hms`.`fn_py`": {
+    "rows": [
+      [
+        "Function:    hive_metastore.dumper_test_hms.fn_py"
+      ],
+      [
+        "Input:       s STRING 'text'"
+      ],
+      [
+        "Returns:     STRING"
+      ],
+      [
+        "Comment:     Python fn"
+      ],
+      [
+        "Configs:     runtime.databricks.sql.functions.counter_diff.enabled=true"
+      ],
+      [
+        "Owner:       root"
+      ],
+      [
+        "Create Time: Sat Oct 17 14:10:28 UTC 2026"
+      ],
+      [
+        "Body:         return s.strip() if s else None "
+      ],
+      [
+        "Language:    Python"
+      ]
+    ]
+  },
+  "DESCRIBE FUNCTION EXTENDED `dumper_test_hms`.`fn_scalar`": {
+    "rows": [
+      [
+        "Function:      hive_metastore.dumper_test_hms.fn_scalar"
+      ],
+      [
+        "Type:          SCALAR"
+      ],
+      [
+        "Input:         x INT DEFAULT 1 'input x'"
+      ],
+      [
+        "Returns:       INT"
+      ],
+      [
+        "Comment:       Scalar fn"
+      ],
+      [
+        "Deterministic: true"
+      ],
+      [
+        "Data Access:   CONTAINS SQL"
+      ],
+      [
+        "Configs:       runtime.databricks.sql.functions.counter_diff.enabled=true"
+      ],
+      [
+        "Owner:         root"
+      ],
+      [
+        "Create Time:   Sat Oct 17 14:10:25 UTC 2026"
+      ],
+      [
+        "Body:          x + 1"
+      ]
+    ]
+  },
+  "DESCRIBE FUNCTION EXTENDED `dumper_test_hms`.`fn_table`": {
+    "rows": [
+      [
+        "Function:      hive_metastore.dumper_test_hms.fn_table"
+      ],
+      [
+        "Type:          TABLE"
+      ],
+      [
+        "Input:         n INT 'row count'"
+      ],
+      [
+        "Returns:       step_id INT 'step'"
+      ],
+      [
+        "Comment:       Table fn"
+      ],
+      [
+        "Deterministic: true"
+      ],
+      [
+        "Data Access:   CONTAINS SQL"
+      ],
+      [
+        "Configs:       runtime.databricks.sql.functions.counter_diff.enabled=true"
+      ],
+      [
+        "Owner:         root"
+      ],
+      [
+        "Create Time:   Sat Oct 17 14:10:26 UTC 2026"
+      ],
+      [
+        "Body:          SELECT explode(sequence(1, n))"
+      ]
+    ]
   }
 }

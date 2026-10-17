@@ -73,6 +73,7 @@ public class DatabricksMetadataConnectorTest {
           DatabricksMetadataDumpFormat.UNITY_CATALOG_COLUMNS_ENTRY_NAME,
           DatabricksMetadataDumpFormat.UNITY_CATALOG_VIEWS_ENTRY_NAME,
           DatabricksMetadataDumpFormat.UNITY_CATALOG_TABLE_CONSTRAINTS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.UNITY_CATALOG_FUNCTIONS_ENTRY_NAME,
           DatabricksMetadataDumpFormat.UNITY_CATALOG_COLUMN_MASKS_ENTRY_NAME,
           DatabricksMetadataDumpFormat.UNITY_CATALOG_ROW_FILTERS_ENTRY_NAME);
 
@@ -82,7 +83,8 @@ public class DatabricksMetadataConnectorTest {
           DatabricksMetadataDumpFormat.HIVE_METASTORE_SCHEMATA_ENTRY_NAME,
           DatabricksMetadataDumpFormat.HIVE_METASTORE_TABLES_ENTRY_NAME,
           DatabricksMetadataDumpFormat.HIVE_METASTORE_COLUMNS_ENTRY_NAME,
-          DatabricksMetadataDumpFormat.HIVE_METASTORE_VIEWS_ENTRY_NAME);
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_VIEWS_ENTRY_NAME,
+          DatabricksMetadataDumpFormat.HIVE_METASTORE_FUNCTIONS_ENTRY_NAME);
 
   private static WireMockServer server;
 
