@@ -147,6 +147,8 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     return new DatabricksHandle(sqlHelper, client, DatabricksFilter.fromArguments(arguments));
   }
 
+  // The static methods below are shared with DatabricksLogsConnector.
+
   static void validateNotAssessment(String connectorName, ConnectorArguments arguments) {
     if (arguments.isAssessment()) {
       throw new MetadataDumperUsageException(
