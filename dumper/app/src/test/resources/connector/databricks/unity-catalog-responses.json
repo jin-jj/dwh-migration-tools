@@ -369,5 +369,93 @@
         }
       }
     ]
+  },
+  "/api/2.1/unity-catalog/functions?catalog_name=dumper_test_uc&include_browse=true&max_results=0&schema_name=dumper_test_schema": {
+    "functions": [
+      {
+        "catalog_name": "dumper_test_uc",
+        "data_type": "BOOLEAN",
+        "full_data_type": "BOOLEAN",
+        "is_deterministic": true,
+        "name": "filter_fn",
+        "owner": "owner@example.com",
+        "routine_body": "SQL",
+        "routine_definition": "region = 'US'",
+        "schema_name": "dumper_test_schema",
+        "sql_data_access": "CONTAINS_SQL"
+      },
+      {
+        "catalog_name": "dumper_test_uc",
+        "comment": "Mask function",
+        "data_type": "STRING",
+        "full_data_type": "STRING COLLATE UTF8_BINARY",
+        "is_deterministic": true,
+        "name": "mask_fn",
+        "owner": "owner@example.com",
+        "routine_body": "SQL",
+        "routine_definition": "REPEAT(mask_char, 3)",
+        "schema_name": "dumper_test_schema",
+        "sql_data_access": "CONTAINS_SQL"
+      }
+    ]
+  },
+  "/api/2.1/unity-catalog/functions/dumper_test_uc.dumper_test_schema.mask_fn?include_browse=true": {
+    "catalog_name": "dumper_test_uc",
+    "comment": "Mask function",
+    "data_type": "STRING",
+    "full_data_type": "STRING COLLATE UTF8_BINARY",
+    "input_params": {
+      "parameters": [
+        {
+          "name": "val",
+          "parameter_type": "PARAM",
+          "position": 0,
+          "type_json": "{\"name\":\"val\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}",
+          "type_name": "STRING",
+          "type_text": "string collate UTF8_BINARY"
+        },
+        {
+          "comment": "mask char",
+          "name": "mask_char",
+          "parameter_default": "'*'",
+          "parameter_type": "PARAM",
+          "position": 1,
+          "type_json": "{\"name\":\"mask_char\",\"type\":\"string\",\"nullable\":true,\"metadata\":{\"default\":\"'*'\",\"comment\":\"mask char\"}}",
+          "type_name": "STRING",
+          "type_text": "string collate UTF8_BINARY"
+        }
+      ]
+    },
+    "is_deterministic": true,
+    "name": "mask_fn",
+    "owner": "owner@example.com",
+    "routine_body": "SQL",
+    "routine_definition": "REPEAT(mask_char, 3)",
+    "schema_name": "dumper_test_schema",
+    "sql_data_access": "CONTAINS_SQL"
+  },
+  "/api/2.1/unity-catalog/functions/dumper_test_uc.dumper_test_schema.filter_fn?include_browse=true": {
+    "catalog_name": "dumper_test_uc",
+    "data_type": "BOOLEAN",
+    "full_data_type": "BOOLEAN",
+    "input_params": {
+      "parameters": [
+        {
+          "name": "region",
+          "parameter_type": "PARAM",
+          "position": 0,
+          "type_json": "{\"name\":\"region\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}",
+          "type_name": "STRING",
+          "type_text": "string collate UTF8_BINARY"
+        }
+      ]
+    },
+    "is_deterministic": true,
+    "name": "filter_fn",
+    "owner": "owner@example.com",
+    "routine_body": "SQL",
+    "routine_definition": "region = 'US'",
+    "schema_name": "dumper_test_schema",
+    "sql_data_access": "CONTAINS_SQL"
   }
 }

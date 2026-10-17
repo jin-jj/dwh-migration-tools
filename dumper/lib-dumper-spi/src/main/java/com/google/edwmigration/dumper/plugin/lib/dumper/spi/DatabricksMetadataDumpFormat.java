@@ -207,6 +207,50 @@ public interface DatabricksMetadataDumpFormat {
     }
   }
 
+  interface FunctionsFormat {
+
+    String ZIP_ENTRY_NAME = "functions.csv";
+    String HMS_ZIP_ENTRY_NAME = "functions-hms.csv";
+
+    /**
+     * Columns of {@code functions.csv} and {@code functions-hms.csv}.
+     *
+     * <ul>
+     *   <li>For Unity Catalog, the REST {@code functions.list} functions: {@code DataType}, {@code
+     *       RoutineBody} and {@code SqlDataAccess} are the names of the {@code data_type}, {@code
+     *       routine_body} and {@code sql_data_access} values, {@code IsDeterministic} is {@code
+     *       true} or {@code false}, {@code ArgumentSignature} is the parameter list of the {@code
+     *       input_params} of the REST {@code functions.get} response, such as {@code (x INT DEFAULT
+     *       0 COMMENT 'the input')}, or empty when {@code functions.get} fails, {@code SqlPath} is
+     *       empty as the REST API doesn't return {@code sql_path}, and {@code ClassName} is empty.
+     *       The {@code RoutineDefinition} of a function with only the BROWSE privilege is empty,
+     *       and the task summary counts these functions.
+     *   <li>For {@code hive_metastore}, the {@code DESCRIBE FUNCTION EXTENDED} output of the {@code
+     *       SHOW USER FUNCTIONS} functions: {@code DataType} is the type name of the {@code
+     *       Returns} line in upper case (such as BIGINT, or TABLE_TYPE for a table function), and
+     *       {@code ArgumentSignature} lists the {@code Input} parameters as DESCRIBE prints them,
+     *       such as {@code (x INT DEFAULT 0 'the input')}.
+     * </ul>
+     */
+    enum Header {
+      RoutineCatalog,
+      RoutineSchema,
+      RoutineName,
+      DataType,
+      FullDataType,
+      RoutineBody,
+      RoutineDefinition,
+      ExternalLanguage,
+      ExternalName,
+      IsDeterministic,
+      SqlDataAccess,
+      SqlPath,
+      Comment,
+      ArgumentSignature,
+      ClassName
+    }
+  }
+
   interface ColumnMasksFormat {
 
     String ZIP_ENTRY_NAME = "column_masks.csv";

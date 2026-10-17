@@ -62,6 +62,7 @@ import com.google.edwmigration.dumper.application.dumper.task.TaskState;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.CatalogsFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnMasksFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnsFormat;
+import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.FunctionsFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.RowFiltersFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TableConstraintsFormat;
@@ -93,6 +94,7 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class MetadataTasksTest {
 
+  private static final String FUNCTIONS_PATH = "/api/2.1/unity-catalog/functions";
   private static final String TABLES_PATH = "/api/2.1/unity-catalog/tables";
   private static final String STATEMENTS_PATH = "/api/2.0/sql/statements";
 
@@ -194,7 +196,11 @@ public class MetadataTasksTest {
     server.stubFor(
         get(urlPathEqualTo(TABLES_PATH + "/dumper_test_uc.dumper_test_schema.orgs"))
             .willReturn(permissionDenied("User does not have SELECT.")));
+    server.stubFor(
+        get(urlPathEqualTo(FUNCTIONS_PATH + "/dumper_test_uc.dumper_test_schema.filter_fn"))
+            .willReturn(permissionDenied("User does not have EXECUTE.")));
     stubFailed("DESCRIBE TABLE EXTENDED `dumper_test_hms`.`parquet_items` AS JSON");
+    stubFailed("DESCRIBE FUNCTION EXTENDED `dumper_test_hms`.`fn_py`");
     // DESCRIBE DETAIL fails with an API error instead of a failed statement.
     server.stubFor(
         post(urlEqualTo(STATEMENTS_PATH))
@@ -210,6 +216,9 @@ public class MetadataTasksTest {
     assertTrue(
         summaries,
         summaries.contains("(WARNING: DESCRIBE TABLE EXTENDED AS JSON failed for 1 of 3 objects)"));
+    assertTrue(
+        summaries,
+        summaries.contains("(WARNING: DESCRIBE FUNCTION EXTENDED failed for 1 of 5 objects)"));
     // orgs gets an ERROR row, and items keeps its constraints.
     String constraintsCsv = readFile(directory, TableConstraintsFormat.ZIP_ENTRY_NAME);
     assertTrue(constraintsCsv.contains("items_pk"));
@@ -229,6 +238,11 @@ public class MetadataTasksTest {
             findTableRecords(columnsCsv, "delta_items"),
             column -> "dt".equals(column.get(ColumnsFormat.Header.ColumnName.name())));
     assertEquals("", dt.get(ColumnsFormat.Header.PartitionIndex.name()));
+    // filter_fn is written without its ArgumentSignature, and fn_py isn't written.
+    String functionsCsv = readFile(directory, FunctionsFormat.ZIP_ENTRY_NAME);
+    assertTrue(functionsCsv.contains("DEFAULT '*' COMMENT 'mask char'"));
+    assertFalse(functionsCsv.contains("(region string collate UTF8_BINARY)"));
+    assertFalse(readFile(directory, FunctionsFormat.HMS_ZIP_ENTRY_NAME).contains("fn_py"));
 
     // 2. When every tables.get fails, the task fails.
     server.stubFor(

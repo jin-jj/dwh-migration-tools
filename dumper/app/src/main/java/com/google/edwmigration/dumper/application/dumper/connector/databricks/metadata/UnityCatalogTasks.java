@@ -17,19 +17,30 @@
 package com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata;
 
 import static com.google.common.net.UrlEscapers.urlPathSegmentEscaper;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteIdentifierIfNeeded;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteQualifiedName;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteStringLiteral;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.constructWarnings;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.printCheckConstraints;
 import static com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ERROR_TYPE;
+import static java.util.Comparator.comparing;
+import static java.util.Comparator.naturalOrder;
+import static java.util.Comparator.nullsLast;
 
 import com.databricks.sdk.core.ApiClient;
+import com.databricks.sdk.core.DatabricksException;
 import com.databricks.sdk.core.http.Request;
 import com.databricks.sdk.core.utils.SerDeUtils;
 import com.databricks.sdk.service.catalog.CatalogInfo;
 import com.databricks.sdk.service.catalog.ColumnInfo;
 import com.databricks.sdk.service.catalog.ColumnMask;
+import com.databricks.sdk.service.catalog.FunctionInfo;
+import com.databricks.sdk.service.catalog.FunctionParameterInfo;
+import com.databricks.sdk.service.catalog.FunctionParameterInfos;
+import com.databricks.sdk.service.catalog.GetFunctionRequest;
 import com.databricks.sdk.service.catalog.ListCatalogsRequest;
+import com.databricks.sdk.service.catalog.ListFunctionsRequest;
 import com.databricks.sdk.service.catalog.ListSchemasRequest;
 import com.databricks.sdk.service.catalog.ListTablesRequest;
 import com.databricks.sdk.service.catalog.SchemaInfo;
@@ -54,6 +65,7 @@ import com.google.edwmigration.dumper.application.dumper.task.Task;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.CatalogsFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnMasksFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnsFormat;
+import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.FunctionsFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.RowFiltersFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TableConstraintsFormat;
@@ -62,6 +74,7 @@ import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDu
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -77,9 +90,10 @@ import org.slf4j.LoggerFactory;
  * Factory, Unity Catalog REST API readers, and CSV row writers for the Unity Catalog metadata
  * extraction tasks in their archive order. The schemas are listed once per run. One task writes the
  * tables, columns, views, column masks and row filters files from one {@code tables.list} call per
- * schema, so the rows are written schema by schema. Every REST call sets {@code
- * include_browse=true}, so objects with only the BROWSE privilege are returned too, and throws the
- * {@code DatabricksException} of the SDK when the API returns an error.
+ * schema, and the functions task calls {@code functions.list} for each schema, so the rows are
+ * written schema by schema. Every REST call sets {@code include_browse=true}, so objects with only
+ * the BROWSE privilege are returned too, and throws the {@code DatabricksException} of the SDK when
+ * the API returns an error.
  */
 public final class UnityCatalogTasks {
 
@@ -94,6 +108,7 @@ public final class UnityCatalogTasks {
   private static final int COLUMNS_RECORD_SIZE = ColumnsFormat.Header.values().length;
   private static final int TABLE_CONSTRAINTS_RECORD_SIZE =
       TableConstraintsFormat.Header.values().length;
+  private static final int FUNCTIONS_RECORD_SIZE = FunctionsFormat.Header.values().length;
 
   // 0 lets the server choose the page size; the SDK and listTables follow next_page_token.
   private static final long SERVER_PAGE_SIZE = 0L;
@@ -104,6 +119,8 @@ public final class UnityCatalogTasks {
   // Reads the SDK models from the JSON responses with the settings of the SDK.
   private static final ObjectMapper SDK_MAPPER = SerDeUtils.createMapper();
   private static final Splitter PARENT_TABLE_SPLITTER = Splitter.on('.').limit(3);
+  private static final Comparator<FunctionParameterInfo> PARAMETER_POSITION_ORDER =
+      comparing(FunctionParameterInfo::getPosition, nullsLast(naturalOrder()));
 
   private final Object schemasLock = new Object();
 
@@ -146,7 +163,12 @@ public final class UnityCatalogTasks {
             TableConstraintsFormat.ZIP_ENTRY_NAME,
             TableConstraintsFormat.Header.class,
             "from Unity Catalog tables.get",
-            tasks::writeTableConstraints));
+            tasks::writeTableConstraints),
+        new MetadataTask(
+            FunctionsFormat.ZIP_ENTRY_NAME,
+            FunctionsFormat.Header.class,
+            "from Unity Catalog functions.list and functions.get",
+            tasks::writeFunctions));
   }
 
   ImmutableList<String> writeCatalogs(DatabricksHandle handle, CSVPrinter printer)
@@ -242,6 +264,41 @@ public final class UnityCatalogTasks {
             (table, tableJson) -> printConstraints(printer, table, tableJson),
             (table, failure) -> printer.printRecord(constraintErrorRecord(table)));
     return constructWarnings(listWarning, getWarning);
+  }
+
+  /**
+   * Writes the {@code functions.list} functions of each accepted schema. {@code functions.list}
+   * doesn't return the {@code input_params} of the functions, so {@code functions.get} is called
+   * for each function to write its {@code ArgumentSignature}; the row is written with an empty
+   * {@code ArgumentSignature} when {@code functions.get} fails. Neither call returns a {@code
+   * sql_path}, so {@code SqlPath} is empty. The task summary warns about the functions with only
+   * the BROWSE privilege, because the REST API leaves out their definitions.
+   */
+  ImmutableList<String> writeFunctions(DatabricksHandle handle, CSVPrinter printer)
+      throws IOException {
+    // The catalog names of the browse-only functions, and the number of all functions.
+    Multiset<String> browseOnlyFunctions = TreeMultiset.create();
+    AtomicInteger functionCount = new AtomicInteger();
+    String listWarning =
+        handle.runForEach(
+            "functions.list",
+            listSchemas(handle),
+            schema -> listFunctions(handle, schema.catalog, schema.name),
+            (schema, functions) -> {
+              for (FunctionInfo function : functions) {
+                String argumentSignature =
+                    fetchArgumentSignature(handle, schema.catalog, schema.name, function.getName());
+                printer.printRecord(functionRecord(function, argumentSignature));
+                if (Boolean.TRUE.equals(function.getBrowseOnly())) {
+                  browseOnlyFunctions.add(schema.catalog);
+                }
+              }
+              functionCount.addAndGet(functions.size());
+            });
+    String browseOnlyWarning =
+        browseOnlyWarning(
+            browseOnlyFunctions, functionCount.get(), "functions", "definitions", "EXECUTE");
+    return constructWarnings(listWarning, browseOnlyWarning);
   }
 
   /**
@@ -394,6 +451,34 @@ public final class UnityCatalogTasks {
     try (InputStream body = apiClient.execute(request, InputStream.class)) {
       return JSON_READER.readTree(body);
     }
+  }
+
+  private static ImmutableList<FunctionInfo> listFunctions(
+      DatabricksHandle handle, String catalogName, String schemaName) {
+    return ImmutableList.copyOf(
+        handle
+            .client()
+            .functions()
+            .list(
+                new ListFunctionsRequest()
+                    .setCatalogName(catalogName)
+                    .setSchemaName(schemaName)
+                    .setIncludeBrowse(true)
+                    .setMaxResults(SERVER_PAGE_SIZE)));
+  }
+
+  /**
+   * Returns the {@code functions.get} response of a function, which has the {@code input_params}
+   * that {@code functions.list} doesn't return. The SDK throws an {@link IllegalArgumentException}
+   * for a full name that isn't valid in a URL path, such as a name with a space.
+   */
+  private static FunctionInfo getFunction(
+      DatabricksHandle handle, String catalogName, String schemaName, String functionName) {
+    String fullName = catalogName + "." + schemaName + "." + functionName;
+    return handle
+        .client()
+        .functions()
+        .get(new GetFunctionRequest().setName(fullName).setIncludeBrowse(true));
   }
 
   /** Prints the rows of a {@code tables.list} table across the five table CSV files. */
@@ -576,6 +661,74 @@ public final class UnityCatalogTasks {
     record[TableConstraintsFormat.Header.TableName.ordinal()] = table.name;
     record[TableConstraintsFormat.Header.ConstraintType.ordinal()] = ERROR_TYPE;
     return record;
+  }
+
+  /**
+   * Returns the record of {@code functions.csv} for a {@code functions.list} function and its
+   * {@code ArgumentSignature}.
+   */
+  private static Object[] functionRecord(FunctionInfo function, String argumentSignature) {
+    Object[] record = new Object[FUNCTIONS_RECORD_SIZE];
+    record[FunctionsFormat.Header.RoutineCatalog.ordinal()] = function.getCatalogName();
+    record[FunctionsFormat.Header.RoutineSchema.ordinal()] = function.getSchemaName();
+    record[FunctionsFormat.Header.RoutineName.ordinal()] = function.getName();
+    record[FunctionsFormat.Header.DataType.ordinal()] = function.getDataType();
+    record[FunctionsFormat.Header.FullDataType.ordinal()] = function.getFullDataType();
+    record[FunctionsFormat.Header.RoutineBody.ordinal()] = function.getRoutineBody();
+    record[FunctionsFormat.Header.RoutineDefinition.ordinal()] = function.getRoutineDefinition();
+    record[FunctionsFormat.Header.ExternalLanguage.ordinal()] = function.getExternalLanguage();
+    record[FunctionsFormat.Header.ExternalName.ordinal()] = function.getExternalName();
+    // Written as true or false, like the Deterministic value of the hive_metastore functions.
+    record[FunctionsFormat.Header.IsDeterministic.ordinal()] = function.getIsDeterministic();
+    record[FunctionsFormat.Header.SqlDataAccess.ordinal()] = function.getSqlDataAccess();
+    // Empty, as the REST API doesn't return sql_path.
+    record[FunctionsFormat.Header.SqlPath.ordinal()] = function.getSqlPath();
+    record[FunctionsFormat.Header.Comment.ordinal()] = function.getComment();
+    record[FunctionsFormat.Header.ArgumentSignature.ordinal()] = argumentSignature;
+    // The class name is written for the hive_metastore functions only.
+    record[FunctionsFormat.Header.ClassName.ordinal()] = "";
+    return record;
+  }
+
+  /**
+   * Returns the {@code ArgumentSignature} of a function: the parameters of the {@code input_params}
+   * of its {@code functions.get} response in {@code position} order as a list in parentheses, such
+   * as {@code (x INT, y INT DEFAULT 0 COMMENT 'the offset')}, or empty if {@code functions.get}
+   * fails.
+   */
+  private static String fetchArgumentSignature(
+      DatabricksHandle handle, String catalogName, String schemaName, String functionName) {
+    FunctionInfo function;
+    try {
+      function = getFunction(handle, catalogName, schemaName, functionName);
+    } catch (DatabricksException | IllegalArgumentException e) {
+      logger.warn(
+          "Writing function {} with an empty ArgumentSignature because functions.get failed: {}",
+          quoteQualifiedName(catalogName, schemaName, functionName),
+          e.getMessage());
+      return "";
+    }
+
+    FunctionParameterInfos inputParams = function.getInputParams();
+    ImmutableList.Builder<String> parameters = ImmutableList.builder();
+    if (inputParams != null && inputParams.getParameters() != null) {
+      for (FunctionParameterInfo parameter :
+          ImmutableList.sortedCopyOf(PARAMETER_POSITION_ORDER, inputParams.getParameters())) {
+        StringBuilder definition =
+            new StringBuilder(quoteIdentifierIfNeeded(Strings.nullToEmpty(parameter.getName())))
+                .append(' ')
+                .append(Strings.nullToEmpty(parameter.getTypeText()));
+        if (parameter.getParameterDefault() != null) {
+          definition.append(" DEFAULT ").append(parameter.getParameterDefault());
+        }
+
+        if (parameter.getComment() != null) {
+          definition.append(" COMMENT ").append(quoteStringLiteral(parameter.getComment()));
+        }
+        parameters.add(definition.toString());
+      }
+    }
+    return "(" + String.join(", ", parameters.build()) + ")";
   }
 
   /** Returns {@code type_json.metadata}, or a missing node when {@code typeJson} isn't JSON. */

@@ -16,6 +16,7 @@
  */
 package com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata;
 
+import static com.google.common.base.CharMatcher.whitespace;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteIdentifier;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteIdentifierIfNeeded;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteQualifiedName;
@@ -30,14 +31,19 @@ import com.databricks.sdk.core.DatabricksException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.ListMultimap;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.StatementResult;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.MetadataTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.MultiFileMetadataTask;
 import com.google.edwmigration.dumper.application.dumper.task.Task;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.CatalogsFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.ColumnsFormat;
+import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.FunctionsFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.SchemataFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TableConstraintsFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.TablesFormat;
@@ -56,6 +62,7 @@ import org.slf4j.LoggerFactory;
  * tasks in their archive order. One task writes the tables, columns, views and table constraints
  * files: it reads each table with {@code DESCRIBE TABLE EXTENDED ... AS JSON}, and the partition
  * columns and size of Delta tables with {@code DESCRIBE DETAIL}, and writes its rows right away.
+ * The functions are read with {@code DESCRIBE FUNCTION EXTENDED}.
  */
 public final class HiveMetastoreTasks {
 
@@ -65,11 +72,28 @@ public final class HiveMetastoreTasks {
   // FORMAT.withHeader(Header.class) writes, so each value is printed under its column.
   private static final int TABLES_RECORD_SIZE = TablesFormat.Header.values().length;
   private static final int COLUMNS_RECORD_SIZE = ColumnsFormat.Header.values().length;
+  private static final int FUNCTIONS_RECORD_SIZE = FunctionsFormat.Header.values().length;
 
   private static final String PARTITION_COLUMNS_DETAIL = "partitionColumns";
   private static final String SIZE_IN_BYTES_DETAIL = "sizeInBytes";
   private static final String DEFAULT_COLLATION = "UTF8_BINARY";
   private static final ObjectReader JSON_READER = new ObjectMapper().readerFor(JsonNode.class);
+
+  /** The labels of the {@code DESCRIBE FUNCTION EXTENDED} lines, in lower case. */
+  private static final ImmutableSet<String> FUNCTION_LABELS =
+      ImmutableSet.of(
+          "type",
+          "input",
+          "returns",
+          "comment",
+          "deterministic",
+          "data access",
+          "configs",
+          "owner",
+          "create time",
+          "language",
+          "body",
+          "class");
 
   private final Object schemasLock = new Object();
 
@@ -98,7 +122,12 @@ public final class HiveMetastoreTasks {
                 ViewsFormat.HMS_ZIP_ENTRY_NAME, ViewsFormat.Header.class,
                 TableConstraintsFormat.HMS_ZIP_ENTRY_NAME, TableConstraintsFormat.Header.class),
             "from hive_metastore SHOW TABLES and DESCRIBE TABLE EXTENDED",
-            tasks::writeTableFiles));
+            tasks::writeTableFiles),
+        new MetadataTask(
+            FunctionsFormat.HMS_ZIP_ENTRY_NAME,
+            FunctionsFormat.Header.class,
+            "from hive_metastore SHOW USER FUNCTIONS and DESCRIBE FUNCTION EXTENDED",
+            tasks::writeFunctions));
   }
 
   /**
@@ -147,6 +176,24 @@ public final class HiveMetastoreTasks {
             (table, description) ->
                 printTable(handle, table, description, tables, columns, views, constraints),
             (table, failure) -> tables.printRecord(tableErrorRecord(table)));
+    return constructWarnings(showWarning, describeWarning);
+  }
+
+  ImmutableList<String> writeFunctions(DatabricksHandle handle, CSVPrinter printer)
+      throws IOException {
+    ImmutableList.Builder<TableName> functions = ImmutableList.builder();
+    String showWarning =
+        handle.runForEach(
+            "SHOW USER FUNCTIONS",
+            listSchemas(handle),
+            schema -> showUserFunctions(handle, schema),
+            (schema, schemaFunctions) -> functions.addAll(schemaFunctions));
+    String describeWarning =
+        handle.runForEach(
+            "DESCRIBE FUNCTION EXTENDED",
+            functions.build(),
+            function -> describeFunction(handle, function),
+            (function, functionRow) -> printer.printRecord(functionRow));
     return constructWarnings(showWarning, describeWarning);
   }
 
@@ -381,7 +428,134 @@ public final class HiveMetastoreTasks {
     return result.toString();
   }
 
-  /** The schema and name of a table listed by {@code SHOW TABLES}. */
+  private static ImmutableList<TableName> showUserFunctions(DatabricksHandle handle, String schema)
+      throws IOException {
+    String query = "SHOW USER FUNCTIONS IN " + quoteIdentifier(schema);
+    ImmutableList.Builder<TableName> builder = ImmutableList.builder();
+    StatementResult rows = handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query);
+    // The cell of a row is the full name of a function, such as hive_metastore.default.f.
+    for (List<String> row = rows.nextRow(); row != null; row = rows.nextRow()) {
+      String fullName = row.get(0);
+      builder.add(new TableName(schema, fullName.substring(fullName.lastIndexOf('.') + 1)));
+    }
+    return builder.build();
+  }
+
+  /**
+   * Returns the functions CSV row of a function from its {@code DESCRIBE FUNCTION EXTENDED} lines,
+   * such as {@code Returns: INT}. A line without a label, such as the second parameter of {@code
+   * Input} or the second line of {@code Body}, continues the value of the label above it.
+   */
+  private static Object[] describeFunction(DatabricksHandle handle, TableName function)
+      throws IOException {
+    String query = "DESCRIBE FUNCTION EXTENDED " + function.quotedName();
+    StatementResult rows = handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query);
+    // The lines of each label, the first one without the label. The Function line is skipped.
+    ListMultimap<String, String> sections = ArrayListMultimap.create();
+    String label = null;
+    for (List<String> row = rows.nextRow(); row != null; row = rows.nextRow()) {
+      String line = row.get(0);
+      int colon = line.indexOf(':');
+      String lineLabel = colon < 0 ? "" : line.substring(0, colon).toLowerCase(Locale.ROOT);
+      if (FUNCTION_LABELS.contains(lineLabel)) {
+        label = lineLabel;
+        line = line.substring(colon + 1);
+      }
+
+      if (label != null) {
+        sections.put(label, line);
+      }
+    }
+
+    boolean isTableFunction = "TABLE".equalsIgnoreCase(sectionValue(sections, "type"));
+    String fullDataType =
+        isTableFunction
+            ? formatSignature(sections.get("returns"))
+            : sectionValue(sections, "returns");
+    String body = formatBody(sections.get("body"));
+    String className = sectionValue(sections, "class");
+    String language = sectionValue(sections, "language");
+    Object[] record = new Object[FUNCTIONS_RECORD_SIZE];
+    record[FunctionsFormat.Header.RoutineCatalog.ordinal()] = HIVE_METASTORE_CATALOG;
+    record[FunctionsFormat.Header.RoutineSchema.ordinal()] = function.schema;
+    record[FunctionsFormat.Header.RoutineName.ordinal()] = function.name;
+    record[FunctionsFormat.Header.DataType.ordinal()] =
+        isTableFunction
+            ? "TABLE_TYPE"
+            : fullDataType.split("[^A-Za-z0-9_]", 2)[0].toUpperCase(Locale.ROOT);
+    record[FunctionsFormat.Header.FullDataType.ordinal()] = fullDataType;
+    // A Python function is EXTERNAL with its language, as in Unity Catalog, and a Hive UDF is
+    // EXTERNAL with its class name.
+    if (!language.isEmpty() && !"SQL".equalsIgnoreCase(language)) {
+      record[FunctionsFormat.Header.RoutineBody.ordinal()] = "EXTERNAL";
+      record[FunctionsFormat.Header.ExternalLanguage.ordinal()] = language;
+    } else if (!body.isEmpty()) {
+      record[FunctionsFormat.Header.RoutineBody.ordinal()] = "SQL";
+    } else if (!className.isEmpty()) {
+      record[FunctionsFormat.Header.RoutineBody.ordinal()] = "EXTERNAL";
+    }
+
+    record[FunctionsFormat.Header.RoutineDefinition.ordinal()] = body;
+    record[FunctionsFormat.Header.IsDeterministic.ordinal()] =
+        sectionValue(sections, "deterministic").toLowerCase(Locale.ROOT);
+    // Written like the CONTAINS_SQL / NO_SQL sql_data_access values of the Unity Catalog functions.
+    record[FunctionsFormat.Header.SqlDataAccess.ordinal()] =
+        sectionValue(sections, "data access").replaceAll("\\s+", "_").toUpperCase(Locale.ROOT);
+    record[FunctionsFormat.Header.Comment.ordinal()] = sectionValue(sections, "comment");
+    record[FunctionsFormat.Header.ArgumentSignature.ordinal()] =
+        formatSignature(sections.get("input"));
+    record[FunctionsFormat.Header.ClassName.ordinal()] = className;
+    return record;
+  }
+
+  /** Returns the text after {@code label}, or empty if DESCRIBE printed no such label. */
+  private static String sectionValue(ListMultimap<String, String> sections, String label) {
+    return Iterables.getFirst(sections.get(label), "").trim();
+  }
+
+  /**
+   * Returns the parameters of {@code Input}, or the columns of a table function's {@code Returns},
+   * in parentheses as DESCRIBE prints them, such as {@code (x INT DEFAULT 1 'input x')}. DESCRIBE
+   * pads the names into a column, so the spaces after a name are cut to one.
+   */
+  private static String formatSignature(List<String> lines) {
+    ImmutableList.Builder<String> parameters = ImmutableList.builder();
+    for (String line : lines) {
+      String parameter = line.trim();
+      // A function without parameters has the Input ().
+      if (!parameter.isEmpty() && !parameter.equals("()")) {
+        parameters.add(parameter.replaceFirst("\\s+", " "));
+      }
+    }
+    return "(" + String.join(", ", parameters.build()) + ")";
+  }
+
+  /**
+   * Returns the lines of {@code Body} without trailing whitespace. Only the spaces after the label,
+   * and a line break right after them, are cut, so a Python body keeps the indentation of its first
+   * line.
+   */
+  private static String formatBody(List<String> lines) {
+    if (lines.isEmpty()) {
+      return "";
+    }
+
+    StringBuilder body =
+        new StringBuilder(
+            whitespace().trimTrailingFrom(lines.get(0).replaceFirst("^[ \\t]*\\r?\\n?", "")));
+    for (String line : lines.subList(1, lines.size())) {
+      if (body.length() > 0) {
+        body.append('\n');
+      }
+      body.append(line);
+    }
+    return whitespace().trimTrailingFrom(body);
+  }
+
+  /**
+   * The schema and name of a table listed by {@code SHOW TABLES}, or of a function listed by {@code
+   * SHOW USER FUNCTIONS}.
+   */
   static final class TableName {
     final String schema;
     final String name;

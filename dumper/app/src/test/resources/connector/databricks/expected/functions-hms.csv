@@ -1,0 +1,6 @@
+RoutineCatalog,RoutineSchema,RoutineName,DataType,FullDataType,RoutineBody,RoutineDefinition,ExternalLanguage,ExternalName,IsDeterministic,SqlDataAccess,SqlPath,Comment,ArgumentSignature,ClassName
+hive_metastore,dumper_test_hms,fn_multi,STRING,STRING,SQL,"concat(cast(a AS STRING), long_param)",,,true,CONTAINS_SQL,,Multi fn,"(a INT, long_param STRING DEFAULT 'x' 'long one')",
+hive_metastore,dumper_test_hms,fn_noarg,INT,INT,SQL,1,,,true,CONTAINS_SQL,,,(),
+hive_metastore,dumper_test_hms,fn_py,STRING,STRING,EXTERNAL,return s.strip() if s else None,Python,,,,,Python fn,(s STRING 'text'),
+hive_metastore,dumper_test_hms,fn_scalar,INT,INT,SQL,x + 1,,,true,CONTAINS_SQL,,Scalar fn,(x INT DEFAULT 1 'input x'),
+hive_metastore,dumper_test_hms,fn_table,TABLE_TYPE,(step_id INT 'step'),SQL,"SELECT explode(sequence(1, n))",,,true,CONTAINS_SQL,,Table fn,(n INT 'row count'),
