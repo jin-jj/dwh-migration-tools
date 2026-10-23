@@ -20,9 +20,15 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksConfig;
+import com.databricks.sdk.service.compute.ClusterDetails;
+import com.databricks.sdk.service.compute.DataSecurityMode;
+import com.databricks.sdk.service.compute.State;
 import com.google.auto.service.AutoService;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
 import com.google.edwmigration.dumper.application.dumper.MetadataDumperUsageException;
@@ -31,7 +37,9 @@ import com.google.edwmigration.dumper.application.dumper.annotations.RespectsInp
 import com.google.edwmigration.dumper.application.dumper.connector.AbstractConnector;
 import com.google.edwmigration.dumper.application.dumper.connector.Connector;
 import com.google.edwmigration.dumper.application.dumper.connector.MetadataConnector;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.ClusterSqlRunner;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlRunner;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.DatabricksFilter;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.HiveMetastoreTasks;
@@ -45,6 +53,8 @@ import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDu
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.CatalogsFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,8 +79,16 @@ import org.slf4j.LoggerFactory;
     arg = ConnectorArguments.OPT_WAREHOUSE,
     description =
         "The ID of the Databricks SQL warehouse that runs the metadata statements of the"
-            + " hive_metastore catalog. Without it, the hive_metastore catalog is skipped, and only"
-            + " the Unity Catalog catalogs are dumped.")
+            + " hive_metastore catalog. Without it or --cluster, the hive_metastore catalog is"
+            + " skipped, and only the Unity Catalog catalogs are dumped.")
+@RespectsInput(
+    order = 350,
+    arg = ConnectorArguments.OPT_CLUSTER,
+    description =
+        "The ID of a running all-purpose cluster that runs the metadata statements of the"
+            + " hive_metastore catalog instead of a SQL warehouse, such as the cluster of the"
+            + " notebook that runs the dumper. The cluster must run Databricks Runtime 16.2 or"
+            + " above; dedicated access mode is supported.")
 @RespectsInput(
     order = 600,
     arg = ConnectorArguments.OPT_DATABASE,
@@ -85,6 +103,17 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
 
   public static final String CONNECTOR_NAME = "databricks";
 
+  // DESCRIBE TABLE ... AS JSON needs Databricks Runtime 16.2 or above.
+  private static final int MIN_RUNTIME_MAJOR_VERSION = 16;
+  private static final int MIN_RUNTIME_MINOR_VERSION = 2;
+  // The spark_version of a cluster starts with the runtime version, such as 16.4.x-scala2.12.
+  private static final Pattern RUNTIME_VERSION_PATTERN = Pattern.compile("(\\d+)\\.(\\d+)");
+  private static final ImmutableSet<DataSecurityMode> DEDICATED_ACCESS_MODES =
+      ImmutableSet.of(
+          DataSecurityMode.SINGLE_USER,
+          DataSecurityMode.DATA_SECURITY_MODE_DEDICATED,
+          DataSecurityMode.LEGACY_SINGLE_USER);
+
   public DatabricksMetadataConnector() {
     super(CONNECTOR_NAME);
   }
@@ -94,11 +123,22 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     Preconditions.checkNotNull(arguments, "ConnectorArguments was null.");
     validateNotAssessment(getName(), arguments);
     requireUrl(arguments);
-    if (findWarehouse(arguments) == null
+    boolean hasWarehouse = findWarehouse(arguments) != null;
+    boolean hasCluster = findCluster(arguments) != null;
+    if (hasWarehouse && hasCluster) {
+      throw new MetadataDumperUsageException(
+          "The hive_metastore statements run on either a SQL warehouse or a cluster. Please"
+              + " specify either '--warehouse <warehouse-id>' or '--cluster <cluster-id>', not"
+              + " both.");
+    }
+
+    if (!hasWarehouse
+        && !hasCluster
         && !DatabricksFilter.fromArguments(arguments).acceptsUnityCatalog()) {
       throw new MetadataDumperUsageException(
-          "The hive_metastore catalog needs a SQL warehouse, because its metadata is read with SQL"
-              + " statements. Please specify '--warehouse <warehouse-id>'.");
+          "The hive_metastore catalog needs a SQL warehouse or a cluster, because its metadata is"
+              + " read with SQL statements. Please specify '--warehouse <warehouse-id>' or"
+              + " '--cluster <cluster-id>'.");
     }
   }
 
@@ -117,12 +157,12 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     }
 
     if (filter.acceptsCatalog(HIVE_METASTORE_CATALOG)) {
-      if (findWarehouse(arguments) != null) {
+      if (findWarehouse(arguments) != null || findCluster(arguments) != null) {
         metadataTasks.addAll(HiveMetastoreTasks.create());
       } else {
         logger.warn(
-            "Skipping the hive_metastore catalog because no SQL warehouse was given with"
-                + " '--warehouse'.");
+            "Skipping the hive_metastore catalog because no SQL warehouse or cluster was given with"
+                + " '--warehouse' or '--cluster'.");
       }
     }
 
@@ -141,10 +181,75 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
   public Handle open(ConnectorArguments arguments) {
     Preconditions.checkNotNull(arguments, "ConnectorArguments was null.");
     WorkspaceClient client = createWorkspaceClient(arguments);
+    DatabricksFilter filter = DatabricksFilter.fromArguments(arguments);
+    DatabricksSqlRunner sqlRunner =
+        filter.acceptsCatalog(HIVE_METASTORE_CATALOG) ? createSqlRunner(client, arguments) : null;
+    return new DatabricksHandle(sqlRunner, client, filter);
+  }
+
+  /**
+   * Returns the SQL runner of the SQL warehouse of --warehouse or of the cluster of --cluster, or
+   * null when neither was given. Throws a usage error when the cluster can't run the statements.
+   */
+  private static DatabricksSqlRunner createSqlRunner(
+      WorkspaceClient client, ConnectorArguments arguments) {
     String warehouseId = findWarehouse(arguments);
-    DatabricksSqlHelper sqlHelper =
-        warehouseId == null ? null : new DatabricksSqlHelper(client, warehouseId);
-    return new DatabricksHandle(sqlHelper, client, DatabricksFilter.fromArguments(arguments));
+    if (warehouseId != null) {
+      return new DatabricksSqlHelper(client, warehouseId);
+    }
+
+    String clusterId = findCluster(arguments);
+    if (clusterId == null) {
+      return null;
+    }
+
+    checkCluster(client.clusters().get(clusterId));
+    return new ClusterSqlRunner(client, clusterId);
+  }
+
+  /**
+   * Throws a usage error when a cluster isn't running or runs a Databricks Runtime below 16.2, and
+   * warns when its access mode isn't dedicated, the only mode tried so far.
+   */
+  @VisibleForTesting
+  static void checkCluster(ClusterDetails cluster) {
+    if (cluster.getState() != State.RUNNING) {
+      throw new MetadataDumperUsageException(
+          String.format(
+              "The cluster %s is %s. Please start it, or run the dumper from a notebook attached to"
+                  + " it.",
+              cluster.getClusterId(), cluster.getState()));
+    }
+
+    String sparkVersion = Strings.nullToEmpty(cluster.getSparkVersion());
+    Matcher version = RUNTIME_VERSION_PATTERN.matcher(sparkVersion);
+    if (!version.lookingAt()) {
+      logger.warn(
+          "Can't read the Databricks Runtime version of cluster {} from '{}'. The hive_metastore"
+              + " statements need Databricks Runtime 16.2 or above.",
+          cluster.getClusterId(),
+          sparkVersion);
+    } else if (isBelowMinimumRuntime(
+        Integer.parseInt(version.group(1)), Integer.parseInt(version.group(2)))) {
+      throw new MetadataDumperUsageException(
+          String.format(
+              "The cluster %s runs Databricks Runtime %s, but the hive_metastore statements need"
+                  + " 16.2 or above for DESCRIBE TABLE ... AS JSON. Please use a cluster on"
+                  + " Databricks Runtime 16.4 LTS or above.",
+              cluster.getClusterId(), sparkVersion));
+    }
+
+    if (!DEDICATED_ACCESS_MODES.contains(cluster.getDataSecurityMode())) {
+      logger.warn(
+          "The cluster {} uses the access mode {}. Only dedicated access mode was tried so far.",
+          cluster.getClusterId(),
+          cluster.getDataSecurityMode());
+    }
+  }
+
+  private static boolean isBelowMinimumRuntime(int major, int minor) {
+    return major < MIN_RUNTIME_MAJOR_VERSION
+        || (major == MIN_RUNTIME_MAJOR_VERSION && minor < MIN_RUNTIME_MINOR_VERSION);
   }
 
   static void validateNotAssessment(String connectorName, ConnectorArguments arguments) {
@@ -171,6 +276,12 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
   static String findWarehouse(ConnectorArguments arguments) {
     String warehouse = arguments.getWarehouse();
     return warehouse == null || warehouse.trim().isEmpty() ? null : warehouse.trim();
+  }
+
+  /** Returns the ID of the cluster of --cluster, or null if none. */
+  static String findCluster(ConnectorArguments arguments) {
+    String cluster = arguments.getCluster();
+    return cluster == null || cluster.trim().isEmpty() ? null : cluster.trim();
   }
 
   /**

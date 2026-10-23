@@ -42,7 +42,6 @@ import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
 import com.google.common.collect.ImmutableList;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.StatementResult;
 import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.time.Duration;

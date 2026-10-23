@@ -53,6 +53,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.io.Resources;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.DatabricksMetadataConnector;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.ClusterSqlRunner;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.DatabricksFilter;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.UnityCatalogTasks.TableName;
@@ -98,6 +99,9 @@ public class MetadataTasksTest {
   private static final String TABLES_PATH = "/api/2.1/unity-catalog/tables";
   private static final String STATEMENTS_PATH = "/api/2.0/sql/statements";
   private static final String DESCRIBE_TABLE_STATEMENT = "DESCRIBE TABLE EXTENDED .* AS JSON";
+  private static final String CLUSTER_ID = "0123-456789-abcdefgh";
+  private static final String CLUSTER_CONTEXTS_PATH = "/api/1.2/contexts";
+  private static final String CLUSTER_COMMANDS_PATH = "/api/1.2/commands";
 
   private static final ObjectMapper MAPPER = new ObjectMapper();
   private static final DatabricksFilter ACCEPT_ALL =
@@ -293,6 +297,26 @@ public class MetadataTasksTest {
   }
 
   @Test
+  public void hiveMetastoreTasks_writeSameFilesWithClusterAsWithWarehouse() throws Exception {
+    stubClusterResponses();
+    Path directory = temporaryFolder.newFolder().toPath();
+    WorkspaceClient client = newClient();
+    try (DatabricksHandle handle =
+        new DatabricksHandle(new ClusterSqlRunner(client, CLUSTER_ID), client, ACCEPT_ALL)) {
+      runTasks(HiveMetastoreTasks.create(), handle, directory);
+    }
+
+    for (String entryName : listFiles(directory)) {
+      assertEquals(
+          entryName,
+          readExpectedFile(entryName),
+          readFile(directory, entryName).replace("\r\n", "\n"));
+    }
+    // Closing the handle destroys the execution context of the cluster.
+    server.verify(1, postRequestedFor(urlEqualTo(CLUSTER_CONTEXTS_PATH + "/destroy")));
+  }
+
+  @Test
   public void getTableJson_escapesFullNameAsPathSegment() throws Exception {
     String path = TABLES_PATH + "/main.sales.my%20orders%231%3F%25";
     server.stubFor(get(urlPathEqualTo(path)).willReturn(okJson("{\"name\":\"my orders#1?%\"}")));
@@ -337,12 +361,18 @@ public class MetadataTasksTest {
   private static void runTasks(
       Iterable<? extends Task<?>> tasks, DatabricksFilter filter, Path directory) throws Exception {
     try (DatabricksHandle handle = newHandle(filter)) {
-      TaskRunContext context =
-          new TaskRunContext(
-              new FileSystemOutputHandleFactory(directory), handle, 1, null, ARGUMENTS);
-      for (Task<?> task : tasks) {
-        task.run(context);
-      }
+      runTasks(tasks, handle, directory);
+    }
+  }
+
+  /** Runs {@code tasks} with {@code handle}, with their files in {@code directory}. */
+  private static void runTasks(
+      Iterable<? extends Task<?>> tasks, DatabricksHandle handle, Path directory) throws Exception {
+    TaskRunContext context =
+        new TaskRunContext(
+            new FileSystemOutputHandleFactory(directory), handle, 1, null, ARGUMENTS);
+    for (Task<?> task : tasks) {
+      task.run(context);
     }
   }
 
@@ -405,13 +435,57 @@ public class MetadataTasksTest {
   }
 
   private static DatabricksHandle newHandle(DatabricksFilter filter) {
-    WorkspaceClient client =
-        new WorkspaceClient(
-            new DatabricksConfig()
-                .setHost(server.baseUrl())
-                .setToken("test-token")
-                .setAuthType("pat"));
+    WorkspaceClient client = newClient();
     return new DatabricksHandle(new DatabricksSqlHelper(client, "wh-test"), client, filter);
+  }
+
+  private static WorkspaceClient newClient() {
+    return new WorkspaceClient(
+        new DatabricksConfig().setHost(server.baseUrl()).setToken("test-token").setAuthType("pat"));
+  }
+
+  /**
+   * Stubs the Command Execution API of a cluster that answers each recorded hive_metastore
+   * statement with the rows and columns of its recorded warehouse response.
+   */
+  private static void stubClusterResponses() throws IOException {
+    server.stubFor(
+        post(urlEqualTo(CLUSTER_CONTEXTS_PATH + "/create"))
+            .willReturn(okJson("{\"id\": \"ctx\"}")));
+    server.stubFor(
+        get(urlPathEqualTo(CLUSTER_CONTEXTS_PATH + "/status"))
+            .willReturn(okJson("{\"id\": \"ctx\", \"status\": \"Running\"}")));
+    server.stubFor(post(urlEqualTo(CLUSTER_CONTEXTS_PATH + "/destroy")).willReturn(okJson("{}")));
+    int index = 0;
+    stubClusterCommand("USE CATALOG `" + HIVE_METASTORE_CATALOG + "`", "[]", "[]", index++);
+    for (Map.Entry<String, JsonNode> entry : loadTestCases("hive-metastore-responses.json")) {
+      JsonNode spec = entry.getValue();
+      String rows =
+          spec.has("json_cell")
+              ? MAPPER.writeValueAsString(
+                  ImmutableList.of(ImmutableList.of(spec.get("json_cell").toString())))
+              : spec.path("rows").toString();
+      String columns = spec.has("columns") ? spec.get("columns").toString() : "[]";
+      stubClusterCommand(entry.getKey(), rows, columns, index++);
+    }
+  }
+
+  /** Stubs a command of {@code sql} that finishes with a table of {@code rows}. */
+  private static void stubClusterCommand(String sql, String rows, String columns, int index) {
+    String commandId = "cmd-" + index;
+    server.stubFor(
+        post(urlEqualTo(CLUSTER_COMMANDS_PATH + "/execute"))
+            .withRequestBody(matchingJsonPath("$.command", equalTo(sql)))
+            .willReturn(okJson("{\"id\": \"" + commandId + "\"}")));
+    server.stubFor(
+        get(urlPathEqualTo(CLUSTER_COMMANDS_PATH + "/status"))
+            .withQueryParam("commandId", equalTo(commandId))
+            .willReturn(
+                okJson(
+                    String.format(
+                        "{\"id\": \"%s\", \"status\": \"Finished\", \"results\":"
+                            + " {\"resultType\": \"table\", \"data\": %s, \"schema\": %s}}",
+                        commandId, rows, columns))));
   }
 
   private static Set<Map.Entry<String, JsonNode>> loadTestCases(String name) throws IOException {

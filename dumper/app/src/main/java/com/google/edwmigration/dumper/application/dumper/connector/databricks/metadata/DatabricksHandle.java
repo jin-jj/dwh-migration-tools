@@ -31,7 +31,7 @@ import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.io.ByteSink;
 import com.google.common.io.Closer;
 import com.google.edwmigration.dumper.application.dumper.ConnectorArguments;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlRunner;
 import com.google.edwmigration.dumper.application.dumper.handle.AbstractHandle;
 import com.google.edwmigration.dumper.application.dumper.handle.Handle;
 import com.google.edwmigration.dumper.application.dumper.io.OutputHandle;
@@ -78,17 +78,17 @@ public final class DatabricksHandle extends AbstractHandle {
   private static final int TABLE_CONSTRAINTS_RECORD_SIZE =
       TableConstraintsFormat.Header.values().length;
 
-  private final DatabricksSqlHelper sqlHelper;
+  private final DatabricksSqlRunner sqlRunner;
   private final WorkspaceClient client;
   private final DatabricksFilter filter;
 
   /**
-   * Creates the handle of a run. {@code sqlHelper} is null when no SQL warehouse was given; then
-   * only the Unity Catalog tasks run, because they read the REST API only.
+   * Creates the handle of a run. {@code sqlRunner} is null when neither a SQL warehouse nor a
+   * cluster was given; then only the Unity Catalog tasks run, because they read the REST API only.
    */
   public DatabricksHandle(
-      DatabricksSqlHelper sqlHelper, WorkspaceClient client, DatabricksFilter filter) {
-    this.sqlHelper = sqlHelper;
+      DatabricksSqlRunner sqlRunner, WorkspaceClient client, DatabricksFilter filter) {
+    this.sqlRunner = sqlRunner;
     this.client = Preconditions.checkNotNull(client, "WorkspaceClient was null.");
     this.filter = Preconditions.checkNotNull(filter, "DatabricksFilter was null.");
   }
@@ -151,10 +151,19 @@ public final class DatabricksHandle extends AbstractHandle {
   }
 
   /**
-   * Returns the SQL helper of the hive_metastore tasks, or null when no SQL warehouse was given.
+   * Returns the SQL runner of the hive_metastore tasks, or null when neither a SQL warehouse nor a
+   * cluster was given.
    */
-  public DatabricksSqlHelper sqlHelper() {
-    return this.sqlHelper;
+  public DatabricksSqlRunner sqlRunner() {
+    return this.sqlRunner;
+  }
+
+  /** Closes the SQL runner, which destroys the execution context of a cluster. */
+  @Override
+  public void close() throws IOException {
+    if (this.sqlRunner != null) {
+      this.sqlRunner.close();
+    }
   }
 
   /** Returns the client of the Unity Catalog tasks, which read the REST API. */

@@ -64,7 +64,7 @@ import org.slf4j.LoggerFactory;
  * The calls throw the {@code DatabricksException} of the SDK when the API returns an error, and an
  * {@link IOException} when a statement fails or a chunk can't be downloaded.
  */
-public final class DatabricksSqlHelper {
+public final class DatabricksSqlHelper implements DatabricksSqlRunner {
 
   /**
    * Key and value of the query tag attached to dumper SQL statements, so query history dumps skip
@@ -121,7 +121,7 @@ public final class DatabricksSqlHelper {
    * Streams the result rows of a SQL statement executed by {@link DatabricksSqlHelper}: the rows of
    * the first chunk of the response, then the rows of chunks 1 to {@code total_chunk_count - 1}.
    */
-  public static final class StatementResult {
+  private static final class ChunkedStatementResult implements StatementResult {
 
     private final DatabricksSqlHelper helper;
     private final String statementId;
@@ -130,7 +130,7 @@ public final class DatabricksSqlHelper {
     private long nextChunkIndex = 1;
     private Iterator<List<String>> currentRows;
 
-    private StatementResult(DatabricksSqlHelper helper, StatementResponse response)
+    private ChunkedStatementResult(DatabricksSqlHelper helper, StatementResponse response)
         throws IOException {
       ResultManifest manifest = response.getManifest();
       this.helper = helper;
@@ -143,20 +143,13 @@ public final class DatabricksSqlHelper {
       this.currentRows = helper.downloadRows(response.getResult()).iterator();
     }
 
-    /**
-     * Returns the cell at {@code index}, or null if {@code row} is null or {@code index} is out of
-     * bounds.
-     */
-    public static String cell(List<String> row, int index) {
-      return row == null || index < 0 || index >= row.size() ? null : row.get(index);
-    }
-
-    /** Returns the names of the result columns, in order. */
+    @Override
     public ImmutableList<String> columnNames() {
       return this.columnNames;
     }
 
     /** Returns the next result row, downloading the next chunk when needed, or null at the end. */
+    @Override
     public List<String> nextRow() throws IOException {
       while (!currentRows.hasNext()) {
         if (nextChunkIndex >= totalChunkCount) {
@@ -195,9 +188,14 @@ public final class DatabricksSqlHelper {
    * statement and throws an {@link InterruptedIOException} if the thread is interrupted while the
    * statement runs.
    */
+  @Override
   public StatementResult executeSqlInCatalog(String catalog, String sql) throws IOException {
-    return new StatementResult(this, executeToCompletion(catalog, sql));
+    return new ChunkedStatementResult(this, executeToCompletion(catalog, sql));
   }
+
+  /** Does nothing, because the statements of a SQL warehouse need no session. */
+  @Override
+  public void close() {}
 
   private List<List<String>> downloadChunkRows(String statementId, long chunkIndex)
       throws IOException {

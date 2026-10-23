@@ -20,7 +20,7 @@ import static com.google.edwmigration.dumper.application.dumper.connector.databr
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteIdentifierIfNeeded;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteQualifiedName;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.SqlQuoting.quoteStringLiteral;
-import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.StatementResult.cell;
+import static com.google.edwmigration.dumper.application.dumper.connector.databricks.client.StatementResult.cell;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.DatabricksFilter.HIVE_METASTORE_CATALOG;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.constructWarnings;
 import static com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.printCheckConstraints;
@@ -32,7 +32,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper.StatementResult;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.StatementResult;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.MetadataTask;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.MultiFileMetadataTask;
 import com.google.edwmigration.dumper.application.dumper.task.Task;
@@ -161,7 +161,7 @@ public final class HiveMetastoreTasks {
       if (this.schemas == null) {
         ImmutableList.Builder<String> builder = ImmutableList.builder();
         StatementResult rows =
-            handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SHOW SCHEMAS");
+            handle.sqlRunner().executeSqlInCatalog(HIVE_METASTORE_CATALOG, "SHOW SCHEMAS");
         for (List<String> row = rows.nextRow(); row != null; row = rows.nextRow()) {
           if (handle.filter().acceptsSchema(row.get(0))) {
             builder.add(row.get(0));
@@ -179,7 +179,7 @@ public final class HiveMetastoreTasks {
       throws IOException {
     String query = "SHOW TABLES IN " + quoteIdentifier(schema);
     ImmutableList.Builder<TableName> builder = ImmutableList.builder();
-    StatementResult rows = handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query);
+    StatementResult rows = handle.sqlRunner().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query);
     // The cells of a row are the schema, the table name and isTemporary.
     for (List<String> row = rows.nextRow(); row != null; row = rows.nextRow()) {
       if (!"true".equalsIgnoreCase(row.get(2))) {
@@ -192,7 +192,7 @@ public final class HiveMetastoreTasks {
   private static JsonNode describeTable(DatabricksHandle handle, TableName table)
       throws IOException {
     String query = "DESCRIBE TABLE EXTENDED " + table.quotedName() + " AS JSON";
-    StatementResult rows = handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query);
+    StatementResult rows = handle.sqlRunner().executeSqlInCatalog(HIVE_METASTORE_CATALOG, query);
     String json = cell(rows.nextRow(), 0);
     JsonNode description = json == null ? null : JSON_READER.readTree(json);
     if (description == null || !description.isObject()) {
@@ -211,9 +211,9 @@ public final class HiveMetastoreTasks {
     String message = failure.getMessage();
     if (message != null && message.contains(PARSE_SYNTAX_ERROR)) {
       throw new IOException(
-          "The SQL warehouse given with --warehouse can't run DESCRIBE TABLE ... AS JSON, which"
-              + " needs Databricks SQL or Databricks Runtime 16.2 or above. Use a SQL warehouse on"
-              + " the Current channel. "
+          "The SQL warehouse or cluster can't run DESCRIBE TABLE ... AS JSON, which needs"
+              + " Databricks SQL or Databricks Runtime 16.2 or above. Use a SQL warehouse on the"
+              + " Current channel, or a cluster on Databricks Runtime 16.4 LTS or above. "
               + message,
           failure);
     }
@@ -240,7 +240,7 @@ public final class HiveMetastoreTasks {
       String detailQuery = "DESCRIBE DETAIL " + table.quotedName();
       try {
         StatementResult detail =
-            handle.sqlHelper().executeSqlInCatalog(HIVE_METASTORE_CATALOG, detailQuery);
+            handle.sqlRunner().executeSqlInCatalog(HIVE_METASTORE_CATALOG, detailQuery);
         List<String> row = detail.nextRow();
         String detailSize = cell(row, detail.columnNames().indexOf(SIZE_IN_BYTES_DETAIL));
         if (detailSize != null) {
