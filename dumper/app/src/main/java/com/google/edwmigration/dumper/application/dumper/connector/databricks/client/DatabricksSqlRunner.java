@@ -21,9 +21,10 @@ import java.io.IOException;
 
 /**
  * Executes the SQL statements of the hive_metastore tasks, on a SQL warehouse ({@link
- * DatabricksSqlHelper}) or on an all-purpose cluster ({@link ClusterSqlRunner}). The calls throw
- * the {@code DatabricksException} of the SDK when the API returns an error, and an {@link
- * IOException} when a statement fails.
+ * DatabricksSqlHelper}) or on an all-purpose cluster ({@link ThriftSqlRunner}, or {@link
+ * ClusterSqlRunner} with the Command Execution API). The calls throw the {@code
+ * DatabricksException} of the SDK when the API returns an error, and an {@link IOException} when a
+ * statement fails.
  */
 public interface DatabricksSqlRunner extends Closeable {
 

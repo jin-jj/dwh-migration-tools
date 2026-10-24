@@ -18,8 +18,9 @@
 # MAGIC # Run the DWH migration dumper on this cluster (prototype)
 # MAGIC
 # MAGIC Runs the `databricks` connector of the dumper on the driver of this cluster. The
-# MAGIC hive_metastore statements run on this cluster with `--cluster`, so no SQL warehouse is needed;
-# MAGIC the Unity Catalog metadata is read with the REST API as usual.
+# MAGIC hive_metastore statements run on this cluster with `--cluster`, through its Thrift endpoint
+# MAGIC (the endpoint of the JDBC driver), so no SQL warehouse is needed; the Unity Catalog metadata
+# MAGIC is read with the REST API as usual.
 # MAGIC
 # MAGIC Prerequisites:
 # MAGIC - The notebook is attached to an all-purpose cluster in dedicated access mode, on Databricks
@@ -54,6 +55,9 @@ workspace = WorkspaceClient()
 host = workspace.config.host
 token = workspace.config.authenticate()["Authorization"].split(" ", 1)[1]
 cluster_id = spark.conf.get("spark.databricks.clusterUsageTags.clusterId")
+# The path of the Thrift endpoint of the cluster has the workspace ID, which isn't in the URL of an
+# AWS workspace.
+workspace_id = spark.conf.get("spark.databricks.clusterUsageTags.clusterOwnerOrgId", None)
 
 shutil.rmtree(WORK_DIR, ignore_errors=True)
 os.makedirs(WORK_DIR)
@@ -86,6 +90,8 @@ if catalogs:
 # authentication method.
 environment = {k: v for k, v in os.environ.items() if not k.startswith("DATABRICKS_")}
 environment["DATABRICKS_TOKEN"] = token
+if workspace_id:
+    environment["DATABRICKS_WORKSPACE_ID"] = workspace_id
 print(f"Running the dumper on cluster {cluster_id}: {' '.join(command)}")
 process = subprocess.Popen(
     command, cwd=WORK_DIR, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

@@ -37,9 +37,9 @@ import com.google.edwmigration.dumper.application.dumper.annotations.RespectsInp
 import com.google.edwmigration.dumper.application.dumper.connector.AbstractConnector;
 import com.google.edwmigration.dumper.application.dumper.connector.Connector;
 import com.google.edwmigration.dumper.application.dumper.connector.MetadataConnector;
-import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.ClusterSqlRunner;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlHelper;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.DatabricksSqlRunner;
+import com.google.edwmigration.dumper.application.dumper.connector.databricks.client.ThriftSqlRunner;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.DatabricksHandle.DatabricksFilter;
 import com.google.edwmigration.dumper.application.dumper.connector.databricks.metadata.HiveMetastoreTasks;
@@ -51,6 +51,7 @@ import com.google.edwmigration.dumper.application.dumper.task.Task;
 import com.google.edwmigration.dumper.plugin.ext.jdk.annotation.Description;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat;
 import com.google.edwmigration.dumper.plugin.lib.dumper.spi.DatabricksMetadataDumpFormat.CatalogsFormat;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -180,7 +181,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
   }
 
   @Override
-  public Handle open(ConnectorArguments arguments) {
+  public Handle open(ConnectorArguments arguments) throws IOException {
     Preconditions.checkNotNull(arguments, "ConnectorArguments was null.");
     WorkspaceClient client = createWorkspaceClient(arguments);
     DatabricksFilter filter = DatabricksFilter.fromArguments(arguments);
@@ -191,10 +192,11 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
 
   /**
    * Returns the SQL runner of the SQL warehouse of --warehouse or of the cluster of --cluster, or
-   * null when neither was given. Throws a usage error when the cluster can't run the statements.
+   * null when neither was given. A cluster runs the statements through its Thrift endpoint, the
+   * endpoint of the JDBC driver. Throws a usage error when the cluster can't run the statements.
    */
   private static DatabricksSqlRunner createSqlRunner(
-      WorkspaceClient client, ConnectorArguments arguments) {
+      WorkspaceClient client, ConnectorArguments arguments) throws IOException {
     String warehouseId = findWarehouse(arguments);
     if (warehouseId != null) {
       return new DatabricksSqlHelper(client, warehouseId);
@@ -206,7 +208,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     }
 
     checkCluster(client.clusters().get(clusterId));
-    return new ClusterSqlRunner(client, clusterId);
+    return new ThriftSqlRunner(client, clusterId);
   }
 
   /**
