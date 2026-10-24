@@ -70,6 +70,9 @@ public class DatabricksMetadataConnectorTest {
   public void checkCluster_acceptsRunningClusterOnRuntime16Point2OrAbove() {
     checkCluster(cluster(State.RUNNING, "16.2.x-scala2.12"));
     checkCluster(cluster(State.RUNNING, "17.3.x-photon-scala2.13"));
+    // x is the latest release of a major version.
+    checkCluster(cluster(State.RUNNING, "18.x-scala2.13"));
+    checkCluster(cluster(State.RUNNING, "16.x-scala2.12"));
   }
 
   @Test
@@ -79,6 +82,9 @@ public class DatabricksMetadataConnectorTest {
             MetadataDumperUsageException.class,
             () -> checkCluster(cluster(State.RUNNING, "15.4.x-scala2.12")));
     assertTrue(olderRuntime.getMessage(), olderRuntime.getMessage().contains("15.4.x-scala2.12"));
+    assertThrows(
+        MetadataDumperUsageException.class,
+        () -> checkCluster(cluster(State.RUNNING, "15.x-scala2.12")));
 
     MetadataDumperUsageException stopped =
         assertThrows(

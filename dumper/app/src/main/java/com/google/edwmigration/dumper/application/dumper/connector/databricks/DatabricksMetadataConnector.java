@@ -106,8 +106,10 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
   // DESCRIBE TABLE ... AS JSON needs Databricks Runtime 16.2 or above.
   private static final int MIN_RUNTIME_MAJOR_VERSION = 16;
   private static final int MIN_RUNTIME_MINOR_VERSION = 2;
-  // The spark_version of a cluster starts with the runtime version, such as 16.4.x-scala2.12.
-  private static final Pattern RUNTIME_VERSION_PATTERN = Pattern.compile("(\\d+)\\.(\\d+)");
+  // The spark_version of a cluster starts with the runtime version, such as 16.4.x-scala2.12, or
+  // with x as the minor version for the latest release of a major version, such as 18.x-scala2.13.
+  private static final Pattern RUNTIME_VERSION_PATTERN = Pattern.compile("(\\d+)\\.(\\d+|x)");
+  private static final String LATEST_MINOR_VERSION = "x";
   private static final ImmutableSet<DataSecurityMode> DEDICATED_ACCESS_MODES =
       ImmutableSet.of(
           DataSecurityMode.SINGLE_USER,
@@ -229,8 +231,7 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
               + " statements need Databricks Runtime 16.2 or above.",
           cluster.getClusterId(),
           sparkVersion);
-    } else if (isBelowMinimumRuntime(
-        Integer.parseInt(version.group(1)), Integer.parseInt(version.group(2)))) {
+    } else if (isBelowMinimumRuntime(Integer.parseInt(version.group(1)), version.group(2))) {
       throw new MetadataDumperUsageException(
           String.format(
               "The cluster %s runs Databricks Runtime %s, but the hive_metastore statements need"
@@ -247,9 +248,17 @@ public class DatabricksMetadataConnector extends AbstractConnector implements Me
     }
   }
 
-  private static boolean isBelowMinimumRuntime(int major, int minor) {
-    return major < MIN_RUNTIME_MAJOR_VERSION
-        || (major == MIN_RUNTIME_MAJOR_VERSION && minor < MIN_RUNTIME_MINOR_VERSION);
+  /**
+   * Returns whether a runtime version is below 16.2. The minor version x is the latest release of
+   * its major version, which is 16.4 for 16.
+   */
+  private static boolean isBelowMinimumRuntime(int major, String minor) {
+    if (major != MIN_RUNTIME_MAJOR_VERSION) {
+      return major < MIN_RUNTIME_MAJOR_VERSION;
+    }
+
+    return !LATEST_MINOR_VERSION.equals(minor)
+        && Integer.parseInt(minor) < MIN_RUNTIME_MINOR_VERSION;
   }
 
   static void validateNotAssessment(String connectorName, ConnectorArguments arguments) {
